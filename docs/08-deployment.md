@@ -30,15 +30,36 @@ vs `node dist/worker.js`).
 1. **CI** (`.github/workflows/ci.yml`): lint → typecheck → unit/integration tests
    (Postgres+Redis services) → `prisma migrate deploy` against test DB → build
    images for backend/admin → `flutter analyze` + `flutter test`.
-2. **CD**: on tag/main → push images to registry → run DB migrations as a
-   one-shot job → rolling deploy API + admin → smoke test `/api/v1/health`.
+2. **CD** (`.github/workflows/deploy.yml`, on push to main): `migrate` job →
+   build images in ACR → roll the Container Apps → smoke test `/api/v1/health`
+   and the admin `/download`.
+
+   The `migrate` job runs `prisma migrate deploy` against the **live** database
+   and gates `deploy-api`, so the schema is always ahead of the code. It gets in
+   by opening a firewall pinhole for the runner's own IP (the server otherwise
+   admits only Azure services) and closes it again in an `if: always()` step;
+   rules are named `gh-migrate-<run_id>` and any left behind by a hard-cancelled
+   run are swept on the next run. The connection string is read off the
+   `clams-api` container app's `database-url` secret with the same
+   `AZURE_CREDENTIALS` service principal — deliberately not a second copy in a
+   repo secret, which could drift and point the migration at the wrong database.
+
+   > Because migrations land **before** the rollout, the old code runs briefly
+   > against the new schema. Additive changes (new table/nullable column/index/
+   > enum value) are safe in one deploy; drops, renames and NOT NULL need
+   > expand→contract across two. See the header comment in `deploy.yml`.
 3. Mobile: build signed AAB/IPA in a separate pipeline; distribute via Play
    Console / TestFlight.
 
 ## 4. Database Operations
-- **Migrations**: `prisma migrate deploy` (forward-only in prod). Apply
-  `prisma/migrations/_custom/partial_indexes.sql` once after baseline (partial
-  unique indexes + pg_trgm). Use expand→migrate→contract for destructive changes.
+- **Migrations**: `prisma migrate deploy` (forward-only in prod), applied by the
+  `migrate` job on every push to main that touches `backend/**` — no hand-run
+  step. Use expand→migrate→contract for destructive changes, since the job runs
+  before the new image rolls. Partial unique indexes have no Prisma equivalent
+  and live as raw SQL inside the numbered migration that introduces them
+  (`uq_open_session_per_worker`, `uq_pending_manual_request_per_worker`).
+  Migration folders are hand-numbered (`0_init` … `7_manual_attendance_approval`),
+  not Prisma's timestamped default — follow that when adding one.
 - **Backups**: nightly base backup + WAL archiving → **PITR**. Test restores
   monthly. Retain per legal policy.
 - **Audit partitions**: monthly `audit_logs` partition pre-created by a scheduled

@@ -1,13 +1,30 @@
 name: Deploy
 
-# Builds the images in ACR and rolls the Azure Container Apps.
-# Needs the AZURE_CREDENTIALS repo secret (service principal with
+# Migrates the database, builds the images in ACR and rolls the Azure Container
+# Apps. Needs the AZURE_CREDENTIALS repo secret (service principal with
 # Contributor on the clams-rg resource group).
 #
 # Only the parts that actually changed are rebuilt: the `changes` job diffs the
 # push and every other job gates on it. A backend-only commit never pays for the
 # (slow) Flutter APK build; an admin-only commit reuses the APK already being
 # served at /download instead of rebuilding an identical one.
+#
+# ---------------------------------------------------------------------------
+# MIGRATIONS RUN BEFORE THE NEW IMAGE ROLLS, so for a short window the OLD code
+# is running against the NEW schema. Every migration must therefore be
+# backward-compatible with the code already deployed:
+#
+#   Safe in one deploy   — adding a table, a nullable column, an index, an enum
+#                          VALUE, a column with a DEFAULT.
+#   Needs two deploys    — dropping or renaming a column or table, making a
+#                          column NOT NULL, narrowing a type. Ship the code that
+#                          stops using it first, then the migration that removes
+#                          it. (Expand, then contract.)
+#
+# The alternative — migrating after the rollout — is worse: the new code would
+# be live against the old schema, which is a guaranteed outage rather than a
+# constraint to design around.
+# ---------------------------------------------------------------------------
 
 on:
   workflow_dispatch:
@@ -22,6 +39,7 @@ on:
 env:
   ACR: clamsacr8ca7
   RESOURCE_GROUP: clams-rg
+  PG_SERVER: clams-pg-8ca7
   API_BASE_URL: https://clams-api.lemoncoast-b230ecb6.centralindia.azurecontainerapps.io/api/v1
   ADMIN_BASE_URL: https://clams-admin.lemoncoast-b230ecb6.centralindia.azurecontainerapps.io
 
@@ -100,9 +118,93 @@ jobs:
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
 
+  migrate:
+    name: Migrate database
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # A rule name unique to this run, so a leftover from a hard-cancelled run
+    # can never be mistaken for the live one.
+    env:
+      FW_RULE: gh-migrate-${{ github.run_id }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # The server only admits Azure services, and a GitHub runner is not one.
+      # Open a pinhole for this runner's address and shut it again below.
+      #
+      # az 2.86 (May 2026) flips these flags: --name stops meaning the server and
+      # starts meaning the rule, with the server moving to -s. Which one a runner
+      # has is not ours to decide, so try the new form and fall back to the old.
+      - name: Open the firewall for this runner
+        run: |
+          pgfw() {
+            local verb="$1" rule="$2"; shift 2
+            az postgres flexible-server firewall-rule "$verb" \
+              -g "$RESOURCE_GROUP" -s "$PG_SERVER" -n "$rule" "$@" 2>/dev/null \
+            || az postgres flexible-server firewall-rule "$verb" \
+              -g "$RESOURCE_GROUP" --name "$PG_SERVER" --rule-name "$rule" "$@"
+          }
+
+          RUNNER_IP=$(curl -fsS https://api.ipify.org)
+          pgfw create "$FW_RULE" \
+            --start-ip-address "$RUNNER_IP" --end-ip-address "$RUNNER_IP" -o none
+
+          # Sweep pinholes abandoned by hard-cancelled runs. Safe because the
+          # concurrency group means no other deploy for this ref is in flight.
+          STALE=$(az postgres flexible-server firewall-rule list \
+                    -g "$RESOURCE_GROUP" -s "$PG_SERVER" \
+                    --query "[?starts_with(name,'gh-migrate-')].name" -o tsv 2>/dev/null \
+                  || az postgres flexible-server firewall-rule list \
+                    -g "$RESOURCE_GROUP" --name "$PG_SERVER" \
+                    --query "[?starts_with(name,'gh-migrate-')].name" -o tsv)
+          for rule in $STALE; do
+            if [ "$rule" != "$FW_RULE" ]; then
+              echo "Removing firewall rule left behind by an earlier run: $rule"
+              pgfw delete "$rule" --yes -o none || true
+            fi
+          done
+
+      # Read the connection string off the container app rather than keeping a
+      # second copy as a repo secret — the migration then cannot be pointed at a
+      # different database from the one the API actually uses.
+      - name: Apply migrations
+        run: |
+          az extension add --name containerapp --upgrade --only-show-errors
+          DATABASE_URL=$(az containerapp secret show -g "$RESOURCE_GROUP" -n clams-api \
+            --secret-name database-url --query value -o tsv)
+          echo "::add-mask::$DATABASE_URL"
+          test -n "$DATABASE_URL"
+          DATABASE_URL="$DATABASE_URL" npx prisma migrate deploy
+          DATABASE_URL="$DATABASE_URL" npx prisma migrate status
+
+      - name: Close the firewall
+        if: always()
+        run: |
+          az postgres flexible-server firewall-rule delete \
+            -g "$RESOURCE_GROUP" -s "$PG_SERVER" -n "$FW_RULE" --yes -o none 2>/dev/null \
+          || az postgres flexible-server firewall-rule delete \
+            -g "$RESOURCE_GROUP" --name "$PG_SERVER" --rule-name "$FW_RULE" --yes -o none \
+          || echo "::warning::Could not remove firewall rule $FW_RULE — remove it by hand."
+
   deploy-api:
     name: Deploy API
-    needs: changes
+    # The schema goes first: the new image must never start against a database
+    # that has not caught up. `migrate` runs under exactly this job's condition,
+    # so the two are always both-or-neither and a plain `needs` is enough.
+    needs: [changes, migrate]
     if: needs.changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
