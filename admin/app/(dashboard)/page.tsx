@@ -10,19 +10,16 @@ import {
   Card,
   Divider,
   Grid,
-  IconButton,
   List,
   ListItem,
   ListItemIcon,
   ListItemText,
   Skeleton,
   Stack,
-  TextField,
   Tooltip,
   Typography,
 } from '@mui/material';
 import { alpha, useTheme } from '@mui/material/styles';
-import { LineChart, BarChart, PieChart } from '@mui/x-charts';
 import EngineeringOutlinedIcon from '@mui/icons-material/EngineeringOutlined';
 import BadgeOutlinedIcon from '@mui/icons-material/BadgeOutlined';
 import GroupsOutlinedIcon from '@mui/icons-material/GroupsOutlined';
@@ -31,8 +28,6 @@ import ReportProblemOutlinedIcon from '@mui/icons-material/ReportProblemOutlined
 import RuleOutlinedIcon from '@mui/icons-material/RuleOutlined';
 import LocationCityOutlinedIcon from '@mui/icons-material/LocationCityOutlined';
 import MapOutlinedIcon from '@mui/icons-material/MapOutlined';
-import AccessTimeOutlinedIcon from '@mui/icons-material/AccessTimeOutlined';
-import HandymanOutlinedIcon from '@mui/icons-material/HandymanOutlined';
 import PersonAddAltOutlinedIcon from '@mui/icons-material/PersonAddAltOutlined';
 import AddLocationAltOutlinedIcon from '@mui/icons-material/AddLocationAltOutlined';
 import PlaylistAddCheckOutlinedIcon from '@mui/icons-material/PlaylistAddCheckOutlined';
@@ -40,13 +35,9 @@ import AssessmentOutlinedIcon from '@mui/icons-material/AssessmentOutlined';
 import DevicesOutlinedIcon from '@mui/icons-material/DevicesOutlined';
 import FileDownloadOutlinedIcon from '@mui/icons-material/FileDownloadOutlined';
 import CircleIcon from '@mui/icons-material/Circle';
-import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
-import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import { api } from '@/lib/api/browser';
 import { PageHeader } from '@/components/PageHeader';
 import { StatCard } from '@/components/ui/StatCard';
-import { ChartCard } from '@/components/ui/ChartCard';
-import { VendorTrendTooltip, VendorTrendData } from '@/components/VendorTrendTooltip';
 import { CorrectionRequest, Paginated, Site } from '@/lib/types';
 
 interface StatPerson {
@@ -62,28 +53,6 @@ interface StatBucket {
 interface DashboardStats {
   onSiteNow: { total: number; byCategory: Record<string, StatBucket> };
   missedLogout: { date: string; total: number; byCategory: Record<string, StatBucket> };
-}
-interface Manpower {
-  /** ISO days across the picked window, oldest first. */
-  days: string[];
-  trend: number[];
-  /** Echo of the window the server used (it clamps over-long spans). */
-  from: string;
-  to: string;
-  totalManDays: number;
-  totalToday: number;
-  manHoursToday: number;
-  activeTrades: number;
-  byTrade: { trade: string; count: number }[];
-  byVendor: { vendor: string; count: number }[];
-}
-interface DashboardCharts {
-  vendorTrend: VendorTrendData;
-  manpower: Manpower;
-  siteWise: { site: string; onSite: number }[];
-  distribution: { category: string; onSite: number }[];
-  correctionsBySite: { site: string; pending: number }[];
-  vendorToday: { vendor: string; count: number }[];
 }
 interface StorageUsageLite {
   level: 'OK' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
@@ -140,50 +109,10 @@ function PeopleTooltip({ title, bucket }: { title: string; bucket?: StatBucket }
   );
 }
 
-const CATEGORY_LABELS: Record<string, string> = {
-  WORKER: 'Workers',
-  STAFF: 'Staff',
-  VISITOR: 'Visitors',
-};
-
-/** Local-calendar YYYY-MM-DD — toISOString() would shift the day west of UTC. */
-function isoDay(d: Date) {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-function shiftDays(iso: string, delta: number) {
-  const d = new Date(`${iso}T00:00:00`);
-  d.setDate(d.getDate() + delta);
-  return isoDay(d);
-}
-
-/** The manpower panel's default window: the seven days ending today. */
-function thisWeek() {
-  const today = isoDay(new Date());
-  return { from: shiftDays(today, -6), to: today };
-}
-
 export default function DashboardPage() {
   const router = useRouter();
   const theme = useTheme();
   const [missedDismissed, setMissedDismissed] = React.useState(false);
-  const [range, setRange] = React.useState(thisWeek);
-
-  // Whole-window nudges: the common case is "show me last week", not picking
-  // two dates by hand. The span is preserved, so a custom window steps by its
-  // own length rather than snapping back to seven days.
-  const spanDays =
-    Math.round(
-      (new Date(`${range.to}T00:00:00`).getTime() - new Date(`${range.from}T00:00:00`).getTime()) /
-        86_400_000,
-    ) + 1;
-  const shiftWindow = (dir: -1 | 1) =>
-    setRange((r) => ({
-      from: shiftDays(r.from, dir * spanDays),
-      to: shiftDays(r.to, dir * spanDays),
-    }));
-  const atToday = range.to >= isoDay(new Date());
 
   const sites = useQuery({ queryKey: ['sites'], queryFn: () => api.get<Site[]>('/sites') });
   const pending = useQuery({
@@ -194,17 +123,6 @@ export default function DashboardPage() {
     queryKey: ['dashboard-stats'],
     queryFn: () => api.get<DashboardStats>('/attendance/dashboard-stats'),
     refetchInterval: 30000,
-  });
-  const charts = useQuery({
-    queryKey: ['dashboard-charts', range.from, range.to],
-    queryFn: () =>
-      api.get<DashboardCharts>(
-        `/attendance/dashboard-charts?from=${range.from}&to=${range.to}`,
-      ),
-    // Hold the previous window on screen while the next loads, so stepping
-    // through weeks does not flash empty cards.
-    placeholderData: (prev) => prev,
-    refetchInterval: 60000,
   });
   const storage = useQuery({
     queryKey: ['storage-usage'],
@@ -228,50 +146,6 @@ export default function DashboardPage() {
   const storageLevel = storage.data?.level;
   const storagePct =
     storage.data?.usedPercent != null ? Math.round(storage.data.usedPercent * 100) : null;
-
-  const vendorTrend = charts.data?.vendorTrend;
-  const vendorDays = vendorTrend?.days ?? [];
-  const vendorSeries = vendorTrend?.series ?? [];
-  // Categorical hues for vendor identity, ordered so neighbouring slots
-  // alternate warm/cool — validated for colour-vision separation on white.
-  const vendorPalette = [
-    '#3E5BA9',
-    '#B7791F',
-    '#0091AD',
-    '#A8452B',
-    '#7C4DBE',
-    '#1E7F4F',
-    '#9B2C6F',
-    '#2B6CB0',
-  ];
-  const pieColors = [
-    theme.palette.primary.main,
-    theme.palette.info.main,
-    theme.palette.warning.main,
-  ];
-
-  const manpower = charts.data?.manpower;
-  // "Mon 14" reads well for a week; past a fortnight the weekday is noise and
-  // the ticks collide, so fall back to "14 Jul".
-  const dayLabelOpts: Intl.DateTimeFormatOptions =
-    (manpower?.days.length ?? 0) > 14
-      ? { day: 'numeric', month: 'short' }
-      : { weekday: 'short', day: 'numeric' };
-  const manpowerDayLabels = (manpower?.days ?? []).map((d) =>
-    new Date(`${d}T00:00:00`).toLocaleDateString(undefined, dayLabelOpts),
-  );
-  const fmtDay = (d: string) =>
-    new Date(`${d}T00:00:00`).toLocaleDateString(undefined, {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric',
-    });
-  const manpowerPeriod = manpower
-    ? `${fmtDay(manpower.from)} – ${fmtDay(manpower.to)} · ${manpower.totalManDays} man-days`
-    : 'Labour per day, by trade and by vendor';
-  // Trades and vendors are ranked, so alternating the palette keeps adjacent
-  // bars/slices distinct without implying an order in the colour itself.
-  const tradeColors = vendorPalette;
 
   const quickActions = [
     { label: 'Add worker', icon: <PersonAddAltOutlinedIcon />, href: '/workers' },
@@ -436,336 +310,6 @@ export default function DashboardPage() {
             loading={sites.isLoading}
             href="/sites"
           />
-        </Grid>
-        <Grid item xs={6} sm={4} md={3}>
-          <StatCard
-            label="Logged man-hours"
-            value={manpower ? manpower.manHoursToday : '—'}
-            icon={<AccessTimeOutlinedIcon />}
-            hint="Labour hours today"
-            tone="info"
-            loading={charts.isLoading}
-          />
-        </Grid>
-        <Grid item xs={6} sm={4} md={3}>
-          <StatCard
-            label="Active trades"
-            value={manpower?.activeTrades ?? '—'}
-            icon={<HandymanOutlinedIcon />}
-            hint="Designations on site today"
-            tone="success"
-            loading={charts.isLoading}
-          />
-        </Grid>
-      </Grid>
-
-      {/* ---- Manpower: one box, three views of the same window ---- */}
-      <Box sx={{ mb: 2 }}>
-        <ChartCard
-          title="Manpower"
-          subtitle={manpowerPeriod}
-          loading={charts.isLoading}
-          empty={!charts.isLoading && (manpower?.trend ?? []).every((n) => n === 0)}
-          emptyText="No labour attendance in this period"
-          height={300}
-          action={
-            <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">
-              <Tooltip title="Previous period">
-                <IconButton size="small" onClick={() => shiftWindow(-1)}>
-                  <ChevronLeftIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-              <TextField
-                size="small"
-                type="date"
-                label="From"
-                value={range.from}
-                onChange={(e) => e.target.value && setRange((r) => ({ ...r, from: e.target.value }))}
-                InputLabelProps={{ shrink: true }}
-                sx={{ width: 150 }}
-              />
-              <TextField
-                size="small"
-                type="date"
-                label="To"
-                value={range.to}
-                onChange={(e) => e.target.value && setRange((r) => ({ ...r, to: e.target.value }))}
-                InputLabelProps={{ shrink: true }}
-                sx={{ width: 150 }}
-              />
-              <Tooltip title={atToday ? 'Already at the latest period' : 'Next period'}>
-                {/* span: a disabled button fires no events for Tooltip to hear. */}
-                <span>
-                  <IconButton size="small" onClick={() => shiftWindow(1)} disabled={atToday}>
-                    <ChevronRightIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-              <Button size="small" onClick={() => setRange(thisWeek())} disabled={atToday}>
-                This week
-              </Button>
-            </Stack>
-          }
-        >
-          <Grid container spacing={1}>
-            <Grid item xs={12} md={5}>
-              <Typography variant="caption" color="text.secondary" sx={{ pl: 1.5 }}>
-                Total manpower trend
-              </Typography>
-              <LineChart
-                height={260}
-                series={[
-                  {
-                    id: 'manpower',
-                    data: manpower?.trend ?? [],
-                    label: 'Labour',
-                    color: theme.palette.primary.main,
-                    curve: 'monotoneX',
-                    area: true,
-                  },
-                ]}
-                sx={{
-                  '& .MuiAreaElement-series-manpower': {
-                    fill: alpha(theme.palette.primary.main, 0.14),
-                  },
-                }}
-                xAxis={[{ scaleType: 'point', data: manpowerDayLabels }]}
-                margin={{ left: 40, right: 16, top: 16, bottom: 24 }}
-                slotProps={{ legend: { hidden: true } }}
-              />
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <Typography variant="caption" color="text.secondary" sx={{ pl: 1.5 }}>
-                Manpower by trade
-              </Typography>
-              <BarChart
-                height={260}
-                series={[
-                  {
-                    data: (manpower?.byTrade ?? []).map((t) => t.count),
-                    label: 'Labour',
-                  },
-                ]}
-                xAxis={[
-                  {
-                    scaleType: 'band',
-                    data: (manpower?.byTrade ?? []).map((t) => t.trade),
-                    // Trade names are long; angle them so they stay readable.
-                    tickLabelStyle: { angle: -35, textAnchor: 'end', fontSize: 10 },
-                    colorMap: {
-                      type: 'ordinal',
-                      colors: tradeColors,
-                    },
-                  },
-                ]}
-                margin={{ left: 40, right: 16, top: 16, bottom: 64 }}
-                slotProps={{ legend: { hidden: true } }}
-              />
-            </Grid>
-            <Grid item xs={12} md={3}>
-              <Typography variant="caption" color="text.secondary" sx={{ pl: 1.5 }}>
-                Manpower by vendor
-              </Typography>
-              <PieChart
-                height={260}
-                series={[
-                  {
-                    data: (manpower?.byVendor ?? []).map((v, i) => ({
-                      id: v.vendor,
-                      value: v.count,
-                      label: v.vendor,
-                      color: vendorPalette[i % vendorPalette.length],
-                    })),
-                    innerRadius: 52,
-                    paddingAngle: 2,
-                    cornerRadius: 3,
-                    // Share of the window's labour, matching the donut labels.
-                    valueFormatter: (v) => {
-                      const total = (manpower?.byVendor ?? []).reduce((a, b) => a + b.count, 0);
-                      const pct = total ? Math.round((v.value / total) * 100) : 0;
-                      return `${v.value} (${pct}%)`;
-                    },
-                  },
-                ]}
-                margin={{ left: 12, right: 100 }}
-              />
-            </Grid>
-          </Grid>
-        </ChartCard>
-      </Box>
-
-      {/* ---- Charts row 1 ---- */}
-      <Grid container spacing={2} sx={{ mb: 2 }}>
-        <Grid item xs={12} md={8}>
-          <ChartCard
-            title="Vendor-wise attendance — last 30 days"
-            subtitle="Man-days per day, by vendor"
-            loading={charts.isLoading}
-            empty={!charts.isLoading && vendorSeries.length === 0}
-            emptyText="No attendance recorded in the last 30 days"
-          >
-            <LineChart
-              height={260}
-              series={vendorSeries.map((s, i) => ({
-                id: `vendor-${i}`,
-                data: s.data,
-                label: s.vendor,
-                color: vendorPalette[i % vendorPalette.length],
-                curve: 'monotoneX',
-                area: true,
-              }))}
-              // One tinted fill per vendor. A single .MuiAreaElement-root rule
-              // would paint every series the same colour, so target each by id.
-              sx={Object.fromEntries(
-                vendorSeries.map((_, i) => [
-                  `& .MuiAreaElement-series-vendor-${i}`,
-                  { fill: alpha(vendorPalette[i % vendorPalette.length], 0.12) },
-                ]),
-              )}
-              xAxis={[
-                {
-                  scaleType: 'point',
-                  data: vendorDays.map((d) =>
-                    new Date(d).toLocaleDateString(undefined, {
-                      day: 'numeric',
-                      month: 'short',
-                    }),
-                  ),
-                  // 30 ticks will not fit — label roughly every fifth day.
-                  tickInterval: (_, i) => i % 5 === 0,
-                },
-              ]}
-              // Taller top margin than the other cards: vendor names make for a
-              // wide legend that would otherwise sit on top of the peaks.
-              margin={{ left: 40, right: 16, top: 44, bottom: 24 }}
-              // Axis trigger so the tooltip opens anywhere over a day, not only
-              // on a mark; the custom content adds the all-vendor total and the
-              // designation split for the vendor under the pointer.
-              tooltip={{ trigger: 'axis' }}
-              slots={{ axisContent: VendorTrendTooltip }}
-              slotProps={{
-                legend: { hidden: false },
-                axisContent: { trend: vendorTrend, palette: vendorPalette } as never,
-              }}
-            />
-          </ChartCard>
-        </Grid>
-        <Grid item xs={12} md={4}>
-          <ChartCard
-            title="Who's on site"
-            subtitle="Workers vs staff vs visitors"
-            loading={charts.isLoading}
-            empty={!charts.isLoading && (charts.data?.distribution.length ?? 0) === 0}
-            emptyText="No one is on site right now"
-          >
-            <PieChart
-              height={260}
-              series={[
-                {
-                  data: (charts.data?.distribution ?? []).map((d, i) => ({
-                    id: d.category,
-                    value: d.onSite,
-                    label: CATEGORY_LABELS[d.category] ?? d.category,
-                    color: pieColors[i % pieColors.length],
-                  })),
-                  innerRadius: 55,
-                  paddingAngle: 2,
-                  cornerRadius: 3,
-                },
-              ]}
-              margin={{ left: 12, right: 100 }}
-            />
-          </ChartCard>
-        </Grid>
-      </Grid>
-
-      {/* ---- Charts row 2 ---- */}
-      <Grid container spacing={2} sx={{ mb: 2 }}>
-        <Grid item xs={12} md={4}>
-          <ChartCard
-            title="People by site"
-            subtitle="On site right now"
-            loading={charts.isLoading}
-            empty={!charts.isLoading && (charts.data?.siteWise.length ?? 0) === 0}
-            emptyText="No open sessions"
-          >
-            <BarChart
-              height={240}
-              layout="horizontal"
-              series={[
-                {
-                  data: (charts.data?.siteWise ?? []).map((s) => s.onSite),
-                  label: 'On site',
-                  color: theme.palette.primary.main,
-                },
-              ]}
-              yAxis={[
-                {
-                  scaleType: 'band',
-                  data: (charts.data?.siteWise ?? []).map((s) => s.site),
-                },
-              ]}
-              margin={{ left: 110, right: 16, top: 8, bottom: 24 }}
-              slotProps={{ legend: { hidden: true } }}
-            />
-          </ChartCard>
-        </Grid>
-        <Grid item xs={12} md={4}>
-          <ChartCard
-            title="Pending corrections by site"
-            loading={charts.isLoading}
-            empty={!charts.isLoading && (charts.data?.correctionsBySite.length ?? 0) === 0}
-            emptyText="No pending corrections"
-          >
-            <BarChart
-              height={240}
-              layout="horizontal"
-              series={[
-                {
-                  data: (charts.data?.correctionsBySite ?? []).map((s) => s.pending),
-                  label: 'Pending',
-                  color: theme.palette.warning.main,
-                },
-              ]}
-              yAxis={[
-                {
-                  scaleType: 'band',
-                  data: (charts.data?.correctionsBySite ?? []).map((s) => s.site),
-                },
-              ]}
-              margin={{ left: 110, right: 16, top: 8, bottom: 24 }}
-              slotProps={{ legend: { hidden: true } }}
-            />
-          </ChartCard>
-        </Grid>
-        <Grid item xs={12} md={4}>
-          <ChartCard
-            title="Vendor-wise attendance"
-            subtitle="Sessions today"
-            loading={charts.isLoading}
-            empty={!charts.isLoading && (charts.data?.vendorToday.length ?? 0) === 0}
-            emptyText="No attendance today yet"
-          >
-            <BarChart
-              height={240}
-              layout="horizontal"
-              series={[
-                {
-                  data: (charts.data?.vendorToday ?? []).map((v) => v.count),
-                  label: 'Sessions',
-                  color: theme.palette.info.main,
-                },
-              ]}
-              yAxis={[
-                {
-                  scaleType: 'band',
-                  data: (charts.data?.vendorToday ?? []).map((v) => v.vendor),
-                },
-              ]}
-              margin={{ left: 110, right: 16, top: 8, bottom: 24 }}
-              slotProps={{ legend: { hidden: true } }}
-            />
-          </ChartCard>
         </Grid>
       </Grid>
 
