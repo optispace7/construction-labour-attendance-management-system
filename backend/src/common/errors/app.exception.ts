@@ -62,6 +62,33 @@ export const Errors = {
       detail: 'Tap occurred within the cooldown window.',
       meta: { cooldownRemainingSeconds },
     }),
+  /**
+   * The scan is real but lands inside the site's safety gap, so acting on it
+   * would flip the worker's state minutes after it last changed. The detail
+   * names the person and when the scan will be accepted, because that sentence
+   * is what the watchman reads at the gate.
+   */
+  tapTooSoon: (args: {
+    fullName: string;
+    blocked: 'LOGIN' | 'LOGOUT';
+    elapsedMinutes: number;
+    remainingSeconds: number;
+  }) =>
+    new AppException({
+      status: 409,
+      code: 'TAP_TOO_SOON',
+      title: args.blocked === 'LOGOUT' ? 'Too soon to log out' : 'Too soon to log back in',
+      detail:
+        `${args.fullName} ${args.blocked === 'LOGOUT' ? 'logged in' : 'logged out'} ` +
+        `${args.elapsedMinutes} minute(s) ago. ` +
+        `${args.blocked === 'LOGOUT' ? 'Logout' : 'Login'} is allowed in ` +
+        `${Math.ceil(args.remainingSeconds / 60)} minute(s).`,
+      meta: {
+        blocked: args.blocked,
+        elapsedMinutes: args.elapsedMinutes,
+        remainingSeconds: args.remainingSeconds,
+      },
+    }),
   alreadyOpen: (sessionId: string) =>
     new AppException({
       status: 409,

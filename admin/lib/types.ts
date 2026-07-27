@@ -43,6 +43,7 @@ export interface SiteSettings {
   verificationMode: 'MANUAL' | 'AUTO';
   autoLoginCountdownSeconds: number;
   duplicateTapCooldownSeconds: number;
+  safetyGapMinutes: number;
   geoEnforcement: boolean;
   geoRadiusMeters: number;
   photoVerificationMode: 'ALWAYS' | 'NEVER' | 'RANDOM';

@@ -15,7 +15,7 @@ class LocalDb {
     final path = p.join(dir.path, 'clams.db');
     final db = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onUpgrade: (db, oldVersion, _) async {
         if (oldVersion < 2) {
           await db.execute('ALTER TABLE cached_workers ADD COLUMN vendor_name TEXT');
@@ -26,6 +26,11 @@ class LocalDb {
           // Null for every existing row, i.e. "no expiry", until the next
           // roster sync fills it in. Never locks anyone out on upgrade.
           await db.execute('ALTER TABLE cached_workers ADD COLUMN validity_till TEXT');
+        }
+        if (oldVersion < 4) {
+          // Null on every queued event, i.e. "not overridden" — an upgrade must
+          // never change what an already-recorded punch means.
+          await db.execute('ALTER TABLE outbox ADD COLUMN override_reason TEXT');
         }
       },
       onCreate: (db, _) async {
@@ -40,6 +45,7 @@ class LocalDb {
             lat REAL, lng REAL, accuracy_m REAL,
             is_manual_backup INTEGER NOT NULL DEFAULT 0,
             manual_reason TEXT,
+            override_reason TEXT,
             synced INTEGER NOT NULL DEFAULT 0,
             attempts INTEGER NOT NULL DEFAULT 0,
             last_error TEXT
@@ -85,6 +91,7 @@ class LocalDb {
         'accuracy_m': e.accuracyM,
         'is_manual_backup': e.isManualBackup ? 1 : 0,
         'manual_reason': e.manualReason,
+        'override_reason': e.overrideReason,
         'synced': 0,
         'attempts': 0,
       },
@@ -172,17 +179,28 @@ class LocalDb {
     return rows.isEmpty ? null : rows.first['v'] as String?;
   }
 
-  /// Swap the whole `opensession:<workerId>` set for the server's list, in one
-  /// transaction. Dropping the old keys is the point: a worker scanned out on
-  /// another device must stop looking logged in here.
-  Future<void> replaceOpenSessions(Map<String, String> sessionIdByWorkerId) async {
+  /// Swap the whole open-session set for the server's list, in one transaction.
+  /// Dropping the old keys is the point: a worker scanned out on another device
+  /// must stop looking logged in here.
+  ///
+  /// The login time rides along with the session id because the safety gap is
+  /// measured from it — without it the device cannot tell a worker who arrived
+  /// two minutes ago from one who has been on site since dawn.
+  Future<void> replaceOpenSessions(
+    List<({String workerId, String sessionId, String? loginAt})> rows,
+  ) async {
     await _db.transaction((txn) async {
       await txn.delete('meta', where: "k LIKE 'opensession:%'");
+      await txn.delete('meta', where: "k LIKE 'loginat:%'");
       final batch = txn.batch();
-      sessionIdByWorkerId.forEach((workerId, sessionId) {
-        batch.insert('meta', {'k': 'opensession:$workerId', 'v': sessionId},
+      for (final r in rows) {
+        batch.insert('meta', {'k': 'opensession:${r.workerId}', 'v': r.sessionId},
             conflictAlgorithm: ConflictAlgorithm.replace);
-      });
+        if (r.loginAt != null) {
+          batch.insert('meta', {'k': 'loginat:${r.workerId}', 'v': r.loginAt!},
+              conflictAlgorithm: ConflictAlgorithm.replace);
+        }
+      }
       await batch.commit(noResult: true);
     });
   }

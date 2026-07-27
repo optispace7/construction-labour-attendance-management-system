@@ -251,10 +251,26 @@ export class AttendanceService {
           ? { id: openSession.id, loginAt: openSession.loginAt, siteId: openSession.siteId }
           : null,
         lastTap ? { clientEventTime: lastTap.clientEventTime, tapType: lastTap.tapType } : null,
+        this.safetyGapSeconds(settings, worker, dto),
       );
 
       if (decision.action === 'DUPLICATE') {
         throw Errors.duplicateTap(decision.cooldownRemainingSeconds);
+      }
+
+      if (decision.action === 'TOO_SOON') {
+        throw Errors.tapTooSoon({
+          fullName: worker.fullName,
+          blocked: decision.blocked,
+          elapsedMinutes: decision.elapsedMinutes,
+          remainingSeconds: decision.remainingSeconds,
+        });
+      }
+
+      // The watchman said "record it anyway". The tap is going through, so the
+      // reason belongs in the audit trail before the session moves.
+      if (dto.override?.reason) {
+        await this.auditOverride(organizationId, worker.id, dto, ctx, decision.action);
       }
 
       if (decision.action === 'LOGIN') {
@@ -284,12 +300,54 @@ export class AttendanceService {
     }
   }
 
+  /**
+   * The safety gap that applies to this particular tap, in seconds.
+   *
+   * Zero — i.e. off — in two cases. Visitors are day passes recorded for the
+   * register: a ten-minute visit is a normal visit, and holding one inside the
+   * gate would be worse than a slightly wrong time on an unpaid record. And a
+   * watchman who has answered the refusal with a written reason has already
+   * been told what the gap thinks; the override is his to make.
+   */
+  private safetyGapSeconds(settings: SiteSettings, worker: ResolvedWorker, dto: TapDto): number {
+    if (worker.category === 'VISITOR') return 0;
+    if (dto.override?.reason) return 0;
+    return Math.max(0, settings.safetyGapMinutes) * 60;
+  }
+
+  /** Records who waved a scan past the safety gap, and the reason they gave. */
+  private async auditOverride(
+    organizationId: string,
+    workerId: string,
+    dto: TapDto,
+    ctx: TapContext,
+    recorded: 'LOGIN' | 'LOGOUT',
+  ) {
+    try {
+      await this.audit.record({
+        organizationId,
+        action: 'ATTENDANCE_SAFETY_GAP_OVERRIDE',
+        entityType: 'Worker',
+        entityId: workerId,
+        deviceId: ctx.deviceId,
+        ipAddress: ctx.ip,
+        reason: dto.override?.reason,
+        newValue: { recorded, source: dto.source, siteId: dto.siteId, eventId: dto.eventId },
+      });
+    } catch (e) {
+      // Same rule as every other audit write here: a tap must not fail at the
+      // gate because a secondary write did.
+      this.logger.error(`Audit write failed for override worker=${workerId}: ${String(e)}`);
+    }
+  }
+
   private defaultSettings(siteId: string): SiteSettings {
     return {
       siteId,
       verificationMode: 'MANUAL',
       autoLoginCountdownSeconds: 10,
       duplicateTapCooldownSeconds: 30,
+      safetyGapMinutes: 10,
       geoEnforcement: false,
       geoRadiusMeters: 200,
       photoVerificationMode: 'RANDOM',
@@ -512,6 +570,41 @@ export class AttendanceService {
       loginAt: session?.loginAt ?? null,
       siteId: session?.siteId ?? null,
       lastTapAt: lastTap?.clientEventTime ?? null,
+      // The device needs the direction as well as the time: the safety gap runs
+      // from the last state *change*, so a LOGOUT starts the clock and an
+      // ignored duplicate does not.
+      lastTapType: lastTap?.tapType ?? null,
+    };
+  }
+
+  /**
+   * The scanner policy for one site, readable by a watchman's device.
+   *
+   * The full settings record sits behind SETTINGS_MANAGE, which a watchman does
+   * not have — so before this existed the app fell back to a hardcoded 30-second
+   * cooldown and quietly ignored whatever the admin panel said.
+   */
+  async siteConfig(user: AuthUser, siteId: string) {
+    if (!siteId) throw Errors.validation({ message: 'siteId is required' });
+    const site = await this.prisma.site.findFirst({
+      where: { id: siteId, organizationId: user.organizationId },
+      include: { settings: true },
+    });
+    if (!site) throw Errors.notFound('Site');
+    if (
+      user.role !== 'SUPER_ADMIN' &&
+      user.siteScopes.length > 0 &&
+      !user.siteScopes.includes(siteId)
+    ) {
+      throw Errors.forbidden('Site not in your scope');
+    }
+    const settings = site.settings ?? this.defaultSettings(siteId);
+    return {
+      siteId,
+      verificationMode: settings.verificationMode,
+      duplicateTapCooldownSeconds: settings.duplicateTapCooldownSeconds,
+      safetyGapMinutes: settings.safetyGapMinutes,
+      autoLoginCountdownSeconds: settings.autoLoginCountdownSeconds,
     };
   }
 

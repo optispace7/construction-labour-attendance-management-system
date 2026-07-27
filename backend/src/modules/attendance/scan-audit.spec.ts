@@ -31,6 +31,7 @@ const baseSite = {
     verificationMode: 'AUTO',
     autoLoginCountdownSeconds: 10,
     duplicateTapCooldownSeconds: 30,
+    safetyGapMinutes: 0,
     geoEnforcement: false,
     geoRadiusMeters: 200,
     photoVerificationMode: 'NEVER',

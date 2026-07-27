@@ -17,11 +17,16 @@ class ConfirmTapDialog extends StatelessWidget {
     required this.action,
     required this.identifier,
     this.worker,
+    this.stateIsStale = false,
   });
 
   final TapAction action;
   final String identifier;
   final WorkerCard? worker;
+
+  /// This device could not reach the server to check whether the worker is
+  /// already on site, so LOGIN/LOGOUT below is its own best guess.
+  final bool stateIsStale;
 
   bool get _isLogin => action == TapAction.login;
 
@@ -62,6 +67,35 @@ class ConfirmTapDialog extends StatelessWidget {
                 ],
               ),
             ),
+            // Say so when the decision above is a guess. Without this the
+            // watchman confirms "LOGIN", the server answers LOGOUT because
+            // another gate — or a Super Admin fix — moved the worker, and the
+            // toast a second later contradicts the screen he just approved.
+            if (stateIsStale) ...[
+              ClamsSpacing.gapMd,
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: ClamsColors.warningTint,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.cloud_off, color: ClamsColors.warning, size: 20),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'This phone could not check with the server, so this is its '
+                        'best guess. If another gate already scanned this person, '
+                        'the opposite may be recorded.',
+                        style: TextStyle(fontSize: 13, color: ClamsColors.textSecondary),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             ClamsSpacing.gapLg,
             if (w != null) ...[
               Row(

@@ -39,6 +39,18 @@ export class ManualDto {
   reason?: string;
 }
 
+/**
+ * The watchman's answer to a refused scan: record it anyway, and say why.
+ * Only lifts the safety gap — the duplicate-tap cooldown still applies, since
+ * overriding that is exactly the accident the gap exists to prevent.
+ */
+export class OverrideDto {
+  @ApiProperty({ description: 'Why the safety gap was overridden' })
+  @IsString()
+  @IsNotEmpty()
+  reason!: string;
+}
+
 export class TapDto {
   @ApiProperty({ description: 'Client-generated UUID v4 — idempotency key' })
   @IsUUID('4')
@@ -81,6 +93,12 @@ export class TapDto {
   @ValidateNested()
   @Type(() => ManualDto)
   manual?: ManualDto;
+
+  @ApiProperty({ required: false, type: OverrideDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => OverrideDto)
+  override?: OverrideDto;
 
   @ApiProperty({ required: false })
   @IsOptional()

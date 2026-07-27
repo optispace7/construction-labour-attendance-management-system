@@ -414,6 +414,10 @@ model SiteSettings {
   verificationMode            VerificationMode @default(MANUAL) @map("verification_mode")
   autoLoginCountdownSeconds   Int              @default(10) @map("auto_login_countdown_seconds")
   duplicateTapCooldownSeconds Int              @default(30) @map("duplicate_tap_cooldown_seconds")
+  // Minimum minutes between a worker's login and their logout (and between a
+  // logout and the next login). The cooldown above swallows a double scan a
+  // second later; this catches the one that lands a minute later. 0 = off.
+  safetyGapMinutes            Int              @default(10) @map("safety_gap_minutes")
   geoEnforcement              Boolean          @default(false) @map("geo_enforcement")
   geoRadiusMeters             Int              @default(200) @map("geo_radius_meters")
   photoVerificationMode       PhotoVerifyMode  @default(RANDOM) @map("photo_verification_mode")

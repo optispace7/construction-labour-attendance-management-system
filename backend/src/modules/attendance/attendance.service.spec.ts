@@ -34,6 +34,7 @@ const baseSite = {
     verificationMode: 'AUTO',
     autoLoginCountdownSeconds: 10,
     duplicateTapCooldownSeconds: 30,
+    safetyGapMinutes: 0,
     geoEnforcement: false,
     geoRadiusMeters: 200,
     photoVerificationMode: 'NEVER',
@@ -302,5 +303,112 @@ describe('AttendanceService.workerTapState', () => {
   it('rejects a missing workerId rather than scanning the whole org', async () => {
     const { svc } = buildService({});
     await expect(svc.workerTapState('org-1', '')).rejects.toBeInstanceOf(AppException);
+  });
+});
+
+/**
+ * The safety gap at service level: who it applies to, who is exempt, and what
+ * the watchman's override does. The window arithmetic itself is covered in
+ * engine/tap-decision.spec.ts.
+ */
+describe('AttendanceService safety gap', () => {
+  // Site runs a 10-minute gap; the worker logged in one minute before the tap.
+  const gappedSite = {
+    ...baseSite,
+    settings: { ...baseSite.settings, safetyGapMinutes: 10 },
+  };
+  const openSession = {
+    id: 'sess-1',
+    workerId: 'w1',
+    siteId: 'site-1',
+    state: 'OPEN',
+    loginAt: new Date('2026-06-09T02:29:00Z'),
+    workDate: new Date('2026-06-09T00:00:00Z'),
+    shift: null,
+  };
+
+  function buildGapped(over: any = {}) {
+    return buildService({
+      site: {
+        findFirst: jest.fn().mockResolvedValue(gappedSite),
+        findUnique: jest.fn().mockResolvedValue(gappedSite),
+      },
+      attendanceSession: {
+        findFirst: jest.fn().mockResolvedValue(openSession),
+        findUnique: jest.fn().mockResolvedValue(openSession),
+        create: jest.fn(),
+        update: jest.fn().mockResolvedValue({ ...openSession, workedMinutes: 1 }),
+      },
+      attendanceTap: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 'tap-1' }),
+        findFirst: jest.fn().mockResolvedValue({
+          clientEventTime: new Date('2026-06-09T02:29:00Z'),
+          tapType: 'LOGIN',
+        }),
+      },
+      ...over,
+    });
+  }
+
+  it('refuses to close a session opened a minute ago, and records no tap', async () => {
+    const { svc, prisma } = buildGapped();
+
+    await expect(svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' })).rejects.toMatchObject({
+      code: 'TAP_TOO_SOON',
+    });
+    expect(prisma.attendanceTap.create).not.toHaveBeenCalled();
+    expect(prisma.attendanceSession.update).not.toHaveBeenCalled();
+  });
+
+  it('exempts visitors — a ten-minute site visit is a normal visit', async () => {
+    const { svc, prisma } = buildGapped({
+      worker: {
+        findFirst: jest.fn().mockResolvedValue({ ...baseWorker, category: 'VISITOR' }),
+      },
+    });
+
+    const res = await svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' });
+
+    expect(res.result).toBe('LOGOUT_RECORDED');
+    expect(prisma.attendanceSession.update).toHaveBeenCalled();
+  });
+
+  it('lets the watchman record it anyway, and keeps his reason', async () => {
+    const { svc, prisma } = buildGapped();
+    const audit: any = (svc as any).audit;
+
+    const res = await svc.handleTap('org-1', makeDto({ override: { reason: 'Sent home sick' } }), {
+      deviceId: 'dev-1',
+    });
+
+    expect(res.result).toBe('LOGOUT_RECORDED');
+    expect(prisma.attendanceSession.update).toHaveBeenCalled();
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ATTENDANCE_SAFETY_GAP_OVERRIDE',
+        entityId: 'w1',
+        reason: 'Sent home sick',
+      }),
+    );
+  });
+
+  it('does not let an override wave through a duplicate tap as well', async () => {
+    // Overriding the cooldown would reopen the very accident the gap prevents:
+    // one badge, read twice in the same breath.
+    const { svc } = buildGapped({
+      attendanceTap: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 'tap-1' }),
+        findFirst: jest.fn().mockResolvedValue({
+          clientEventTime: new Date('2026-06-09T02:29:50Z'),
+          tapType: 'LOGIN',
+        }),
+      },
+    });
+
+    await expect(
+      svc.handleTap('org-1', makeDto({ override: { reason: 'anything' } }), { deviceId: 'dev-1' }),
+    ).rejects.toMatchObject({ code: 'DUPLICATE_TAP' });
   });
 });

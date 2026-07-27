@@ -75,6 +75,16 @@ export class AttendanceController {
     return this.attendance.openSessions(user.organizationId);
   }
 
+  // The scanner's copy of the site's tap policy — cooldown and safety gap.
+  // /sites/:id/settings needs SETTINGS_MANAGE, which a watchman does not have,
+  // so the app reads its rules here instead of hardcoding them.
+  @Get('site-config')
+  @RequiresDevice()
+  @RequirePermissions(Permission.ATTENDANCE_MARK)
+  siteConfig(@CurrentUser() user: AuthUser, @Query('siteId') siteId: string) {
+    return this.attendance.siteConfig(user, siteId);
+  }
+
   @Get('active')
   @RequirePermissions(Permission.ATTENDANCE_VIEW)
   active(

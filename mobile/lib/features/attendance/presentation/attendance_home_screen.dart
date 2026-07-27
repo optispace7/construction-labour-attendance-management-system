@@ -9,6 +9,7 @@ import '../../../core/providers.dart';
 import '../../../core/time/clock_guard.dart';
 import '../../../core/widgets/section_header.dart';
 import '../attendance_providers.dart';
+import '../data/attendance_repository.dart';
 import '../../auth/auth_controller.dart';
 import '../../device/device_service.dart';
 import '../domain/models.dart';
@@ -19,6 +20,7 @@ import 'worker_card_sheet.dart';
 import 'manual_search_sheet.dart';
 import 'confirm_tap_dialog.dart';
 import 'qr_scan_screen.dart';
+import 'too_soon_dialog.dart';
 
 class AttendanceHomeScreen extends ConsumerStatefulWidget {
   const AttendanceHomeScreen({super.key});
@@ -33,8 +35,11 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
   bool _busy = false;
   String _status = 'Scan a worker QR badge to begin';
 
-  // Site cooldown — refreshed from cached settings; default 30s.
-  final int _cooldownSeconds = 30;
+  /// The site's scanning rules from the admin panel — duplicate cooldown and
+  /// safety gap. Loaded from the local cache on entry and refreshed from the
+  /// server, so an admin changing them takes effect without a new build. The
+  /// initial value only stands until [_init] reads the cache.
+  ScanPolicy _policy = const ScanPolicy();
 
   DeviceState? _deviceState;
   String? _deviceId;
@@ -80,19 +85,33 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
       // devices. Without this a handset that goes offline would offer a fresh
       // LOGIN to someone another gate already scanned in.
       await ref.read(attendanceRepositoryProvider).refreshOpenSessions();
+      await _refreshPolicy();
       _lastCacheRefresh = DateTime.now();
     } catch (_) {
       // Offline — keep the existing cache; retried on the next cycle.
     }
   }
 
+  /// Re-read the site's cooldown and safety gap, then hold them for the scans
+  /// this screen makes. Cached, so a device that loses the network keeps
+  /// enforcing the last rules the admin set rather than falling back to guesses.
+  Future<void> _refreshPolicy() async {
+    if (_siteId == null) return;
+    final repo = ref.read(attendanceRepositoryProvider);
+    await repo.refreshPolicy(_siteId!);
+    final policy = await repo.policy();
+    if (mounted) setState(() => _policy = policy);
+  }
+
   Future<void> _init() async {
     final db = ref.read(localDbProvider);
     final siteId = await db.getMeta('active_site');
     final name = await db.getMeta('active_site_name') ?? '';
+    final policy = await ref.read(attendanceRepositoryProvider).policy();
     setState(() {
       _siteId = siteId;
       _siteName = name;
+      _policy = policy;
     });
     await _ensureDevice();
     // Kick a sync + fresh worker cache on entry (app start).
@@ -143,55 +162,62 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     );
   }
 
-  /// Continuous gate loop: scan → one dialog showing the worker's details and
-  /// LOGIN/LOGOUT with OK/Cancel → record on OK → camera straight back up for
-  /// the next badge. The watchman never taps "Scan" again between workers; the
-  /// only way out is the back button on the scanner.
+  /// Continuous gate loop: the camera stays up and hands each new badge to
+  /// [_reviewScan], so the watchman works a line of workers without tapping
+  /// "Scan" between them. The only way out is the back button on the scanner.
+  ///
+  /// The scanner keeps one camera for the whole queue and skips the badge it
+  /// just handled until it leaves the frame — see [QrScanScreen]. Pushing a
+  /// fresh scanner per scan, as this used to, meant the worker still standing
+  /// at the gate was read again and again until the cooldown lapsed, and the
+  /// read that got through scanned him back out a minute after he arrived.
   Future<void> _onQr() async {
     if (_siteId == null) return;
     if (await _clockIsWrong()) return;
-
-    while (true) {
-      if (!mounted) return;
-      final code = await Navigator.of(context).push<String>(
-        MaterialPageRoute(builder: (_) => const QrScanScreen()),
-      );
-      // Back button out of the scanner — done scanning.
-      if (code == null || !mounted) return;
-      // QR badges are "CLAMS:<EMP-ID>"; accept a bare code too.
-      final value = code.startsWith('CLAMS:') ? code.substring(6) : code;
-      await _reviewScan(value.trim());
-      // Recorded, cancelled or refused — either way, back to the camera.
-    }
+    if (!mounted) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(builder: (_) => QrScanScreen(onCode: _reviewScan)),
+    );
   }
 
   /// Handles one scanned badge: preview (writes nothing) → confirm → record.
-  Future<void> _reviewScan(String identifier) async {
+  /// Returns what the camera screen should show the watchman.
+  Future<ScanFeedback?> _reviewScan(String code) async {
+    // QR badges are "CLAMS:<EMP-ID>"; accept a bare code too.
+    final identifier = (code.startsWith('CLAMS:') ? code.substring(6) : code).trim();
+    if (identifier.isEmpty) return null;
+
     setState(() => _busy = true);
     final outcome = await ref.read(attendanceRepositoryProvider).preview(
           siteId: _siteId!,
           source: TapSource.qr,
           identifier: identifier,
-          cooldownSeconds: _cooldownSeconds,
+          policy: _policy,
         );
-    if (!mounted) return;
+    if (!mounted) return null;
     setState(() => _busy = false);
 
     switch (outcome.action) {
       case TapAction.duplicate:
         final name = outcome.worker?.fullName;
-        _toast(
-          '${name == null ? 'Duplicate scan' : '$name — duplicate scan'} ignored '
-          '(${outcome.cooldownRemainingSeconds}s cooldown)',
-          ClamsColors.warning,
-        );
         setState(() => _status =
             'Duplicate scan ignored (${outcome.cooldownRemainingSeconds}s cooldown)');
-        return;
+        return ScanFeedback.info(
+          name == null ? 'Duplicate scan ignored' : '$name — duplicate scan',
+          detail: 'Wait ${outcome.cooldownRemainingSeconds}s before scanning again.',
+        );
+
+      case TapAction.tooSoon:
+        return _reviewTooSoon(identifier, outcome);
+
       case TapAction.expired:
         setState(() => _status = 'ID card expired — login not recorded');
         await _showExpired(outcome.message);
-        return;
+        return ScanFeedback.error(
+          '${outcome.worker?.fullName ?? 'This card'} — ID expired',
+          detail: 'Login not recorded. Renew the card.',
+        );
+
       case TapAction.login:
       case TapAction.logout:
         // One screen: the worker's details AND the OK/Cancel decision.
@@ -202,29 +228,42 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
             action: outcome.action,
             identifier: identifier,
             worker: outcome.worker,
+            stateIsStale: outcome.stateIsStale,
           ),
         );
         if (ok != true) {
           if (mounted) setState(() => _status = 'Cancelled — nothing recorded');
-          return;
+          return const ScanFeedback.info('Cancelled', detail: 'Nothing was recorded.');
         }
-        await _handleTap(TapSource.qr, identifier);
-        return;
+        return _handleTap(TapSource.qr, identifier);
     }
   }
 
-  /// Brief confirmation that doesn't interrupt the next scan.
-  void _toast(String message, Color color) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(message),
-          backgroundColor: color,
-          duration: const Duration(seconds: 2),
-        ),
+  /// The scan is inside the site's safety gap. Show what happened and let the
+  /// watchman record it anyway with a reason — a worker really can be sent home
+  /// five minutes after arriving, and the gap must not make that unrecordable.
+  Future<ScanFeedback?> _reviewTooSoon(String identifier, TapOutcome outcome) async {
+    setState(() => _status = 'Too soon — nothing recorded');
+    final reason = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => TooSoonDialog(
+        blocked: outcome.blocked,
+        worker: outcome.worker,
+        elapsedMinutes: outcome.elapsedMinutes,
+        remainingSeconds: outcome.remainingSeconds,
+      ),
+    );
+    if (reason == null || !mounted) {
+      final mins = outcome.elapsedMinutes;
+      return ScanFeedback.warning(
+        '${outcome.worker?.fullName ?? 'This person'} — too soon',
+        detail: outcome.blocked == TapAction.login
+            ? 'Logged out ${mins}m ago. Nothing recorded.'
+            : 'Logged in ${mins}m ago. Nothing recorded.',
       );
+    }
+    return _handleTap(TapSource.qr, identifier, overrideReason: reason);
   }
 
   /// A wrong phone clock would record punches at the wrong time — refuse the
@@ -267,14 +306,15 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     );
   }
 
-  Future<void> _handleTap(
+  Future<ScanFeedback?> _handleTap(
     TapSource source,
     String identifier, {
     bool manualBackup = false,
     String? manualReason,
+    String? overrideReason,
   }) async {
-    if (_siteId == null) return;
-    if (source != TapSource.qr && await _clockIsWrong()) return;
+    if (_siteId == null) return null;
+    if (source != TapSource.qr && await _clockIsWrong()) return null;
 
     setState(() => _busy = true);
     final repo = ref.read(attendanceRepositoryProvider);
@@ -283,49 +323,62 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
       deviceId: (await ref.read(localDbProvider).getMeta('device_id')) ?? 'unregistered',
       source: source,
       identifier: identifier,
-      cooldownSeconds: _cooldownSeconds,
+      policy: _policy,
       manualBackup: manualBackup,
       manualReason: manualReason,
+      overrideReason: overrideReason,
     );
     ref.invalidate(pendingCountProvider);
-    if (!mounted) return;
+    if (!mounted) return null;
     setState(() => _busy = false);
 
     switch (outcome.action) {
       case TapAction.duplicate:
         setState(() => _status =
             'Duplicate tap ignored (${outcome.cooldownRemainingSeconds}s cooldown)');
-        break;
+        return ScanFeedback.info(
+          'Duplicate tap ignored',
+          detail: 'Wait ${outcome.cooldownRemainingSeconds}s before scanning again.',
+        );
+
+      case TapAction.tooSoon:
+        // The server refused it even though this device let it through — its
+        // view of the worker was out of date. Nothing was recorded.
+        setState(() => _status = 'Too soon — nothing recorded');
+        return ScanFeedback.warning(
+          '${outcome.worker?.fullName ?? 'This person'} — too soon',
+          detail: outcome.message ?? 'Nothing recorded.',
+        );
+
       case TapAction.expired:
         // Nothing was queued: the login is refused outright, not "pending".
         setState(() => _status = 'ID card expired — login not recorded');
         await _showExpired(outcome.message);
-        break;
+        return ScanFeedback.error(
+          '${outcome.worker?.fullName ?? 'This card'} — ID expired',
+          detail: 'Login not recorded. Renew the card.',
+        );
+
       case TapAction.login:
       case TapAction.logout:
         final verb = outcome.action == TapAction.login ? 'LOGIN' : 'LOGOUT';
-        setState(() => _status = outcome.worker == null
-            ? (outcome.message ?? 'Recorded')
-            : '$verb recorded: ${outcome.worker!.fullName}');
+        final name = outcome.worker?.fullName;
+        setState(() => _status =
+            name == null ? (outcome.message ?? 'Recorded') : '$verb recorded: $name');
         // A QR scan already showed the worker's details on the confirm screen —
-        // don't make the watchman dismiss the same person twice. Manual entry
-        // has no such screen, so it still gets the full card.
-        if (source == TapSource.qr) {
-          _toast(
-            outcome.worker == null
-                ? '$verb recorded'
-                : '$verb recorded: ${outcome.worker!.fullName}',
-            outcome.action == TapAction.login
-                ? ClamsColors.success
-                : ClamsColors.info,
-          );
-        } else if (outcome.worker != null) {
+        // don't make the watchman dismiss the same person twice; the camera
+        // banner tells him what was recorded. Manual entry has no such screen,
+        // so it still gets the full card.
+        if (source != TapSource.qr && outcome.worker != null) {
           await showModalBottomSheet(
             context: context,
             builder: (_) => WorkerCardSheet(worker: outcome.worker!, action: verb),
           );
+          return null;
         }
-        break;
+        return outcome.action == TapAction.login
+            ? ScanFeedback.success('LOGIN recorded', detail: name)
+            : ScanFeedback.info('LOGOUT recorded', detail: name);
     }
   }
 
@@ -421,6 +474,47 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
                   ],
                 ),
               ),
+            // Unsent punches mean this device stops asking the server who is on
+            // site — its answer would be older than what we already hold. Say so
+            // plainly: while this shows, LOGIN/LOGOUT is decided from this
+            // handset alone, and another gate's scans are invisible to it.
+            pending.maybeWhen(
+              data: (n) => n == 0
+                  ? const SizedBox.shrink()
+                  : StatusBanner(
+                      color: ClamsColors.warning,
+                      icon: Icons.cloud_off,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Working from this phone only',
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w500),
+                          ),
+                          ClamsSpacing.gapSm,
+                          Text(
+                            '$n punch(es) still to upload. Until they do, this phone '
+                            'cannot see scans made at other gates, so in/out may be '
+                            'wrong for someone scanned there.',
+                            style: const TextStyle(color: ClamsColors.textSecondary),
+                          ),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton(
+                              onPressed: _backgroundSync,
+                              style: TextButton.styleFrom(
+                                  foregroundColor: ClamsColors.accent),
+                              child: const Text('Sync now'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+              orElse: () => const SizedBox.shrink(),
+            ),
             ClamsSpacing.gapMd,
             const Icon(Icons.qr_code_scanner, size: 96, color: ClamsColors.primary),
             ClamsSpacing.gapXl,

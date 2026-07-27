@@ -86,6 +86,23 @@ DateTime? _parseDay(Object? v) {
   return DateTime.tryParse(v);
 }
 
+/// The site's scanning rules, as set in the admin panel. Cached locally so the
+/// gate keeps following the configured policy after the device drops offline;
+/// the fallbacks match the server's own defaults for a site with no settings row.
+class ScanPolicy {
+  const ScanPolicy({this.cooldownSeconds = 30, this.safetyGapMinutes = 10});
+
+  final int cooldownSeconds;
+  final int safetyGapMinutes;
+
+  int get safetyGapSeconds => safetyGapMinutes * 60;
+
+  factory ScanPolicy.fromMap(Map<dynamic, dynamic> m) => ScanPolicy(
+        cooldownSeconds: (m['duplicateTapCooldownSeconds'] as num?)?.toInt() ?? 30,
+        safetyGapMinutes: (m['safetyGapMinutes'] as num?)?.toInt() ?? 10,
+      );
+}
+
 /// An attendance event queued in the local outbox (durable, idempotent).
 class OutboxEvent {
   const OutboxEvent({
@@ -100,6 +117,7 @@ class OutboxEvent {
     this.accuracyM,
     this.isManualBackup = false,
     this.manualReason,
+    this.overrideReason,
     this.synced = false,
     this.attempts = 0,
     this.lastError,
@@ -116,6 +134,11 @@ class OutboxEvent {
   final double? accuracyM;
   final bool isManualBackup;
   final String? manualReason;
+
+  /// Set when the watchman answered the safety-gap refusal with "record
+  /// anyway". Travels with the event so a tap that syncs hours later is still
+  /// accepted for the reason he gave at the gate.
+  final String? overrideReason;
   final bool synced;
   final int attempts;
   final String? lastError;
@@ -130,5 +153,7 @@ class OutboxEvent {
         if (lat != null && lng != null)
           'geo': {'lat': lat, 'lng': lng, if (accuracyM != null) 'accuracyM': accuracyM},
         'manual': {'isBackup': isManualBackup, 'reason': manualReason},
+        if (overrideReason != null && overrideReason!.isNotEmpty)
+          'override': {'reason': overrideReason},
       };
 }

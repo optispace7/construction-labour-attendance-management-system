@@ -69,6 +69,18 @@ export class UpdateSiteSettingsDto {
   @Max(600)
   duplicateTapCooldownSeconds!: number;
 
+  // Optional so an admin panel still serving the previous bundle during a
+  // rollout can save settings without wiping the gap it doesn't know about.
+  @ApiProperty({
+    default: 10,
+    description: 'Minutes before a worker can flip in/out again; 0 = off',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(240)
+  safetyGapMinutes?: number;
+
   @ApiProperty({ default: false })
   @IsBoolean()
   geoEnforcement!: boolean;

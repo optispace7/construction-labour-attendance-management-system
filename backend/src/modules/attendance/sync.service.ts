@@ -55,8 +55,16 @@ export class SyncService {
         }
       } catch (err) {
         if (err instanceof AppException) {
-          if (err.code === 'DUPLICATE_TAP') {
-            results.push({ eventId: event.eventId, status: 'DUPLICATE', detail: err.title });
+          // TAP_TOO_SOON rides with DUPLICATE_TAP: both mean "a real scan the
+          // rules say not to act on". The device drops the event rather than
+          // retrying it forever — and a replay from an old build that never
+          // knew about the safety gap is stopped here just the same.
+          if (err.code === 'DUPLICATE_TAP' || err.code === 'TAP_TOO_SOON') {
+            results.push({
+              eventId: event.eventId,
+              status: 'DUPLICATE',
+              detail: err.detail ?? err.title,
+            });
           } else if (err.code === 'WORKER_NOT_FOUND' || err.code === 'CONFLICT') {
             results.push({ eventId: event.eventId, status: 'CONFLICT', detail: err.title });
           } else {

@@ -18,12 +18,39 @@ class TapOutcome {
     this.cooldownRemainingSeconds = 0,
     this.requiresConfirm = false,
     this.message,
+    this.blocked,
+    this.remainingSeconds = 0,
+    this.elapsedMinutes = 0,
+    this.stateIsStale = false,
   });
   final TapAction action;
   final WorkerCard? worker;
   final int cooldownRemainingSeconds;
   final bool requiresConfirm;
   final String? message;
+
+  /// For [TapAction.tooSoon]: what the scan would have recorded, how long the
+  /// worker has been in their current state, and how long until it is allowed.
+  final TapAction? blocked;
+  final int remainingSeconds;
+  final int elapsedMinutes;
+
+  /// True when this device could NOT confirm the worker's live state with the
+  /// server, so LOGIN/LOGOUT is a guess from whatever it last heard. A tap made
+  /// on another gate — or a Super Admin fix in the panel — would not be in it.
+  final bool stateIsStale;
+
+  TapOutcome copyWith({TapAction? action, WorkerCard? worker}) => TapOutcome(
+        action: action ?? this.action,
+        worker: worker ?? this.worker,
+        cooldownRemainingSeconds: cooldownRemainingSeconds,
+        requiresConfirm: requiresConfirm,
+        message: message,
+        blocked: blocked,
+        remainingSeconds: remainingSeconds,
+        elapsedMinutes: elapsedMinutes,
+        stateIsStale: stateIsStale,
+      );
 }
 
 class AttendanceRepository {
@@ -93,25 +120,65 @@ class AttendanceRepository {
     return null;
   }
 
+  /// The site's scanning rules, last known. Read from the local cache so the
+  /// gate keeps enforcing what the admin panel says even with no network.
+  Future<ScanPolicy> policy() async {
+    final cooldown = int.tryParse(await _db.getMeta('policy:cooldownSeconds') ?? '');
+    final gap = int.tryParse(await _db.getMeta('policy:safetyGapMinutes') ?? '');
+    return ScanPolicy(
+      cooldownSeconds: cooldown ?? 30,
+      safetyGapMinutes: gap ?? 10,
+    );
+  }
+
+  /// Re-read the site's rules from the server and cache them.
+  ///
+  /// The full settings record sits behind an admin-only permission, so the app
+  /// asks the scanner-side endpoint instead. Until this existed the device used
+  /// a hardcoded 30-second cooldown and ignored the admin panel entirely.
+  Future<void> refreshPolicy(String siteId) async {
+    try {
+      final res = await _api.dio
+          .get('/attendance/site-config', queryParameters: {'siteId': siteId})
+          .timeout(_stateTimeout);
+      final data = res.data;
+      if (data is! Map) return;
+      final p = ScanPolicy.fromMap(data);
+      await _db.setMeta('policy:cooldownSeconds', '${p.cooldownSeconds}');
+      await _db.setMeta('policy:safetyGapMinutes', '${p.safetyGapMinutes}');
+    } catch (_) {
+      // Offline — keep the cached policy; retried on the next cycle.
+    }
+  }
+
   /// Pull one worker's live login state from the server into the local meta, so
-  /// the in/out decision below reflects taps made on other devices.
+  /// the in/out decision below reflects taps made on other devices, and Super
+  /// Admin repairs made in the panel.
   ///
   /// Best-effort and time-boxed: offline, or a server too slow to wait on at the
   /// gate, just leaves the local meta alone. Skipped entirely while the outbox
   /// still holds unsynced taps — the server hasn't seen those yet, so its answer
   /// would be staler than what this device already knows.
-  Future<void> _refreshWorkerState(String workerId) async {
+  ///
+  /// Returns false when the local view could not be confirmed, so the caller can
+  /// tell the operator that LOGIN/LOGOUT is a guess rather than let him find out
+  /// from a toast that contradicts the screen he just pressed OK on.
+  Future<bool> _refreshWorkerState(String workerId) async {
     try {
-      if (await _db.pendingCount() > 0) return;
+      if (await _db.pendingCount() > 0) return false;
       final res = await _api.dio
           .get('/attendance/worker-state', queryParameters: {'workerId': workerId})
           .timeout(_stateTimeout);
       final data = res.data;
-      if (data is! Map) return;
+      if (data is! Map) return false;
       await _db.setMeta('opensession:$workerId', (data['openSessionId'] as String?) ?? '');
+      await _db.setMeta('loginat:$workerId', (data['loginAt'] as String?) ?? '');
+      await _db.setMeta('lasttaptype:$workerId', (data['lastTapType'] as String?) ?? '');
       await _mergeLastTap(workerId, data['lastTapAt'] as String?);
+      return true;
     } catch (_) {
       // Offline/slow/unauthorised — keep the local view and decide from it.
+      return false;
     }
   }
 
@@ -136,11 +203,15 @@ class AttendanceRepository {
       if (await _db.pendingCount() > 0) return;
       final res = await _api.dio.get('/attendance/open-sessions');
       final rows = (res.data['data'] as List).cast<Map<String, dynamic>>();
-      await _db.replaceOpenSessions({
+      await _db.replaceOpenSessions([
         for (final r in rows)
           if (r['workerId'] is String && r['sessionId'] is String)
-            r['workerId'] as String: r['sessionId'] as String,
-      });
+            (
+              workerId: r['workerId'] as String,
+              sessionId: r['sessionId'] as String,
+              loginAt: r['loginAt'] as String?,
+            ),
+      ]);
     } catch (_) {
       // Offline — the per-scan refresh picks this up once there's a network.
     }
@@ -155,8 +226,9 @@ class AttendanceRepository {
     required String siteId,
     required TapSource source,
     required String identifier,
-    required int cooldownSeconds,
+    required ScanPolicy policy,
     required DateTime now,
+    String? overrideReason,
   }) async {
     final worker = await resolve(source, identifier);
 
@@ -164,18 +236,34 @@ class AttendanceRepository {
     // this one never saw. Refresh from the server first so the local meta is
     // the org-wide truth, not just this handset's history — otherwise a worker
     // logged in at gate A gets offered another LOGIN at gate B.
-    if (worker != null) await _refreshWorkerState(worker.id);
+    final fresh = worker == null ? false : await _refreshWorkerState(worker.id);
 
     // Decide locally using the last tap recorded for this worker.
     final lastTapIso = worker == null ? null : await _db.getMeta('lasttap:${worker.id}');
+    final lastTapType = worker == null ? null : await _db.getMeta('lasttaptype:${worker.id}');
     final openSessionId = worker == null ? null : await _db.getMeta('opensession:${worker.id}');
+    final loginAtIso = worker == null ? null : await _db.getMeta('loginat:${worker.id}');
+    final hasOpenSession = openSessionId != null && openSessionId.isNotEmpty;
+
     final decision = decideTap(
       tapTime: now,
-      cooldownSeconds: cooldownSeconds,
-      openSession: openSessionId == null || openSessionId.isEmpty
+      cooldownSeconds: policy.cooldownSeconds,
+      openSession: !hasOpenSession
           ? null
-          : OpenSession(id: openSessionId, loginAt: now, siteId: siteId),
+          : OpenSession(
+              id: openSessionId,
+              // No cached login time means the session predates this build or
+              // came from a device that never recorded one. Falling back to
+              // `now` reads as "just changed", which would refuse a legitimate
+              // logout; treating it as long ago lets the scan through and
+              // leaves the server — which does know — to have the final word.
+              loginAt: DateTime.tryParse(loginAtIso ?? '')?.toUtc() ??
+                  now.subtract(const Duration(days: 1)),
+              siteId: siteId,
+            ),
       lastTapTime: lastTapIso == null ? null : DateTime.tryParse(lastTapIso),
+      lastTapType: lastTapType == null || lastTapType.isEmpty ? null : lastTapType,
+      safetyGapSeconds: _safetyGapSecondsFor(worker, policy, overrideReason),
     );
 
     if (decision.action == TapAction.duplicate) {
@@ -183,6 +271,18 @@ class AttendanceRepository {
         action: TapAction.duplicate,
         worker: worker,
         cooldownRemainingSeconds: decision.cooldownRemainingSeconds,
+        stateIsStale: !fresh,
+      );
+    }
+
+    if (decision.action == TapAction.tooSoon) {
+      return TapOutcome(
+        action: TapAction.tooSoon,
+        worker: worker,
+        blocked: decision.blocked,
+        remainingSeconds: decision.remainingSeconds,
+        elapsedMinutes: decision.elapsedMinutes,
+        stateIsStale: !fresh,
       );
     }
 
@@ -198,6 +298,7 @@ class AttendanceRepository {
         action: TapAction.expired,
         worker: worker,
         message: "${worker.fullName}'s ID card expired on $on. Renew the card before logging in.",
+        stateIsStale: !fresh,
       );
     }
 
@@ -205,7 +306,19 @@ class AttendanceRepository {
       action: decision.action,
       worker: worker,
       message: worker == null ? 'Unknown card — will resolve on sync' : null,
+      stateIsStale: !fresh,
     );
+  }
+
+  /// The safety gap in force for this scan, mirroring the server's rule.
+  ///
+  /// Visitors are exempt: a day pass is recorded for the register, and a
+  /// ten-minute visit is a normal visit. An override lifts it for one scan —
+  /// the watchman has read the refusal and given a reason.
+  int _safetyGapSecondsFor(WorkerCard? worker, ScanPolicy policy, String? overrideReason) {
+    if (overrideReason != null && overrideReason.isNotEmpty) return 0;
+    if (worker?.category == 'VISITOR') return 0;
+    return policy.safetyGapSeconds;
   }
 
   /// Dry run of [tap] for the confirmation prompt: says what the scan would
@@ -215,13 +328,13 @@ class AttendanceRepository {
     required String siteId,
     required TapSource source,
     required String identifier,
-    required int cooldownSeconds,
+    required ScanPolicy policy,
   }) {
     return _evaluate(
       siteId: siteId,
       source: source,
       identifier: identifier,
-      cooldownSeconds: cooldownSeconds,
+      policy: policy,
       now: DateTime.now().toUtc(),
     );
   }
@@ -233,20 +346,24 @@ class AttendanceRepository {
     required String deviceId,
     required TapSource source,
     required String identifier,
-    required int cooldownSeconds,
+    required ScanPolicy policy,
     bool manualBackup = false,
     String? manualReason,
+    String? overrideReason,
   }) async {
     final now = DateTime.now().toUtc();
     final outcome = await _evaluate(
       siteId: siteId,
       source: source,
       identifier: identifier,
-      cooldownSeconds: cooldownSeconds,
+      policy: policy,
       now: now,
+      overrideReason: overrideReason,
     );
-    // Refusals (duplicate tap, expired card) never reach the outbox.
-    if (outcome.action == TapAction.duplicate || outcome.action == TapAction.expired) {
+    // Refusals (duplicate tap, safety gap, expired card) never reach the outbox.
+    if (outcome.action == TapAction.duplicate ||
+        outcome.action == TapAction.tooSoon ||
+        outcome.action == TapAction.expired) {
       return outcome;
     }
     final worker = outcome.worker;
@@ -270,16 +387,34 @@ class AttendanceRepository {
       accuracyM: geo?.accuracyM,
       isManualBackup: manualBackup,
       manualReason: manualReason,
+      overrideReason: overrideReason,
     );
+
+    // What this device believed before the tap. Kept so a server refusal can
+    // put it back — otherwise the phone would go on showing a worker as logged
+    // out when the server never accepted the logout.
+    final previous = worker == null
+        ? null
+        : (
+            openSession: await _db.getMeta('opensession:${worker.id}') ?? '',
+            loginAt: await _db.getMeta('loginat:${worker.id}') ?? '',
+            lastTap: await _db.getMeta('lasttap:${worker.id}') ?? '',
+            lastTapType: await _db.getMeta('lasttaptype:${worker.id}') ?? '',
+          );
 
     // 1) DURABLE write FIRST — this is what guarantees "no attendance loss".
     await _db.enqueue(event);
     if (worker != null) {
       await _db.setMeta('lasttap:${worker.id}', now.toIso8601String());
       if (outcome.action == TapAction.login) {
+        await _db.setMeta('lasttaptype:${worker.id}', 'LOGIN');
         await _db.setMeta('opensession:${worker.id}', event.eventId);
+        // The safety gap runs from here until the server says otherwise.
+        await _db.setMeta('loginat:${worker.id}', now.toIso8601String());
       } else {
+        await _db.setMeta('lasttaptype:${worker.id}', 'LOGOUT');
         await _db.setMeta('opensession:${worker.id}', '');
+        await _db.setMeta('loginat:${worker.id}', '');
       }
     }
 
@@ -302,12 +437,57 @@ class AttendanceRepository {
         recorded = await _reconcile(outcome, worker, data);
       }
     } on DioException catch (e) {
+      final refusal = await _handleRefusal(e, event, worker, previous);
+      if (refusal != null) return refusal;
       // Stays pending — the sync engine retries and the server auto-confirms
       // offline-ingested logins.
       await _db.recordFailure(event.eventId, e.message ?? 'network');
     }
 
     return recorded;
+  }
+
+  /// The server said no to a tap this device had already accepted locally.
+  ///
+  /// Only two answers mean that: the tap fell inside the duplicate cooldown, or
+  /// inside the safety gap. Both are final — retrying cannot change them — so
+  /// the event is dropped rather than left to the sync engine, and the local
+  /// view is wound back to what it was before the scan. Returns null for
+  /// anything else (a network blip, a 5xx), which the caller retries as before.
+  Future<TapOutcome?> _handleRefusal(
+    DioException e,
+    OutboxEvent event,
+    WorkerCard? worker,
+    ({String openSession, String loginAt, String lastTap, String lastTapType})? previous,
+  ) async {
+    final body = e.response?.data;
+    final code = body is Map ? body['code'] : null;
+    if (code != 'TAP_TOO_SOON' && code != 'DUPLICATE_TAP') return null;
+
+    await _db.markSynced(event.eventId);
+    if (worker != null && previous != null) {
+      await _db.setMeta('opensession:${worker.id}', previous.openSession);
+      await _db.setMeta('loginat:${worker.id}', previous.loginAt);
+      await _db.setMeta('lasttap:${worker.id}', previous.lastTap);
+      await _db.setMeta('lasttaptype:${worker.id}', previous.lastTapType);
+    }
+
+    final meta = body is Map && body['meta'] is Map ? body['meta'] as Map : const {};
+    if (code == 'DUPLICATE_TAP') {
+      return TapOutcome(
+        action: TapAction.duplicate,
+        worker: worker,
+        cooldownRemainingSeconds: (meta['cooldownRemainingSeconds'] as num?)?.toInt() ?? 0,
+      );
+    }
+    return TapOutcome(
+      action: TapAction.tooSoon,
+      worker: worker,
+      blocked: meta['blocked'] == 'LOGIN' ? TapAction.login : TapAction.logout,
+      remainingSeconds: (meta['remainingSeconds'] as num?)?.toInt() ?? 0,
+      elapsedMinutes: (meta['elapsedMinutes'] as num?)?.toInt() ?? 0,
+      message: body is Map ? body['detail'] as String? : null,
+    );
   }
 
   /// Align the local view with what the server actually recorded for this tap.
@@ -322,13 +502,19 @@ class AttendanceRepository {
     final sessionId = data['sessionId'];
     if (result == 'LOGOUT_RECORDED') {
       await _db.setMeta('opensession:${worker.id}', '');
+      await _db.setMeta('loginat:${worker.id}', '');
+      await _db.setMeta('lasttaptype:${worker.id}', 'LOGOUT');
       if (local.action == TapAction.logout) return local;
-      return TapOutcome(action: TapAction.logout, worker: worker);
+      return local.copyWith(action: TapAction.logout, worker: worker);
     }
     if (result == 'LOGIN_RECORDED' || result == 'LOGIN_PENDING_CONFIRM') {
       if (sessionId is String) await _db.setMeta('opensession:${worker.id}', sessionId);
+      if (data['loginAt'] is String) {
+        await _db.setMeta('loginat:${worker.id}', data['loginAt'] as String);
+      }
+      await _db.setMeta('lasttaptype:${worker.id}', 'LOGIN');
       if (local.action == TapAction.login) return local;
-      return TapOutcome(action: TapAction.login, worker: worker);
+      return local.copyWith(action: TapAction.login, worker: worker);
     }
     return local;
   }

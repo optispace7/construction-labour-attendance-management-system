@@ -68,6 +68,7 @@ export default function SiteSettingsPage() {
         verificationMode: v.verificationMode,
         autoLoginCountdownSeconds: Number(v.autoLoginCountdownSeconds),
         duplicateTapCooldownSeconds: Number(v.duplicateTapCooldownSeconds),
+        safetyGapMinutes: Number(v.safetyGapMinutes),
         geoEnforcement: v.geoEnforcement,
         geoRadiusMeters: Number(v.geoRadiusMeters),
         photoVerificationMode: v.photoVerificationMode,
@@ -112,12 +113,34 @@ export default function SiteSettingsPage() {
                   {...register('autoLoginCountdownSeconds')}
                 />
               </Grid>
-              <Grid item xs={12} sm={6} md={4}>
+            </Grid>
+          </SectionCard>
+
+          <SectionCard
+            title="Double-scan protection"
+            subtitle="Two guards against one badge being read twice at the gate"
+          >
+            <Grid container spacing={2.5}>
+              <Grid item xs={12} md={6}>
                 <TextField
                   label="Duplicate-tap cooldown (s)"
                   type="number"
                   fullWidth
+                  helperText="Repeat scans of the same badge within this many seconds are ignored."
                   {...register('duplicateTapCooldownSeconds')}
+                />
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <TextField
+                  label="Safety gap (min)"
+                  type="number"
+                  fullWidth
+                  helperText={
+                    'How long a worker must stay logged in before a scan can log them out ' +
+                    '(and stay out before scanning back in). The watchman can override with a ' +
+                    'reason. Visitors are exempt. 0 turns it off.'
+                  }
+                  {...register('safetyGapMinutes')}
                 />
               </Grid>
             </Grid>
