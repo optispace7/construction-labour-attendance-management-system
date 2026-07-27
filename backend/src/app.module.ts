@@ -24,6 +24,7 @@ import { DevicesModule } from './modules/devices/devices.module';
 import { WorkersModule } from './modules/workers/workers.module';
 import { AttendanceModule } from './modules/attendance/attendance.module';
 import { CorrectionsModule } from './modules/corrections/corrections.module';
+import { ManualApprovalsModule } from './modules/manual-approvals/manual-approvals.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { AuditQueryModule } from './modules/audit/audit-query.module';
 import { DesignationsModule } from './modules/designations/designations.module';
@@ -52,6 +53,7 @@ import { StorageModule } from './modules/storage/storage.module';
     WorkersModule,
     AttendanceModule,
     CorrectionsModule,
+    ManualApprovalsModule,
     ReportsModule,
     AuditQueryModule,
     MailModule,

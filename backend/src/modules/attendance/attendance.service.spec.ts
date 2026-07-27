@@ -64,11 +64,16 @@ function buildService(prismaOver: any) {
       update: jest.fn(),
       findUnique: jest.fn(),
     },
+    manualAttendanceRequest: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue({ id: 'mreq-1' }),
+    },
     ...prismaOver,
   };
   const redis: any = { acquireLock: jest.fn().mockResolvedValue('tok'), releaseLock: jest.fn() };
   const audit: any = { record: jest.fn() };
-  return { svc: new AttendanceService(prisma, redis, audit), prisma };
+  const notifications: any = { create: jest.fn() };
+  return { svc: new AttendanceService(prisma, redis, audit, notifications), prisma, notifications };
 }
 
 describe('AttendanceService.handleTap', () => {
@@ -80,6 +85,97 @@ describe('AttendanceService.handleTap', () => {
     });
     const res = await svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' });
     expect(res.result).toBe('IDEMPOTENT_REPLAY');
+  });
+
+  // A typed-in worker code has no badge behind it, so it files a request and
+  // leaves attendance alone until a Safety Officer accepts it.
+  it('holds a hand-typed LOGIN for review instead of opening a session', async () => {
+    const { svc, prisma, notifications } = buildService({});
+    const res = await svc.handleTap(
+      'org-1',
+      makeDto({ source: TapSource.MANUAL, manual: { isBackup: true, reason: 'Forgot card' } }),
+      { deviceId: 'dev-1', photoRoll: 99 },
+    );
+
+    expect(res.result).toBe('MANUAL_PENDING_APPROVAL');
+    expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
+    // The tap is still written — it is the evidence that someone typed it in.
+    expect(prisma.attendanceTap.create).toHaveBeenCalled();
+    expect(prisma.manualAttendanceRequest.create).toHaveBeenCalled();
+    expect(prisma.manualAttendanceRequest.create.mock.calls[0][0].data).toMatchObject({
+      tapType: 'LOGIN',
+      reason: 'Forgot card',
+      sessionId: null,
+    });
+    expect(notifications.create).toHaveBeenCalled();
+  });
+
+  it('holds a hand-typed LOGOUT for review and leaves the session open', async () => {
+    const open = {
+      id: 'sess-1',
+      loginAt: new Date('2026-06-09T01:00:00Z'),
+      siteId: 'site-1',
+      shift: null,
+    };
+    const { svc, prisma } = buildService({
+      attendanceSession: {
+        findFirst: jest.fn().mockResolvedValue(open),
+        findUnique: jest.fn().mockResolvedValue(open),
+        create: jest.fn(),
+        update: jest.fn(),
+      },
+    });
+    const res = await svc.handleTap(
+      'org-1',
+      makeDto({ source: TapSource.MANUAL, manual: { isBackup: true, reason: 'Lost card' } }),
+      { deviceId: 'dev-1' },
+    );
+
+    expect(res.result).toBe('MANUAL_PENDING_APPROVAL');
+    expect(prisma.attendanceSession.update).not.toHaveBeenCalled();
+    // The logout pins the session it means to close, so approval cannot land on
+    // a different one later.
+    expect(prisma.manualAttendanceRequest.create.mock.calls[0][0].data).toMatchObject({
+      tapType: 'LOGOUT',
+      sessionId: 'sess-1',
+    });
+  });
+
+  it('refuses a second hand-typed punch while one is still waiting', async () => {
+    const { svc, prisma } = buildService({
+      manualAttendanceRequest: {
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ tapType: 'LOGIN', createdAt: new Date('2026-06-09T02:00:00Z') }),
+        create: jest.fn(),
+      },
+    });
+
+    await expect(
+      svc.handleTap('org-1', makeDto({ source: TapSource.MANUAL, manual: { isBackup: true } }), {
+        deviceId: 'dev-1',
+      }),
+    ).rejects.toMatchObject({ code: 'MANUAL_REVIEW_PENDING' });
+    // Nothing is written — the watchman is told at the gate.
+    expect(prisma.attendanceTap.create).not.toHaveBeenCalled();
+    expect(prisma.manualAttendanceRequest.create).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a hand-typed login on an expired card', async () => {
+    const { svc, prisma } = buildService({
+      worker: {
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ ...baseWorker, validityTill: new Date('2026-06-01T00:00:00Z') }),
+      },
+    });
+
+    await expect(
+      svc.handleTap('org-1', makeDto({ source: TapSource.MANUAL, manual: { isBackup: true } }), {
+        deviceId: 'dev-1',
+      }),
+    ).rejects.toMatchObject({ code: 'CARD_EXPIRED' });
+    expect(prisma.manualAttendanceRequest.create).not.toHaveBeenCalled();
   });
 
   it('records a LOGIN in AUTO mode (creates an open session)', async () => {

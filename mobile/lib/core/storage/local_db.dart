@@ -114,8 +114,36 @@ class LocalDb {
     );
   }
 
+  /// Drop an event the server has finally refused.
+  ///
+  /// Marking it synced would be a lie, and leaving it pending is worse than it
+  /// looks: a single event the server will never accept keeps [pendingCount]
+  /// above zero for good, and this device stops asking the server who is on site
+  /// — so every later scan is decided from its own history alone.
+  Future<void> discard(String eventId) async {
+    await _db.delete('outbox', where: 'event_id = ?', whereArgs: [eventId]);
+  }
+
   Future<int> pendingCount() async {
     final r = await _db.rawQuery('SELECT COUNT(*) c FROM outbox WHERE synced = 0');
+    return Sqflite.firstIntValue(r) ?? 0;
+  }
+
+  /// Unsent punches for one particular person.
+  ///
+  /// The server's view of a worker is only staler than this device's while this
+  /// device is holding punches for *that* worker. Anyone else's queue says
+  /// nothing about them, so the in/out decision asks this rather than
+  /// [pendingCount] — otherwise one stuck event anywhere blinds the device to
+  /// every other gate and to Super Admin fixes in the panel.
+  Future<int> pendingCountForIdentifiers(List<String> identifiers) async {
+    final ids = identifiers.where((s) => s.isNotEmpty).toList();
+    if (ids.isEmpty) return 0;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    final r = await _db.rawQuery(
+      'SELECT COUNT(*) c FROM outbox WHERE synced = 0 AND identifier IN ($placeholders)',
+      ids,
+    );
     return Sqflite.firstIntValue(r) ?? 0;
   }
 

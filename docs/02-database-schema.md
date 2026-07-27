@@ -54,6 +54,7 @@ CREATE TYPE correction_type  AS ENUM ('LOGIN','LOGOUT','MISSING','WRONG_SITE');
 CREATE TYPE correction_status AS ENUM ('PENDING','APPROVED','REJECTED','CANCELLED');
 CREATE TYPE correction_reason AS ENUM ('FORGOT_CARD','DEVICE_ISSUE','NETWORK_ISSUE','WRONG_SITE','SUPERVISOR_MISTAKE','OTHER');
 CREATE TYPE sync_event_status AS ENUM ('ACCEPTED','DUPLICATE','CONFLICT','REJECTED');
+CREATE TYPE manual_approval_status AS ENUM ('PENDING','APPROVED','REJECTED');
 ```
 
 ## 3. Tables (DDL)
@@ -327,6 +328,38 @@ CREATE TABLE correction_items (
 );
 ```
 
+### 3.13a manual_attendance_requests
+
+A punch a watchman typed in by hand rather than scanning a badge. The tap is
+stored as usual, but no session moves until this row is APPROVED — so a PENDING
+row means that person is *not* on the register, and *not* in the SOS headcount.
+
+`session_id` means different things by direction, because the session exists at
+different times: for a LOGOUT it is the open session the punch would close,
+pinned when the request is filed; for a LOGIN it is filled in on approval with
+the session that was created.
+
+```sql
+CREATE TABLE manual_attendance_requests (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id UUID NOT NULL,
+  site_id         UUID NOT NULL REFERENCES sites(id),
+  worker_id       UUID NOT NULL REFERENCES workers(id),
+  tap_id          UUID NOT NULL UNIQUE REFERENCES attendance_taps(id),
+  tap_type        tap_type NOT NULL,
+  session_id      UUID REFERENCES attendance_sessions(id),
+  recorded_at     TIMESTAMPTZ NOT NULL,   -- when the watchman entered it
+  reason          TEXT,                   -- the reason he typed at the gate
+  device_id       UUID,
+  status          manual_approval_status NOT NULL DEFAULT 'PENDING',
+  reviewed_by     UUID,
+  reviewed_at     TIMESTAMPTZ,
+  review_notes    TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL
+);
+```
+
 ### 3.14 audit_logs (append-only, partitioned monthly)
 ```sql
 CREATE TABLE audit_logs (
@@ -418,6 +451,11 @@ CREATE UNIQUE INDEX uq_credential_active
 CREATE UNIQUE INDEX uq_open_session_per_worker
   ON attendance_sessions (worker_id) WHERE state = 'OPEN';
 
+-- One un-reviewed manual entry per worker. A second hand-typed punch for
+-- someone already awaiting review is a mistake at the gate, not a queue.
+CREATE UNIQUE INDEX uq_pending_manual_request_per_worker
+  ON manual_attendance_requests (worker_id) WHERE status = 'PENDING';
+
 -- Reporting / lookups
 CREATE INDEX ix_sessions_worker_date  ON attendance_sessions (worker_id, work_date);
 CREATE INDEX ix_sessions_site_date    ON attendance_sessions (site_id, work_date);
@@ -438,6 +476,7 @@ CREATE INDEX ix_workers_mobile    ON workers (organization_id, mobile_number);
 **Key invariants enforced by DB:**
 - Idempotency: `UNIQUE (organization_id, event_id)` on taps.
 - No double-login: partial unique index `uq_open_session_per_worker`.
+- One un-reviewed manual entry per worker: `uq_pending_manual_request_per_worker`.
 - No double UID/QR among active workers.
 - Referential integrity prevents deleting orgs/sites with dependents
   (`ON DELETE RESTRICT`); workers use **soft delete** (`deleted_at`).

@@ -15,6 +15,8 @@ export enum Permission {
   SETTINGS_MANAGE = 'settings.manage',
   CORRECTION_REQUEST = 'correction.request',
   CORRECTION_APPROVE = 'correction.approve',
+  /** Accept or decline a manual (typed, un-scanned) punch. */
+  MANUAL_ATTENDANCE_REVIEW = 'manual.attendance.review',
   REPORTS_ALL = 'reports.all',
   REPORTS_SUMMARY = 'reports.summary',
   USER_MANAGE = 'user.manage',
@@ -41,6 +43,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.SETTINGS_MANAGE,
     Permission.CORRECTION_REQUEST,
     Permission.CORRECTION_APPROVE,
+    Permission.MANUAL_ATTENDANCE_REVIEW,
     Permission.REPORTS_ALL,
     Permission.DEVICE_MANAGE,
     Permission.USER_MANAGE,
@@ -57,6 +60,10 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   // approve their own corrections. They do hold WORKER_VIEW_SENSITIVE — they are
   // the ones who capture Aadhaar/PAN/bank at registration — and every reveal is
   // audited like any other role's.
+  //
+  // MANUAL_ATTENDANCE_REVIEW is theirs first: a punch typed in by hand at the
+  // gate is the Safety Officer's to accept or decline, because they are the one
+  // on site who can say whether that person was really there.
   SUPERVISOR: [
     Permission.WORKER_VIEW_LIMITED,
     Permission.WORKER_VIEW_SENSITIVE,
@@ -65,6 +72,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.VENDOR_MANAGE,
     Permission.ATTENDANCE_VIEW,
     Permission.CORRECTION_REQUEST,
+    Permission.MANUAL_ATTENDANCE_REVIEW,
     Permission.REPORTS_ALL,
     Permission.REPORTS_SUMMARY,
     Permission.EMERGENCY_VIEW,

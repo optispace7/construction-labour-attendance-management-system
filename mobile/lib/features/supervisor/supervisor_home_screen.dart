@@ -16,6 +16,7 @@ import '../printing/bulk_print_screen.dart';
 import '../printing/print_cards.dart';
 import '../sos/notification_watcher.dart';
 import '../sos/sos_button.dart';
+import 'manual_approvals_screen.dart';
 import 'supervisor_summary_screen.dart';
 import 'worker_edit_screen.dart';
 
@@ -41,6 +42,11 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
   /// authorizes this phone, so no worker data may load before that.
   bool _deviceBlocked = false;
   String? _deviceUid;
+
+  /// Hand-typed punches waiting on this officer. Every one of these is a person
+  /// who is NOT on the register — and so not in the fire headcount — until it is
+  /// reviewed, which is why it gets a banner rather than a menu item alone.
+  int _pendingManual = 0;
 
   @override
   void initState() {
@@ -87,6 +93,7 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
         _loading = false;
         _error = null;
       });
+      await _loadPendingManual();
     } on DioException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -98,6 +105,25 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
         _loading = false;
       });
     }
+  }
+
+  /// Best-effort: a queue this officer cannot count right now must not stop the
+  /// worker list from loading.
+  Future<void> _loadPendingManual() async {
+    try {
+      final res = await ref.read(apiClientProvider).dio.get('/manual-approvals/pending-count');
+      final n = (res.data is Map ? (res.data as Map)['pending'] as num? : null)?.toInt() ?? 0;
+      if (mounted) setState(() => _pendingManual = n);
+    } catch (_) {
+      // Offline or not permitted — leave the count as it was.
+    }
+  }
+
+  Future<void> _openManualApprovals() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const ManualApprovalsScreen()),
+    );
+    await _loadPendingManual();
   }
 
   Widget _deviceBlockedScreen() {
@@ -243,9 +269,21 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
         title: Text(_siteName.isEmpty ? 'Safety Officer' : 'Safety Officer · $_siteName'),
         actions: [
           const SosButton(compact: true),
+          IconButton(
+            tooltip: 'Manual entries waiting for approval',
+            onPressed: _openManualApprovals,
+            icon: Badge(
+              isLabelVisible: _pendingManual > 0,
+              label: Text('$_pendingManual'),
+              child: const Icon(Icons.rule),
+            ),
+          ),
           PopupMenuButton<String>(
             onSelected: (v) {
               switch (v) {
+                case 'manual':
+                  _openManualApprovals();
+                  break;
                 case 'bulk-print':
                   Navigator.of(context)
                       .push(MaterialPageRoute(builder: (_) => const BulkPrintScreen()));
@@ -263,6 +301,14 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
               }
             },
             itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'manual',
+                child: ListTile(
+                  leading: Icon(Icons.rule),
+                  title: Text('Manual entries'),
+                  subtitle: Text('Accept or decline hand-typed punches'),
+                ),
+              ),
               PopupMenuItem(
                 value: 'bulk-print',
                 child: ListTile(
@@ -306,6 +352,44 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
                     onRefresh: _load,
                     child: Column(
                       children: [
+                        // These people are not on the register until this is
+                        // cleared, so it sits above the worker list rather than
+                        // behind a menu.
+                        if (_pendingManual > 0)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(
+                                ClamsSpacing.md, ClamsSpacing.md, ClamsSpacing.md, 0),
+                            child: Material(
+                              color: ClamsColors.warningTint,
+                              borderRadius: BorderRadius.circular(ClamsRadius.card),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(ClamsRadius.card),
+                                onTap: _openManualApprovals,
+                                child: Padding(
+                                  padding: const EdgeInsets.all(ClamsSpacing.md),
+                                  child: Row(
+                                    children: [
+                                      const Icon(Icons.hourglass_top,
+                                          color: ClamsColors.warning),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Text(
+                                          '$_pendingManual manual '
+                                          '${_pendingManual == 1 ? 'entry is' : 'entries are'} '
+                                          'waiting for you. Until you accept them, those '
+                                          'people are not counted as on site.',
+                                          style: const TextStyle(
+                                              color: ClamsColors.textSecondary),
+                                        ),
+                                      ),
+                                      const Icon(Icons.chevron_right,
+                                          color: ClamsColors.textSecondary),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
                         Padding(
                           padding: const EdgeInsets.all(ClamsSpacing.md),
                           child: TextField(

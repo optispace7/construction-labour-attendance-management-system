@@ -71,10 +71,21 @@ attendance survives crash, restart, and network loss. Nothing is lost.
 - Background sync via `workmanager` (Android) + foreground triggers on
   connectivity regained / app resume.
 - Batches unsynced `local_taps` → `POST /sync/attendance` with `Idempotency-Key`.
-- On response, mark `ACCEPTED`/`DUPLICATE` as synced; `CONFLICT` flagged for the
-  supervisor/admin; `REJECTED` surfaced with reason.
-- Exponential backoff with jitter; capped retries; poison events quarantined
-  (kept, not dropped) and reported.
+- On response, mark `ACCEPTED`/`DUPLICATE` as synced. `CONFLICT` and `REJECTED`
+  are the server's **final word** (unresolvable identifier, expired card, an
+  entry already awaiting review) — the error is recorded and the event then
+  **leaves the outbox**. The server keeps its own record of what arrived, so
+  nothing is lost by dropping the local copy.
+- Exponential backoff with jitter; capped retries.
+
+> **Why terminal events must not linger.** They used to stay pending forever, and
+> the in/out decision skipped the server state refresh whenever *anything* was
+> pending. One event the server would never accept therefore switched off that
+> refresh for the life of the install: from then on the handset decided
+> LOGIN/LOGOUT purely from its own history, so a worker a Super Admin had logged
+> out in the admin panel went on being offered LOGOUT at the gate. The refresh
+> now also checks only for punches belonging to *that worker* — another person's
+> queue says nothing about them.
 
 ### Idempotency & dedupe
 - `eventId` generated once at tap time and reused on every retry → server dedupes,

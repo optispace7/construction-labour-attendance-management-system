@@ -32,8 +32,10 @@ export class SyncService {
         const res = await this.attendance.handleTap(organizationId, event, ctx);
         if (res.result === 'IDEMPOTENT_REPLAY') {
           // Heal MANUAL-mode logins whose session was never confirmed (the
-          // device was offline or died before the confirm round-trip).
-          if ('tapType' in res && res.tapType === 'LOGIN') {
+          // device was offline or died before the confirm round-trip). Never a
+          // hand-typed punch: that one is waiting on a Safety Officer, and
+          // confirm() refuses it — replaying it must not look like a failure.
+          if ('tapType' in res && res.tapType === 'LOGIN' && !event.manual?.isBackup) {
             try {
               await this.attendance.confirm(organizationId, event.eventId, ctx);
             } catch {
@@ -44,6 +46,8 @@ export class SyncService {
         } else {
           // Offline ingest has no interactive confirm step — the watchman
           // already verified the worker at scan time, so commit immediately.
+          // A manual entry is the exception: it comes back
+          // MANUAL_PENDING_APPROVAL and stays that way until reviewed.
           if (res.result === 'LOGIN_PENDING_CONFIRM') {
             await this.attendance.confirm(organizationId, event.eventId, ctx);
           }

@@ -165,6 +165,39 @@ export interface CorrectionRequest {
   createdAt: string;
 }
 
+/**
+ * A punch a watchman typed in by hand instead of scanning a badge.
+ *
+ * Nothing here is attendance yet: a PENDING row means the session has NOT been
+ * created (LOGIN) or closed (LOGOUT), so the person is absent from "on site now"
+ * and from the SOS headcount until it is accepted.
+ */
+export interface ManualAttendanceRequest {
+  id: string;
+  siteId: string;
+  workerId: string;
+  tapType: 'LOGIN' | 'LOGOUT';
+  sessionId?: string | null;
+  recordedAt: string;
+  reason?: string | null;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  reviewedBy?: string | null;
+  reviewedByName?: string | null;
+  reviewedAt?: string | null;
+  reviewNotes?: string | null;
+  createdAt: string;
+  worker?: {
+    id: string;
+    fullName: string;
+    workerCode: string;
+    photoUrl?: string | null;
+    category?: string | null;
+    designation?: { name: string } | null;
+    vendor?: { name: string } | null;
+  } | null;
+  site?: { id: string; name: string; timezone: string } | null;
+}
+
 export interface Paginated<T> {
   data: T[];
   nextCursor: string | null;

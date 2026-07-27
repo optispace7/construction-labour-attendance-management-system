@@ -89,6 +89,22 @@ export const Errors = {
         remainingSeconds: args.remainingSeconds,
       },
     }),
+  /**
+   * A manual punch for this worker is already waiting for a Safety Officer.
+   * Filing a second one would stack two un-reviewed entries against the same
+   * person, so the watchman is told to chase the first instead.
+   */
+  manualReviewPending: (fullName: string, tapType: 'LOGIN' | 'LOGOUT', since: Date) =>
+    new AppException({
+      status: 409,
+      code: 'MANUAL_REVIEW_PENDING',
+      title: 'Already waiting for approval',
+      detail:
+        `A manual ${tapType === 'LOGIN' ? 'login' : 'logout'} for ${fullName} is already ` +
+        'waiting for the Safety Officer to accept it. Ask them to review it before ' +
+        'entering another.',
+      meta: { tapType, since: since.toISOString() },
+    }),
   alreadyOpen: (sessionId: string) =>
     new AppException({
       status: 409,

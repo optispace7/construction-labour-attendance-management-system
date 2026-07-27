@@ -90,6 +90,12 @@ enum SyncEventStatus {
   REJECTED
 }
 
+enum ManualApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum CredentialKind {
   NFC_UID
   QR
@@ -159,6 +165,7 @@ model Site {
   assignments  WorkerSiteAssignment[]
   sessions     AttendanceSession[]    @relation("SessionSite")
   scopes       UserSiteScope[]
+  manualTaps   ManualAttendanceRequest[]
 
   @@unique([organizationId, code])
   @@map("sites")
@@ -349,6 +356,7 @@ model Worker {
   sessions     AttendanceSession[]
   taps         AttendanceTap[]
   corrections  CorrectionRequest[]
+  manualTaps   ManualAttendanceRequest[]
 
   @@unique([organizationId, workerCode])
   @@index([organizationId, mobileNumber])
@@ -458,6 +466,7 @@ model AttendanceTap {
   worker        Worker?            @relation(fields: [workerId], references: [id])
   loginSession  AttendanceSession? @relation("LoginTap")
   logoutSession AttendanceSession? @relation("LogoutTap")
+  manualRequest ManualAttendanceRequest?
 
   @@unique([organizationId, eventId])
   @@index([workerId, clientEventTime(sort: Desc)])
@@ -494,10 +503,55 @@ model AttendanceSession {
   loginTap    AttendanceTap?      @relation("LoginTap", fields: [loginTapId], references: [id])
   logoutTap   AttendanceTap?      @relation("LogoutTap", fields: [logoutTapId], references: [id])
   corrections CorrectionRequest[]
+  manualTaps  ManualAttendanceRequest[]
 
   @@index([workerId, workDate])
   @@index([siteId, workDate])
   @@map("attendance_sessions")
+}
+
+/// A manual punch a watchman entered by hand instead of scanning a badge, held
+/// until a Safety Officer (or an admin) accepts it.
+///
+/// Typing a worker code is the one way into attendance that no badge stands
+/// behind, so it does not move attendance on its own: the tap is persisted as
+/// evidence, and the session is created (LOGIN) or closed (LOGOUT) only when
+/// this row is APPROVED. A REJECTED row leaves attendance exactly as it was.
+///
+/// `sessionId` means different things by direction, because the session exists
+/// at different times: for a LOGOUT it is the open session the punch would
+/// close, pinned when the request is filed; for a LOGIN it is filled in on
+/// approval with the session that was created.
+///
+/// A partial unique index (raw SQL, see migration 7) allows only ONE PENDING row
+/// per worker — a second manual punch for someone already awaiting review is
+/// refused at the gate rather than queued behind the first.
+model ManualAttendanceRequest {
+  id             String               @id @default(uuid()) @db.Uuid
+  organizationId String               @map("organization_id") @db.Uuid
+  siteId         String               @map("site_id") @db.Uuid
+  workerId       String               @map("worker_id") @db.Uuid
+  tapId          String               @unique @map("tap_id") @db.Uuid
+  tapType        TapType              @map("tap_type")
+  sessionId      String?              @map("session_id") @db.Uuid
+  recordedAt     DateTime             @map("recorded_at") @db.Timestamptz
+  reason         String?
+  deviceId       String?              @map("device_id") @db.Uuid
+  status         ManualApprovalStatus @default(PENDING)
+  reviewedBy     String?              @map("reviewed_by") @db.Uuid
+  reviewedAt     DateTime?            @map("reviewed_at") @db.Timestamptz
+  reviewNotes    String?              @map("review_notes")
+  createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime             @updatedAt @map("updated_at") @db.Timestamptz
+
+  worker  Worker             @relation(fields: [workerId], references: [id])
+  site    Site               @relation(fields: [siteId], references: [id])
+  tap     AttendanceTap      @relation(fields: [tapId], references: [id])
+  session AttendanceSession? @relation(fields: [sessionId], references: [id])
+
+  @@index([organizationId, status])
+  @@index([workerId, status])
+  @@map("manual_attendance_requests")
 }
 
 // ---------------- Corrections ----------------

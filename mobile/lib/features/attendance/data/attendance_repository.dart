@@ -156,16 +156,30 @@ class AttendanceRepository {
   /// Admin repairs made in the panel.
   ///
   /// Best-effort and time-boxed: offline, or a server too slow to wait on at the
-  /// gate, just leaves the local meta alone. Skipped entirely while the outbox
-  /// still holds unsynced taps — the server hasn't seen those yet, so its answer
-  /// would be staler than what this device already knows.
+  /// gate, just leaves the local meta alone.
+  ///
+  /// Skipped only while THIS worker has punches still sitting in the outbox —
+  /// the server hasn't seen those, so its answer for them would be staler than
+  /// what this device already knows. It used to skip whenever the outbox held
+  /// anything at all, for anybody, which is how a phone could end up permanently
+  /// ignoring the server: one event the server would never accept sat unsent for
+  /// good, and from then on a worker a Super Admin had logged out in the panel
+  /// was still offered LOGOUT here, because the only history consulted was this
+  /// handset's own.
   ///
   /// Returns false when the local view could not be confirmed, so the caller can
   /// tell the operator that LOGIN/LOGOUT is a guess rather than let him find out
   /// from a toast that contradicts the screen he just pressed OK on.
-  Future<bool> _refreshWorkerState(String workerId) async {
+  Future<bool> _refreshWorkerState(WorkerCard worker) async {
+    final workerId = worker.id;
     try {
-      if (await _db.pendingCount() > 0) return false;
+      final unsentForThisWorker = await _db.pendingCountForIdentifiers([
+        worker.workerCode,
+        if (worker.nfcUid != null) worker.nfcUid!,
+        if (worker.qrIdentifier != null) worker.qrIdentifier!,
+      ]);
+      if (unsentForThisWorker > 0) return false;
+
       final res = await _api.dio
           .get('/attendance/worker-state', queryParameters: {'workerId': workerId})
           .timeout(_stateTimeout);
@@ -174,6 +188,14 @@ class AttendanceRepository {
       await _db.setMeta('opensession:$workerId', (data['openSessionId'] as String?) ?? '');
       await _db.setMeta('loginat:$workerId', (data['loginAt'] as String?) ?? '');
       await _db.setMeta('lasttaptype:$workerId', (data['lastTapType'] as String?) ?? '');
+      // A hand-typed punch still waiting on a Safety Officer. Held locally so
+      // the scanner can say why this person is not on the list yet, instead of
+      // silently offering to enter them a second time.
+      final pending = data['pendingManual'];
+      await _db.setMeta(
+        'pendingmanual:$workerId',
+        pending is Map ? (pending['tapType'] as String? ?? '') : '',
+      );
       await _mergeLastTap(workerId, data['lastTapAt'] as String?);
       return true;
     } catch (_) {
@@ -229,6 +251,7 @@ class AttendanceRepository {
     required ScanPolicy policy,
     required DateTime now,
     String? overrideReason,
+    bool manualBackup = false,
   }) async {
     final worker = await resolve(source, identifier);
 
@@ -236,7 +259,7 @@ class AttendanceRepository {
     // this one never saw. Refresh from the server first so the local meta is
     // the org-wide truth, not just this handset's history — otherwise a worker
     // logged in at gate A gets offered another LOGIN at gate B.
-    final fresh = worker == null ? false : await _refreshWorkerState(worker.id);
+    final fresh = worker == null ? false : await _refreshWorkerState(worker);
 
     // Decide locally using the last tap recorded for this worker.
     final lastTapIso = worker == null ? null : await _db.getMeta('lasttap:${worker.id}');
@@ -302,6 +325,32 @@ class AttendanceRepository {
       );
     }
 
+    // Someone already typed this person in and the Safety Officer has not ruled
+    // on it. A second hand-typed entry would stack two un-reviewed punches
+    // against one man, so it is refused here rather than at the server.
+    final waiting = worker == null ? null : await _db.getMeta('pendingmanual:${worker.id}');
+    if (manualBackup && waiting != null && waiting.isNotEmpty) {
+      return TapOutcome(
+        action: TapAction.awaitingReview,
+        worker: worker,
+        message:
+            'A manual ${waiting == 'LOGIN' ? 'login' : 'logout'} for ${worker!.fullName} is '
+            'already waiting for the Safety Officer to accept it.',
+        stateIsStale: !fresh,
+      );
+    }
+
+    // Typed in by hand: this says what the punch MEANS, not what it records.
+    // Nothing goes on the register until someone with review rights accepts it.
+    if (manualBackup) {
+      return TapOutcome(
+        action: TapAction.pendingApproval,
+        worker: worker,
+        blocked: decision.action,
+        stateIsStale: !fresh,
+      );
+    }
+
     return TapOutcome(
       action: decision.action,
       worker: worker,
@@ -359,11 +408,14 @@ class AttendanceRepository {
       policy: policy,
       now: now,
       overrideReason: overrideReason,
+      manualBackup: manualBackup,
     );
-    // Refusals (duplicate tap, safety gap, expired card) never reach the outbox.
+    // Refusals (duplicate tap, safety gap, expired card, a manual entry already
+    // waiting on review) never reach the outbox.
     if (outcome.action == TapAction.duplicate ||
         outcome.action == TapAction.tooSoon ||
-        outcome.action == TapAction.expired) {
+        outcome.action == TapAction.expired ||
+        outcome.action == TapAction.awaitingReview) {
       return outcome;
     }
     final worker = outcome.worker;
@@ -400,13 +452,20 @@ class AttendanceRepository {
             loginAt: await _db.getMeta('loginat:${worker.id}') ?? '',
             lastTap: await _db.getMeta('lasttap:${worker.id}') ?? '',
             lastTapType: await _db.getMeta('lasttaptype:${worker.id}') ?? '',
+            pendingManual: await _db.getMeta('pendingmanual:${worker.id}') ?? '',
           );
 
     // 1) DURABLE write FIRST — this is what guarantees "no attendance loss".
     await _db.enqueue(event);
     if (worker != null) {
       await _db.setMeta('lasttap:${worker.id}', now.toIso8601String());
-      if (outcome.action == TapAction.login) {
+      if (manualBackup) {
+        // A hand-typed punch changes nothing until a Safety Officer accepts it,
+        // so this phone's view of who is on site must not move either. Only the
+        // last-tap time is kept, so the cooldown still swallows a double entry.
+        await _db.setMeta('pendingmanual:${worker.id}',
+            outcome.blocked == TapAction.logout ? 'LOGOUT' : 'LOGIN');
+      } else if (outcome.action == TapAction.login) {
         await _db.setMeta('lasttaptype:${worker.id}', 'LOGIN');
         await _db.setMeta('opensession:${worker.id}', event.eventId);
         // The safety gap runs from here until the server says otherwise.
@@ -449,27 +508,37 @@ class AttendanceRepository {
 
   /// The server said no to a tap this device had already accepted locally.
   ///
-  /// Only two answers mean that: the tap fell inside the duplicate cooldown, or
-  /// inside the safety gap. Both are final — retrying cannot change them — so
-  /// the event is dropped rather than left to the sync engine, and the local
-  /// view is wound back to what it was before the scan. Returns null for
-  /// anything else (a network blip, a 5xx), which the caller retries as before.
+  /// Three answers mean that: the tap fell inside the duplicate cooldown, inside
+  /// the safety gap, or a hand-typed punch for this person is already waiting on
+  /// a Safety Officer. All are final — retrying cannot change them — so the
+  /// event is dropped rather than left to the sync engine, and the local view is
+  /// wound back to what it was before the scan. Returns null for anything else
+  /// (a network blip, a 5xx), which the caller retries as before.
   Future<TapOutcome?> _handleRefusal(
     DioException e,
     OutboxEvent event,
     WorkerCard? worker,
-    ({String openSession, String loginAt, String lastTap, String lastTapType})? previous,
+    ({
+      String openSession,
+      String loginAt,
+      String lastTap,
+      String lastTapType,
+      String pendingManual,
+    })? previous,
   ) async {
     final body = e.response?.data;
     final code = body is Map ? body['code'] : null;
-    if (code != 'TAP_TOO_SOON' && code != 'DUPLICATE_TAP') return null;
+    if (code != 'TAP_TOO_SOON' && code != 'DUPLICATE_TAP' && code != 'MANUAL_REVIEW_PENDING') {
+      return null;
+    }
 
-    await _db.markSynced(event.eventId);
+    await _db.discard(event.eventId);
     if (worker != null && previous != null) {
       await _db.setMeta('opensession:${worker.id}', previous.openSession);
       await _db.setMeta('loginat:${worker.id}', previous.loginAt);
       await _db.setMeta('lasttap:${worker.id}', previous.lastTap);
       await _db.setMeta('lasttaptype:${worker.id}', previous.lastTapType);
+      await _db.setMeta('pendingmanual:${worker.id}', previous.pendingManual);
     }
 
     final meta = body is Map && body['meta'] is Map ? body['meta'] as Map : const {};
@@ -478,6 +547,18 @@ class AttendanceRepository {
         action: TapAction.duplicate,
         worker: worker,
         cooldownRemainingSeconds: (meta['cooldownRemainingSeconds'] as num?)?.toInt() ?? 0,
+      );
+    }
+    if (code == 'MANUAL_REVIEW_PENDING') {
+      // The other gate got there first. Remember it, so this phone refuses the
+      // next one without a round trip.
+      if (worker != null) {
+        await _db.setMeta('pendingmanual:${worker.id}', (meta['tapType'] as String?) ?? 'LOGIN');
+      }
+      return TapOutcome(
+        action: TapAction.awaitingReview,
+        worker: worker,
+        message: body is Map ? body['detail'] as String? : null,
       );
     }
     return TapOutcome(
@@ -500,6 +581,16 @@ class AttendanceRepository {
   ) async {
     final result = data['result'];
     final sessionId = data['sessionId'];
+    if (result == 'MANUAL_PENDING_APPROVAL') {
+      // Filed, not recorded. Attendance has not moved, so neither does the local
+      // view — only the note that this person is waiting on a decision.
+      await _db.setMeta('pendingmanual:${worker.id}', (data['tapType'] as String?) ?? 'LOGIN');
+      return TapOutcome(
+        action: TapAction.pendingApproval,
+        worker: worker,
+        blocked: data['tapType'] == 'LOGOUT' ? TapAction.logout : TapAction.login,
+      );
+    }
     if (result == 'LOGOUT_RECORDED') {
       await _db.setMeta('opensession:${worker.id}', '');
       await _db.setMeta('loginat:${worker.id}', '');

@@ -37,6 +37,7 @@ REST + OpenAPI 3.1. Base path `/api/v1`. JSON only. All errors use
 | 404 | `NOT_FOUND` | entity missing |
 | 404 | `WORKER_NOT_FOUND` | UID/QR/code unresolved |
 | 409 | `DUPLICATE_TAP` | within cooldown |
+| 409 | `MANUAL_REVIEW_PENDING` | a hand-typed punch for this worker is already awaiting review |
 | 409 | `ALREADY_OPEN` | worker already has open session |
 | 409 | `IDEMPOTENT_REPLAY` | returns original result (not an error to client) |
 | 409 | `CONFLICT` | optimistic-lock/version mismatch |
@@ -177,6 +178,18 @@ Possible non-2xx: `DUPLICATE_TAP` (cooldown, includes remaining seconds),
 > In **AUTO** mode the login is recorded immediately (client runs the countdown
 > UI only; the server already committed, so a missed countdown never loses data).
 
+**Manual (typed) entries.** `manual.isBackup: true` — a watchman entering a
+worker code by hand instead of scanning — never records attendance directly.
+Whatever the site's verification mode, the response is:
+```json
+{ "result": "MANUAL_PENDING_APPROVAL", "requestId": "uuid", "tapType": "LOGIN",
+  "worker": { ... }, "recordedAt": "2026-06-09T08:01:22Z" }
+```
+The tap is persisted, but no session is created or closed until the request is
+accepted (§7a). `POST /attendance/confirm` refuses these — confirming is the
+watchman saying the face matches the badge, not an approval. Duplicate cooldown,
+safety gap and card expiry still refuse a manual entry exactly as they do a scan.
+
 ```
 POST /attendance/confirm     { eventId }                  → finalizes manual login
 GET  /attendance/active?siteId=                            → currently open sessions at site
@@ -242,6 +255,34 @@ Create request:
 **Invariant:** approval is the *only* path that mutates attendance from a
 correction; until then attendance is unchanged. Approval runs in a transaction:
 update session → recompute hours → write audit (old/new) → mark request APPROVED.
+
+## 7a. Manual attendance approvals
+
+```
+GET   /manual-approvals?status=PENDING|APPROVED|REJECTED&siteId=
+GET   /manual-approvals/pending-count                      → { "pending": 3 }
+POST  /manual-approvals/{id}/approve  { reviewNotes }      → creates/closes the session
+POST  /manual-approvals/{id}/reject   { reviewNotes }      → attendance unchanged
+```
+All four sit on `MANUAL_ATTENDANCE_REVIEW` — held by Safety Officer, Admin and
+Super Admin, and deliberately **not** by the watchman who files them. Not
+device-gated: reviewing is a decision, not a scan. Non–Super Admins see only
+their site scopes.
+
+**Invariant:** accepting is the *only* path that turns a typed entry into
+attendance. A `LOGIN` materialises a session at `recordedAt` (the moment the
+watchman entered it, not the review time); a `LOGOUT` closes the session pinned
+when the request was filed, and scores the hours. Declining writes nothing —
+the tap stays as evidence, and the row records who declined it and why.
+
+Approval re-reads live state and refuses (`CONFLICT`) if the world moved on:
+the worker already has an open session (for a `LOGIN`), or the pinned session
+was already closed by a real scan (for a `LOGOUT`). The reviewer declines the
+stale entry instead.
+
+**Consequence to design around:** while a request is `PENDING`, that person is
+absent from `/attendance/active`, from the dashboard headcount, and from the SOS
+roster. Both clients surface the pending count prominently for this reason.
 
 ## 8. Reports
 

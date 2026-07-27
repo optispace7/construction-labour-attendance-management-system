@@ -71,11 +71,21 @@ function build(over: any = {}, auditImpl?: jest.Mock) {
       update: jest.fn(),
       findUnique: jest.fn(),
     },
+    manualAttendanceRequest: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue({ id: 'mreq-1' }),
+    },
     ...over,
   };
   const redis: any = { acquireLock: jest.fn().mockResolvedValue('tok'), releaseLock: jest.fn() };
   const audit: any = { record: auditImpl ?? jest.fn() };
-  return { svc: new AttendanceService(prisma, redis, audit), prisma, audit };
+  const notifications: any = { create: jest.fn() };
+  return {
+    svc: new AttendanceService(prisma, redis, audit, notifications),
+    prisma,
+    audit,
+    notifications,
+  };
 }
 
 describe('scan auditing', () => {

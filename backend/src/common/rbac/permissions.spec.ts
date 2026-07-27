@@ -39,6 +39,14 @@ describe('RBAC permissions', () => {
     }
   });
 
+  // A watchman filing a manual punch must never be the one who waves it through.
+  it('the three reviewing roles can rule on a manual punch, and the watchman cannot', () => {
+    for (const role of ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'] as const) {
+      expect(roleHasPermission(role, Permission.MANUAL_ATTENDANCE_REVIEW)).toBe(true);
+    }
+    expect(roleHasPermission('WATCHMAN', Permission.MANUAL_ATTENDANCE_REVIEW)).toBe(false);
+  });
+
   it('site admin manages vendors', () => {
     expect(roleHasPermission('SITE_ADMIN', Permission.VENDOR_MANAGE)).toBe(true);
   });

@@ -29,7 +29,9 @@ Each row: scenario → detection → resolution → audit. "SoT" = server source
 | 23 | **Logout before login (sync order)** | Engine pairing by worker+day | Buffer logout; pair when login arrives; if orphaned → `CONFLICT` → correction | conflict |
 | 24 | **Geo outside fence (enforced)** | Distance > radius | `GEO_OUT_OF_RANGE` (422); blocked or flagged per policy | tap rejected/flagged |
 | 25 | **Photo verification offline** | Random/always triggers, no network | Capture stored locally, uploaded with sync; tap not blocked | photo linked on sync |
-| 26 | **Manual backup misuse** | `isManualBackup` taps | Mandatory reason + mandatory audit; admin report of all manual marks | audited |
+| 26 | **Manual backup misuse** | `isManualBackup` taps | Mandatory reason; the tap is stored but **no session is created or closed** — it files a `manual_attendance_requests` row that a Safety Officer / admin (`MANUAL_ATTENDANCE_REVIEW`) must accept before it becomes attendance. Declining leaves attendance untouched. Consequence: a pending entry is absent from "on site now" and the SOS headcount, and both apps say so | filed, then `MANUAL_ATTENDANCE_APPROVE` / `MANUAL_ATTENDANCE_REJECT` audited |
+| 26a | **Second manual entry while one is pending** | Partial unique index `uq_pending_manual_request_per_worker` | `MANUAL_REVIEW_PENDING` (409) at the gate; nothing written | refusal returned, no tap |
+| 26b | **Manual entry overtaken by a real scan** | Approval re-reads live state | Worker already OPEN (for a manual LOGIN) or already CLOSED (for a manual LOGOUT) → `CONFLICT` naming what happened; the reviewer declines the stale entry | audited on decline |
 | 27 | **Refresh token reuse** | Rotation reuse detection | Revoke entire token family → forces re-login | security event audited |
 | 28 | **Device revoked mid-shift** | Status check on each attendance call | `DEVICE_NOT_AUTHORIZED`; queued offline events from before still accepted by server if device was authorized at event time (policy) | events evaluated |
 | 29 | **Duplicate event after partial server write** | `event_id` unique | Idempotent — original result returned | single record |

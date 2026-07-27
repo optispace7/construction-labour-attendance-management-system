@@ -1,8 +1,12 @@
 /// Pure offline tap-decision logic, mirroring the backend engine so the device
 /// can decide LOGIN/LOGOUT/DUPLICATE/TOO_SOON instantly without a network
-/// round-trip. `expired` is not produced by [decideTap]: the repository raises
-/// it when the worker's ID card has lapsed, so the tap is never queued.
-enum TapAction { login, logout, duplicate, tooSoon, expired }
+/// round-trip.
+///
+/// The last three are not produced by [decideTap] — the repository raises them:
+/// `expired` when the worker's ID card has lapsed, so the tap is never queued;
+/// `pendingApproval` when a punch was typed in by hand and now waits on a Safety
+/// Officer; and `awaitingReview` when one is already waiting for that person.
+enum TapAction { login, logout, duplicate, tooSoon, expired, pendingApproval, awaitingReview }
 
 class OpenSession {
   const OpenSession({required this.id, required this.loginAt, required this.siteId});

@@ -218,6 +218,12 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
           detail: 'Login not recorded. Renew the card.',
         );
 
+      // Neither can arise from a badge scan — both belong to hand-typed entry,
+      // which never comes through here. Listed so the switch stays exhaustive.
+      case TapAction.pendingApproval:
+      case TapAction.awaitingReview:
+        return null;
+
       case TapAction.login:
       case TapAction.logout:
         // One screen: the worker's details AND the OK/Cancel decision.
@@ -290,6 +296,45 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     return true;
   }
 
+  /// Say plainly that nothing has been recorded yet. The watchman has just typed
+  /// somebody in; if he walks away thinking it is done, that man is missing from
+  /// the register — and from the fire headcount — until someone notices.
+  Future<void> _showPendingApproval(String name, String verb) {
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.hourglass_top, color: ClamsColors.warning, size: 40),
+        title: const Text('Sent for approval'),
+        content: Text(
+          "$name's $verb was entered by hand, so it is not on the register yet.\n\n"
+          'The Safety Officer has to accept it. Until they do, this person does '
+          'not count as on site.',
+        ),
+        actions: [
+          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showAlreadyWaiting(String? message) {
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.pending_actions, color: ClamsColors.warning, size: 40),
+        title: const Text('Already waiting for approval'),
+        content: Text(
+          message ??
+              'A manual entry for this person is already waiting for the Safety '
+                  'Officer. Ask them to review it before entering another.',
+        ),
+        actions: [
+          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _showExpired(String? message) {
     return showDialog<void>(
       context: context,
@@ -357,6 +402,24 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
         return ScanFeedback.error(
           '${outcome.worker?.fullName ?? 'This card'} — ID expired',
           detail: 'Login not recorded. Renew the card.',
+        );
+
+      case TapAction.pendingApproval:
+        final verb = outcome.blocked == TapAction.logout ? 'logout' : 'login';
+        final name = outcome.worker?.fullName ?? 'This person';
+        setState(() => _status = 'Sent for approval — not recorded yet');
+        await _showPendingApproval(name, verb);
+        return ScanFeedback.warning(
+          '$name — sent for approval',
+          detail: 'The $verb is not on the register until the Safety Officer accepts it.',
+        );
+
+      case TapAction.awaitingReview:
+        setState(() => _status = 'Already waiting for approval');
+        await _showAlreadyWaiting(outcome.message);
+        return ScanFeedback.warning(
+          '${outcome.worker?.fullName ?? 'This person'} — already waiting',
+          detail: 'Nothing was recorded.',
         );
 
       case TapAction.login:

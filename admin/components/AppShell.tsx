@@ -37,6 +37,7 @@ import DevicesOutlinedIcon from '@mui/icons-material/DevicesOutlined';
 import ApartmentOutlinedIcon from '@mui/icons-material/ApartmentOutlined';
 import StorageOutlinedIcon from '@mui/icons-material/StorageOutlined';
 import HistoryOutlinedIcon from '@mui/icons-material/HistoryOutlined';
+import PendingActionsOutlinedIcon from '@mui/icons-material/PendingActionsOutlined';
 import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined';
 import MenuOpenIcon from '@mui/icons-material/MenuOpen';
 import MenuIcon from '@mui/icons-material/Menu';
@@ -53,6 +54,7 @@ const NAV_ICONS: Record<string, React.ReactNode> = {
   '/attendance': <FactCheckOutlinedIcon />,
   '/attendance/fix': <BuildOutlinedIcon />,
   '/corrections': <RuleOutlinedIcon />,
+  '/attendance/manual-entries': <PendingActionsOutlinedIcon />,
   '/reports': <AssessmentOutlinedIcon />,
   '/workers': <EngineeringOutlinedIcon />,
   '/staff': <BadgeOutlinedIcon />,

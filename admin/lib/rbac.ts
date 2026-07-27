@@ -18,6 +18,15 @@ export const NAV_ITEMS: NavItem[] = [
   // Safety Officers raise corrections from the mobile app; the web list is for
   // the admins who approve them, so it stays off the Safety Officer's nav.
   { label: 'Corrections', href: '/corrections', roles: ['SUPER_ADMIN', 'SITE_ADMIN'], group: 'Operations' },
+  // Punches a watchman typed in by hand. The Safety Officer is the first
+  // reviewer and normally does this on the phone, but they keep the web page
+  // too — a run of entries is easier to work through at a desk.
+  {
+    label: 'Manual entries',
+    href: '/attendance/manual-entries',
+    roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
+    group: 'Operations',
+  },
   { label: 'Reports', href: '/reports', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'Operations' },
   { label: 'Workers', href: '/workers', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
   { label: 'Staff', href: '/staff', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },

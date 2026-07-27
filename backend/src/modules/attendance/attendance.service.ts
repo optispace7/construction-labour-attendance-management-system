@@ -10,6 +10,7 @@ import {
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { RedisService } from '../../infra/redis/redis.service';
 import { AuditService } from '../../common/audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
 import { businessDate, minutesOfDay } from '../../common/time/time.util';
@@ -68,6 +69,7 @@ export class AttendanceService {
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -244,6 +246,19 @@ export class AttendanceService {
         orderBy: { clientEventTime: 'desc' },
       });
 
+      // A hand-typed punch already waiting on the Safety Officer blocks another
+      // one for the same person. Checked before anything is written so the
+      // watchman is told at the gate, not after a tap is on record.
+      if (dto.manual?.isBackup) {
+        const waiting = await this.prisma.manualAttendanceRequest.findFirst({
+          where: { workerId: worker.id, status: 'PENDING' },
+          select: { tapType: true, createdAt: true },
+        });
+        if (waiting) {
+          throw Errors.manualReviewPending(worker.fullName, waiting.tapType, waiting.createdAt);
+        }
+      }
+
       const decision = decideTap(
         tapTime,
         settings.duplicateTapCooldownSeconds,
@@ -284,6 +299,20 @@ export class AttendanceService {
             worker.validityTill!.toISOString().slice(0, 10),
           );
         }
+      }
+
+      // Typed in by hand, with no badge behind it: file it for review rather
+      // than move attendance. Placed after every refusal above so a manual entry
+      // is held to the same rules a scan is — an expired card is still refused,
+      // and a duplicate is still a duplicate.
+      if (dto.manual?.isBackup) {
+        return await this.fileManualRequest(organizationId, site, worker, dto, ctx, tapTime, {
+          tapType: decision.action,
+          sessionId: decision.action === 'LOGOUT' ? decision.sessionId : null,
+        });
+      }
+
+      if (decision.action === 'LOGIN') {
         return await this.doLogin(organizationId, site, settings, worker, dto, ctx, tapTime);
       }
       return await this.doLogout(
@@ -339,6 +368,101 @@ export class AttendanceService {
       // gate because a secondary write did.
       this.logger.error(`Audit write failed for override worker=${workerId}: ${String(e)}`);
     }
+  }
+
+  /**
+   * Record a hand-typed punch as a request, not as attendance.
+   *
+   * Everything a scan writes is written here too — the tap, the geo fix, the
+   * reason — except the one thing that counts: the session. A badge is proof
+   * that a card was physically present; a typed worker code is proof of nothing,
+   * so the person does not go on or off the site's books until someone with
+   * review rights says they were really there.
+   *
+   * The consequence is deliberate and worth stating: between the entry and the
+   * approval, this worker is NOT in "on site now" and NOT in the SOS/fire
+   * headcount. The pending count is surfaced in both apps so nobody has to
+   * discover that from a headcount that does not add up.
+   */
+  private async fileManualRequest(
+    organizationId: string,
+    site: { id: string },
+    worker: ResolvedWorker,
+    dto: TapDto,
+    ctx: TapContext,
+    tapTime: Date,
+    intent: { tapType: 'LOGIN' | 'LOGOUT'; sessionId: string | null },
+  ) {
+    const tap = await this.prisma.attendanceTap.create({
+      data: {
+        eventId: dto.eventId,
+        organizationId,
+        siteId: site.id,
+        deviceId: dto.deviceId,
+        workerId: worker.id,
+        rawIdentifier: dto.identifier,
+        tapSource: dto.source,
+        tapType: intent.tapType,
+        clientEventTime: tapTime,
+        monotonicMs: dto.monotonicMs != null ? BigInt(dto.monotonicMs) : null,
+        latitude: dto.geo?.lat,
+        longitude: dto.geo?.lng,
+        geoAccuracyM: dto.geo?.accuracyM,
+        photoCapturedUrl: dto.photoUrl,
+        isManualBackup: true,
+        manualReason: dto.manual?.reason,
+      },
+    });
+
+    const request = await this.prisma.manualAttendanceRequest.create({
+      data: {
+        organizationId,
+        siteId: site.id,
+        workerId: worker.id,
+        tapId: tap.id,
+        tapType: intent.tapType,
+        // A logout pins the session it means to close; a login has none yet, so
+        // the column is filled in on approval with the session it created.
+        sessionId: intent.sessionId,
+        recordedAt: tapTime,
+        reason: dto.manual?.reason,
+        deviceId: dto.deviceId,
+      },
+    });
+
+    await this.maybeAuditManual(organizationId, ctx, worker.id, dto);
+
+    // Neither of these may sink a punch at the gate — same rule as every other
+    // secondary write in this service.
+    try {
+      await this.notifications.create({
+        organizationId,
+        siteId: site.id,
+        type: 'MANUAL_ATTENDANCE_PENDING',
+        title: `Manual ${intent.tapType === 'LOGIN' ? 'login' : 'logout'} needs approval`,
+        body:
+          `${worker.workerCode} ${worker.fullName} was entered by hand at the gate` +
+          `${dto.manual?.reason ? ` (${dto.manual.reason})` : ''}. ` +
+          'Accept or decline it so their attendance is recorded.',
+        data: {
+          requestId: request.id,
+          workerId: worker.id,
+          tapType: intent.tapType,
+          siteId: site.id,
+        },
+      });
+    } catch (e) {
+      this.logger.error(`Notification failed for manual request ${request.id}: ${String(e)}`);
+    }
+
+    return {
+      result: 'MANUAL_PENDING_APPROVAL' as const,
+      requestId: request.id,
+      eventId: dto.eventId,
+      tapType: intent.tapType,
+      worker: this.workerCard(worker),
+      recordedAt: tapTime,
+    };
   }
 
   private defaultSettings(siteId: string): SiteSettings {
@@ -553,7 +677,7 @@ export class AttendanceService {
    */
   async workerTapState(organizationId: string, workerId: string) {
     if (!workerId) throw Errors.validation({ message: 'workerId is required' });
-    const [session, lastTap] = await Promise.all([
+    const [session, lastTap, pendingManual] = await Promise.all([
       this.prisma.attendanceSession.findFirst({
         where: { organizationId, workerId, state: 'OPEN' },
         select: { id: true, loginAt: true, siteId: true },
@@ -562,6 +686,10 @@ export class AttendanceService {
         where: { organizationId, workerId },
         orderBy: { clientEventTime: 'desc' },
         select: { clientEventTime: true, tapType: true },
+      }),
+      this.prisma.manualAttendanceRequest.findFirst({
+        where: { organizationId, workerId, status: 'PENDING' },
+        select: { id: true, tapType: true, recordedAt: true },
       }),
     ]);
     return {
@@ -574,6 +702,16 @@ export class AttendanceService {
       // from the last state *change*, so a LOGOUT starts the clock and an
       // ignored duplicate does not.
       lastTapType: lastTap?.tapType ?? null,
+      // A hand-typed punch still awaiting review. The scanner shows this on the
+      // worker's card so a watchman does not enter a second one, and so the man
+      // standing at the gate is told *why* he is not on the list.
+      pendingManual: pendingManual
+        ? {
+            id: pendingManual.id,
+            tapType: pendingManual.tapType,
+            recordedAt: pendingManual.recordedAt,
+          }
+        : null,
     };
   }
 
@@ -653,6 +791,14 @@ export class AttendanceService {
     });
     if (!tap || tap.tapType !== 'LOGIN' || !tap.workerId) {
       throw Errors.notFound('Login tap');
+    }
+    // Confirming is the watchman saying "the face matches the badge" — it is not
+    // an approval. A hand-typed punch has no badge to match, and letting this
+    // endpoint commit one would hand the watchman the Safety Officer's decision.
+    if (tap.isManualBackup) {
+      throw Errors.businessRule(
+        'This punch was entered by hand and is waiting for a Safety Officer to accept it.',
+      );
     }
     const existing = await this.prisma.attendanceSession.findFirst({
       where: { loginTapId: tap.id },

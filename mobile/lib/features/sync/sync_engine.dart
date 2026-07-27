@@ -34,21 +34,36 @@ class SyncEngine {
           'events': events,
         });
         final results = (res.data['results'] as List).cast<Map<String, dynamic>>();
-        var accepted = 0, duplicates = 0, conflicts = 0;
+        var accepted = 0, duplicates = 0, conflicts = 0, rejected = 0;
         for (final r in results) {
           final status = r['status'] as String;
           final eventId = r['eventId'] as String;
           if (status == 'ACCEPTED' || status == 'DUPLICATE') {
             await _db.markSynced(eventId);
             status == 'ACCEPTED' ? accepted++ : duplicates++;
-          } else if (status == 'CONFLICT') {
-            await _db.recordFailure(eventId, 'CONFLICT: ${r['detail'] ?? ''}');
-            conflicts++;
           } else {
-            await _db.recordFailure(eventId, 'REJECTED: ${r['detail'] ?? ''}');
+            // CONFLICT and REJECTED are both the server's final word — an
+            // identifier it cannot resolve, an expired card, a punch already
+            // waiting on a Safety Officer. Retrying cannot change any of them,
+            // and the server has kept its own record of what arrived, so the
+            // event leaves the outbox.
+            //
+            // It used to stay pending forever. One such event was enough to hold
+            // pendingCount above zero for the life of the install, which switched
+            // off the server state refresh — and from then on this phone decided
+            // LOGIN/LOGOUT from its own history alone, so a worker a Super Admin
+            // had logged out in the panel went on being offered LOGOUT here.
+            await _db.recordFailure(eventId, '$status: ${r['detail'] ?? ''}');
+            await _db.discard(eventId);
+            status == 'CONFLICT' ? conflicts++ : rejected++;
           }
         }
-        return SyncReport(accepted: accepted, duplicates: duplicates, conflicts: conflicts);
+        return SyncReport(
+          accepted: accepted,
+          duplicates: duplicates,
+          conflicts: conflicts,
+          rejected: rejected,
+        );
       } on DioException catch (e) {
         return SyncReport(error: e.message ?? 'sync failed');
       }
@@ -86,6 +101,7 @@ class SyncReport {
     this.accepted = 0,
     this.duplicates = 0,
     this.conflicts = 0,
+    this.rejected = 0,
     this.offline = false,
     this.skipped = false,
     this.error,
@@ -93,6 +109,9 @@ class SyncReport {
   final int accepted;
   final int duplicates;
   final int conflicts;
+
+  /// Events the server refused outright. Dropped from the outbox, not retried.
+  final int rejected;
   final bool offline;
   final bool skipped;
   final String? error;
