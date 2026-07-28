@@ -147,4 +147,47 @@ void main() {
       expect(d.action, TapAction.logout);
     });
   });
+
+  group('override', () {
+    // The watchman has seen the refusal and confirmed it. He is at the gate and
+    // can see whether it is one badge read twice or a second man who walked up.
+    test('clears the duplicate cooldown', () {
+      final d = decideTap(
+        tapTime: DateTime.parse('2026-06-09T08:00:05Z'),
+        cooldownSeconds: 30,
+        lastTapTime: DateTime.parse('2026-06-09T08:00:00Z'),
+        lastTapType: 'LOGIN',
+        overridden: true,
+      );
+      expect(d.action, TapAction.login);
+    });
+
+    test('clears the safety gap too', () {
+      final d = decideTap(
+        tapTime: DateTime.parse('2026-06-09T08:01:00Z'),
+        cooldownSeconds: 30,
+        openSession: OpenSession(
+          id: 's1',
+          loginAt: DateTime.parse('2026-06-09T08:00:00Z'),
+          siteId: 'site-1',
+        ),
+        lastTapTime: DateTime.parse('2026-06-09T08:00:00Z'),
+        lastTapType: 'LOGIN',
+        safetyGapSeconds: 600,
+        overridden: true,
+      );
+      expect(d.action, TapAction.logout);
+    });
+
+    test('without it, the cooldown still refuses', () {
+      final d = decideTap(
+        tapTime: DateTime.parse('2026-06-09T08:00:05Z'),
+        cooldownSeconds: 30,
+        lastTapTime: DateTime.parse('2026-06-09T08:00:00Z'),
+        lastTapType: 'LOGIN',
+      );
+      expect(d.action, TapAction.duplicate);
+      expect(d.cooldownRemainingSeconds, 25);
+    });
+  });
 }

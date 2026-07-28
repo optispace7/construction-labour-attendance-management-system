@@ -44,7 +44,8 @@ export type TapDecision =
  * get scanned back out shortly after arriving.
  *
  * Pass `safetyGapSeconds: 0` to switch the gap off — visitors are exempt,
- * because a ten-minute site visit is a normal visit.
+ * because a ten-minute site visit is a normal visit. Pass `overridden` to clear
+ * both the cooldown and the gap for one scan the operator has confirmed.
  */
 export function decideTap(
   tapTime: Date,
@@ -52,8 +53,13 @@ export function decideTap(
   openSession: OpenSessionInfo | null,
   lastTap: LastTapInfo | null,
   safetyGapSeconds = 0,
+  overridden = false,
 ): TapDecision {
-  if (lastTap) {
+  // The watchman has seen the refusal and said "record it anyway". That answer
+  // covers the cooldown as well as the gap: he is standing at the gate and can
+  // see whether the same man is being scanned twice or a second man has walked
+  // up, which is more than the clock can tell.
+  if (lastTap && !overridden) {
     const elapsedMs = tapTime.getTime() - lastTap.clientEventTime.getTime();
     const cooldownMs = cooldownSeconds * 1000;
     if (elapsedMs >= 0 && elapsedMs < cooldownMs) {
@@ -75,7 +81,7 @@ export function decideTap(
       ? lastTap.clientEventTime
       : null;
 
-  if (gapMs > 0 && changedAt) {
+  if (gapMs > 0 && changedAt && !overridden) {
     const sinceChangeMs = tapTime.getTime() - changedAt.getTime();
     if (sinceChangeMs >= 0 && sinceChangeMs < gapMs) {
       return {

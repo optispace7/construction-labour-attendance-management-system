@@ -221,14 +221,27 @@ class _InfoRow extends StatelessWidget {
       children: [
         Icon(icon, size: 20, color: ClamsColors.primary),
         const SizedBox(width: 10),
-        Text('$label: ',
+        // Flexible, not a bare Text. Sitting unbounded next to an Expanded, the
+        // label takes its natural width whatever is left — so a long
+        // designation, a narrow phone, or a watchman who has turned his system
+        // font size up puts black-and-yellow overflow stripes across the one
+        // dialog he uses all day. Both parts give way now.
+        Flexible(
+          child: Text(
+            '$label: ',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: Theme.of(context)
                 .textTheme
                 .bodyMedium
-                ?.copyWith(color: ClamsColors.textSecondary)),
+                ?.copyWith(color: ClamsColors.textSecondary),
+          ),
+        ),
         Expanded(
           child: Text(
             value ?? '—',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
             style: Theme.of(context)
                 .textTheme
                 .bodyMedium

@@ -198,14 +198,11 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     setState(() => _busy = false);
 
     switch (outcome.action) {
+      // A scan inside the cooldown used to be dropped on the floor. It is now a
+      // question: the watchman can see whether that is one badge read twice or
+      // a second man who has stepped up, and the camera cannot.
       case TapAction.duplicate:
-        final name = outcome.worker?.fullName;
-        setState(() => _status =
-            'Duplicate scan ignored (${outcome.cooldownRemainingSeconds}s cooldown)');
-        return ScanFeedback.info(
-          name == null ? 'Duplicate scan ignored' : '$name — duplicate scan',
-          detail: 'Wait ${outcome.cooldownRemainingSeconds}s before scanning again.',
-        );
+        return _reviewTooSoon(identifier, outcome, isDuplicate: true);
 
       case TapAction.tooSoon:
         return _reviewTooSoon(identifier, outcome);
@@ -245,31 +242,53 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     }
   }
 
-  /// The scan is inside the site's safety gap. Show what happened and let the
-  /// watchman record it anyway with a reason — a worker really can be sent home
-  /// five minutes after arriving, and the gap must not make that unrecordable.
-  Future<ScanFeedback?> _reviewTooSoon(String identifier, TapOutcome outcome) async {
-    setState(() => _status = 'Too soon — nothing recorded');
-    final reason = await showDialog<String>(
+  /// The scan was refused for landing too close to the last one — either inside
+  /// the duplicate cooldown or inside the site's safety gap. Show what happened
+  /// and let the watchman record it anyway: a worker really can be sent home
+  /// five minutes after arriving, and the rule must not make that unrecordable.
+  ///
+  /// No reason is collected. Watchmen were being asked to justify a decision
+  /// they had no vocabulary for, so the prompt was dropped; the confirmation is
+  /// the decision, and it is audited either way.
+  Future<ScanFeedback?> _reviewTooSoon(
+    String identifier,
+    TapOutcome outcome, {
+    bool isDuplicate = false,
+  }) async {
+    setState(() => _status = isDuplicate
+        ? 'Scanned a moment ago — not recorded yet'
+        : 'Too soon — nothing recorded');
+
+    final confirmed = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (_) => TooSoonDialog(
         blocked: outcome.blocked,
         worker: outcome.worker,
         elapsedMinutes: outcome.elapsedMinutes,
-        remainingSeconds: outcome.remainingSeconds,
+        remainingSeconds:
+            isDuplicate ? outcome.cooldownRemainingSeconds : outcome.remainingSeconds,
+        isDuplicate: isDuplicate,
       ),
     );
-    if (reason == null || !mounted) {
+
+    if (confirmed != true || !mounted) {
+      final name = outcome.worker?.fullName ?? 'This person';
+      if (isDuplicate) {
+        return ScanFeedback.info(
+          '$name — scanned a moment ago',
+          detail: 'Nothing recorded.',
+        );
+      }
       final mins = outcome.elapsedMinutes;
       return ScanFeedback.warning(
-        '${outcome.worker?.fullName ?? 'This person'} — too soon',
+        '$name — too soon',
         detail: outcome.blocked == TapAction.login
             ? 'Logged out ${mins}m ago. Nothing recorded.'
             : 'Logged in ${mins}m ago. Nothing recorded.',
       );
     }
-    return _handleTap(TapSource.qr, identifier, overrideReason: reason);
+    return _handleTap(TapSource.qr, identifier, overridden: true);
   }
 
   /// A wrong phone clock would record punches at the wrong time — refuse the
@@ -356,7 +375,7 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     String identifier, {
     bool manualBackup = false,
     String? manualReason,
-    String? overrideReason,
+    bool overridden = false,
   }) async {
     if (_siteId == null) return null;
     if (source != TapSource.qr && await _clockIsWrong()) return null;
@@ -371,7 +390,7 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
       policy: _policy,
       manualBackup: manualBackup,
       manualReason: manualReason,
-      overrideReason: overrideReason,
+      overridden: overridden,
     );
     ref.invalidate(pendingCountProvider);
     if (!mounted) return null;
@@ -379,11 +398,12 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
 
     switch (outcome.action) {
       case TapAction.duplicate:
-        setState(() => _status =
-            'Duplicate tap ignored (${outcome.cooldownRemainingSeconds}s cooldown)');
+        // The server refused it as a duplicate even though this device let it
+        // through — its view of the worker was behind. Nothing was recorded.
+        setState(() => _status = 'Scanned a moment ago — nothing recorded');
         return ScanFeedback.info(
-          'Duplicate tap ignored',
-          detail: 'Wait ${outcome.cooldownRemainingSeconds}s before scanning again.',
+          '${outcome.worker?.fullName ?? 'This person'} — scanned a moment ago',
+          detail: 'Nothing recorded. Scan again to confirm.',
         );
 
       case TapAction.tooSoon:

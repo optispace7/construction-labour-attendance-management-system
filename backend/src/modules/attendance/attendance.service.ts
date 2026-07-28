@@ -35,6 +35,28 @@ type ResolvedWorker = Worker & {
 export const MANPOWER_MAX_DAYS = 92;
 
 /**
+ * The heading a person's attendance is grouped under on the vendor breakdowns.
+ *
+ * Most people on a site belong to a labour contractor. Company staff do not —
+ * they are on the payroll directly — and a visitor never does. Filing either
+ * under "No vendor" makes correct data look like a gap in the records, which is
+ * what had people asking why the dashboard showed an unnamed contractor.
+ *
+ * A WORKER with no vendor genuinely IS missing one, so that case keeps the
+ * original label rather than being quietly relabelled into something tidier.
+ */
+export function vendorGroupLabel(worker: {
+  vendor: { name: string } | null;
+  category: PersonCategory | string;
+}): string {
+  const name = worker.vendor?.name?.trim();
+  if (name) return name;
+  if (worker.category === 'STAFF') return 'Staff';
+  if (worker.category === 'VISITOR') return 'Visitors';
+  return 'No vendor';
+}
+
+/**
  * Resolves the manpower panel's window from user input. Defaults to the last
  * seven days ending today; an inverted range is swapped rather than rejected,
  * and the span is capped so a hand-typed year cannot pull the whole table.
@@ -267,6 +289,7 @@ export class AttendanceService {
           : null,
         lastTap ? { clientEventTime: lastTap.clientEventTime, tapType: lastTap.tapType } : null,
         this.safetyGapSeconds(settings, worker, dto),
+        !!dto.override,
       );
 
       if (decision.action === 'DUPLICATE') {
@@ -283,8 +306,9 @@ export class AttendanceService {
       }
 
       // The watchman said "record it anyway". The tap is going through, so the
-      // reason belongs in the audit trail before the session moves.
-      if (dto.override?.reason) {
+      // override belongs in the audit trail before the session moves — with or
+      // without a note, since the prompt for one was dropped.
+      if (dto.override) {
         await this.auditOverride(organizationId, worker.id, dto, ctx, decision.action);
       }
 
@@ -335,12 +359,12 @@ export class AttendanceService {
    * Zero — i.e. off — in two cases. Visitors are day passes recorded for the
    * register: a ten-minute visit is a normal visit, and holding one inside the
    * gate would be worse than a slightly wrong time on an unpaid record. And a
-   * watchman who has answered the refusal with a written reason has already
-   * been told what the gap thinks; the override is his to make.
+   * watchman who has confirmed the refusal has already been told what the gap
+   * thinks; the override is his to make, with or without a note attached.
    */
   private safetyGapSeconds(settings: SiteSettings, worker: ResolvedWorker, dto: TapDto): number {
     if (worker.category === 'VISITOR') return 0;
-    if (dto.override?.reason) return 0;
+    if (dto.override) return 0;
     return Math.max(0, settings.safetyGapMinutes) * 60;
   }
 
@@ -360,7 +384,7 @@ export class AttendanceService {
         entityId: workerId,
         deviceId: ctx.deviceId,
         ipAddress: ctx.ip,
-        reason: dto.override?.reason,
+        reason: dto.override?.reason ?? 'Confirmed at the gate (no note given)',
         newValue: { recorded, source: dto.source, siteId: dto.siteId, eventId: dto.eventId },
       });
     } catch (e) {
@@ -1015,7 +1039,7 @@ export class AttendanceService {
       seen.set(s.workerId, {
         category: s.worker.category,
         designation: s.worker.designation?.name ?? 'Unassigned',
-        vendor: s.worker.vendor?.name ?? 'No vendor',
+        vendor: vendorGroupLabel(s.worker),
         open,
       });
     }
@@ -1055,9 +1079,106 @@ export class AttendanceService {
   }
 
   /**
+   * The registered workforce — everyone on the books, which is the denominator
+   * the dashboard needs before it can say "attendance rate" and mean anything.
+   *
+   * Counts people, not sessions: ACTIVE and not soft-deleted. A scoped user sees
+   * only those currently assigned to one of their sites, so their rate is
+   * measured against their own workforce rather than the whole company's.
+   */
+  private async registeredWorkforce(user: AuthUser) {
+    const scoped = user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0;
+    const rows = await this.prisma.worker.groupBy({
+      by: ['category'],
+      where: {
+        organizationId: user.organizationId,
+        deletedAt: null,
+        status: 'ACTIVE',
+        ...(scoped
+          ? { assignments: { some: { siteId: { in: user.siteScopes }, endDate: null } } }
+          : {}),
+      },
+      _count: { _all: true },
+    });
+
+    const byCategory: Record<string, number> = { WORKER: 0, STAFF: 0, VISITOR: 0 };
+    for (const r of rows) byCategory[r.category] = r._count._all;
+    return {
+      total: rows.reduce((sum, r) => sum + r._count._all, 0),
+      byCategory,
+    };
+  }
+
+  /**
+   * Who moved through the gate today, and the same figures for yesterday so a
+   * KPI card can show a real change rather than an invented one.
+   *
+   * Counts distinct *people*, not sessions — a worker who steps out and back in
+   * has two sessions but turned up once, and "120 people on site" is the number
+   * anyone would defend in a meeting.
+   *
+   * `checkedOut` is derived (turned up minus still here) rather than counted off
+   * logout taps, so the three figures always reconcile on screen.
+   */
+  private async gateMovement(user: AuthUser, tz: string) {
+    const scopeFilter =
+      user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0
+        ? { siteId: { in: user.siteScopes } }
+        : {};
+    const today = businessDate(new Date(), tz);
+    const yesterday = businessDate(new Date(Date.now() - 24 * 3600 * 1000), tz);
+
+    const sessions = await this.prisma.attendanceSession.findMany({
+      where: {
+        organizationId: user.organizationId,
+        workDate: { in: [today, yesterday] },
+        state: { not: 'VOID' },
+        ...scopeFilter,
+      },
+      select: {
+        workerId: true,
+        workDate: true,
+        state: true,
+        lateMinutes: true,
+        worker: { select: { category: true } },
+      },
+      take: 20000,
+    });
+
+    const tally = (day: Date) => {
+      const turnedUp = new Set<string>();
+      const stillHere = new Set<string>();
+      const late = new Set<string>();
+      const workers = new Set<string>();
+      for (const s of sessions) {
+        if (s.workDate.getTime() !== day.getTime()) continue;
+        turnedUp.add(s.workerId);
+        if (s.worker.category === 'WORKER') workers.add(s.workerId);
+        if (s.state === 'OPEN') stillHere.add(s.workerId);
+        if ((s.lateMinutes ?? 0) > 0) late.add(s.workerId);
+      }
+      return {
+        checkedIn: turnedUp.size,
+        onSite: stillHere.size,
+        checkedOut: turnedUp.size - stillHere.size,
+        lateArrivals: late.size,
+        workersCheckedIn: workers.size,
+      };
+    };
+
+    return {
+      date: today.toISOString().slice(0, 10),
+      today: tally(today),
+      yesterday: tally(yesterday),
+    };
+  }
+
+  /**
    * KPIs for the admin dashboard home: who is on site right now (by category,
-   * with names for the hover detail) and who missed logout yesterday — i.e.
-   * sessions the system had to AUTO_CLOSE because no logout tap ever came.
+   * with names for the hover detail), who missed logout yesterday — i.e.
+   * sessions the system had to AUTO_CLOSE because no logout tap ever came — the
+   * registered workforce behind those numbers, and today's gate movement next to
+   * yesterday's so the cards can show a real change.
    */
   async dashboardStats(user: AuthUser) {
     const org = await this.prisma.organization.findUnique({
@@ -1072,6 +1193,7 @@ export class AttendanceService {
 
     const select = {
       loginAt: true,
+      workDate: true,
       worker: { select: { fullName: true, workerCode: true, category: true } },
       site: { select: { name: true } },
     } as const;
@@ -1099,6 +1221,18 @@ export class AttendanceService {
       orderBy: { loginAt: 'asc' },
     });
 
+    const today = businessDate(new Date(), tz);
+    /**
+     * A session still open from an earlier business day.
+     *
+     * These are almost always somebody who went home without scanning out, and
+     * they are why "on site" reads differently around the panel: a screen that
+     * counts every open session includes them, one that counts today's sessions
+     * does not. Marking each person lets both dashboards show the split instead
+     * of leaving people to work out the difference themselves.
+     */
+    const isCarriedOver = (s: (typeof open)[number]) => s.workDate.getTime() < today.getTime();
+
     type Row = (typeof open)[number];
     const bucket = (rows: Row[]) => {
       const byCategory: Record<
@@ -1110,6 +1244,8 @@ export class AttendanceService {
             workerCode: string;
             siteName: string | null;
             loginAt: Date;
+            workDate: string;
+            carriedOver: boolean;
           }[];
         }
       > = {};
@@ -1123,19 +1259,37 @@ export class AttendanceService {
             workerCode: s.worker.workerCode,
             siteName: s.site?.name ?? null,
             loginAt: s.loginAt,
+            workDate: s.workDate.toISOString().slice(0, 10),
+            carriedOver: isCarriedOver(s),
           });
         }
       }
       return byCategory;
     };
 
+    const carriedOver = open.filter(isCarriedOver);
+
+    const [workforce, movement] = await Promise.all([
+      this.registeredWorkforce(user),
+      this.gateMovement(user, tz),
+    ]);
+
     return {
-      onSiteNow: { total: open.length, byCategory: bucket(open) },
+      onSiteNow: {
+        total: open.length,
+        byCategory: bucket(open),
+        // total = today + carriedOver, always. Both dashboards show the split
+        // rather than one number that quietly means two different things.
+        today: open.length - carriedOver.length,
+        carriedOver: carriedOver.length,
+      },
       missedLogout: {
         date: yesterday.toISOString().slice(0, 10),
         total: missed.length,
         byCategory: bucket(missed),
       },
+      workforce,
+      movement,
     };
   }
 
@@ -1174,6 +1328,7 @@ export class AttendanceService {
             workedMinutes: true,
             worker: {
               select: {
+                category: true,
                 vendor: { select: { name: true } },
                 designation: { select: { name: true } },
               },
@@ -1200,6 +1355,7 @@ export class AttendanceService {
             workedMinutes: true,
             worker: {
               select: {
+                category: true,
                 vendor: { select: { name: true } },
                 designation: { select: { name: true } },
               },
@@ -1220,6 +1376,7 @@ export class AttendanceService {
             workedMinutes: true,
             worker: {
               select: {
+                category: true,
                 vendor: { select: { name: true } },
                 designation: { select: { name: true } },
               },
@@ -1251,7 +1408,7 @@ export class AttendanceService {
     const perVendor = new Map<string, Cube>();
     const allVendors: Cube = new Map();
     for (const s of windowSessions) {
-      const name = s.worker.vendor?.name?.trim() || 'No vendor';
+      const name = vendorGroupLabel(s.worker);
       const designation = s.worker.designation?.name?.trim() || 'No designation';
       const day = dayKey(s.workDate);
       if (!dayIndex.has(day)) continue;
@@ -1350,9 +1507,10 @@ export class AttendanceService {
         rangeSessions,
         (s) => s.worker.designation?.name?.trim() || 'No designation',
       ).map(([trade, count]) => ({ trade, count })),
-      byVendor: tally(rangeSessions, (s) => s.worker.vendor?.name?.trim() || 'No vendor').map(
-        ([vendor, count]) => ({ vendor, count }),
-      ),
+      byVendor: tally(rangeSessions, (s) => vendorGroupLabel(s.worker)).map(([vendor, count]) => ({
+        vendor,
+        count,
+      })),
     };
 
     return {
@@ -1379,7 +1537,7 @@ export class AttendanceService {
           ([name, count]) => ({ site: name, pending: count }),
         );
       })(),
-      vendorToday: tally(todaySessions, (s) => s.worker.vendor?.name ?? 'No vendor')
+      vendorToday: tally(todaySessions, (s) => vendorGroupLabel(s.worker))
         .slice(0, 8)
         .map(([name, count]) => ({ vendor: name, count })),
     };

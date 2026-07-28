@@ -250,7 +250,7 @@ class AttendanceRepository {
     required String identifier,
     required ScanPolicy policy,
     required DateTime now,
-    String? overrideReason,
+    bool overridden = false,
     bool manualBackup = false,
   }) async {
     final worker = await resolve(source, identifier);
@@ -286,7 +286,8 @@ class AttendanceRepository {
             ),
       lastTapTime: lastTapIso == null ? null : DateTime.tryParse(lastTapIso),
       lastTapType: lastTapType == null || lastTapType.isEmpty ? null : lastTapType,
-      safetyGapSeconds: _safetyGapSecondsFor(worker, policy, overrideReason),
+      safetyGapSeconds: _safetyGapSecondsFor(worker, policy, overridden),
+      overridden: overridden,
     );
 
     if (decision.action == TapAction.duplicate) {
@@ -363,9 +364,9 @@ class AttendanceRepository {
   ///
   /// Visitors are exempt: a day pass is recorded for the register, and a
   /// ten-minute visit is a normal visit. An override lifts it for one scan —
-  /// the watchman has read the refusal and given a reason.
-  int _safetyGapSecondsFor(WorkerCard? worker, ScanPolicy policy, String? overrideReason) {
-    if (overrideReason != null && overrideReason.isNotEmpty) return 0;
+  /// the watchman has read the refusal and confirmed it.
+  int _safetyGapSecondsFor(WorkerCard? worker, ScanPolicy policy, bool overridden) {
+    if (overridden) return 0;
     if (worker?.category == 'VISITOR') return 0;
     return policy.safetyGapSeconds;
   }
@@ -398,7 +399,7 @@ class AttendanceRepository {
     required ScanPolicy policy,
     bool manualBackup = false,
     String? manualReason,
-    String? overrideReason,
+    bool overridden = false,
   }) async {
     final now = DateTime.now().toUtc();
     final outcome = await _evaluate(
@@ -407,7 +408,7 @@ class AttendanceRepository {
       identifier: identifier,
       policy: policy,
       now: now,
-      overrideReason: overrideReason,
+      overridden: overridden,
       manualBackup: manualBackup,
     );
     // Refusals (duplicate tap, safety gap, expired card, a manual entry already
@@ -439,7 +440,7 @@ class AttendanceRepository {
       accuracyM: geo?.accuracyM,
       isManualBackup: manualBackup,
       manualReason: manualReason,
-      overrideReason: overrideReason,
+      overridden: overridden,
     );
 
     // What this device believed before the tap. Kept so a server refusal can

@@ -40,15 +40,18 @@ export class ManualDto {
 }
 
 /**
- * The watchman's answer to a refused scan: record it anyway, and say why.
- * Only lifts the safety gap — the duplicate-tap cooldown still applies, since
- * overriding that is exactly the accident the gap exists to prevent.
+ * The watchman's answer to a refused scan: record it anyway.
+ *
+ * Lifts both the duplicate cooldown and the safety gap for that one scan. The
+ * reason is optional and in practice usually absent — watchmen were being asked
+ * to justify a decision they had no vocabulary for, so the prompt was dropped
+ * and the confirmation itself is what gets audited.
  */
 export class OverrideDto {
-  @ApiProperty({ description: 'Why the safety gap was overridden' })
+  @ApiProperty({ required: false, description: 'Optional note about the override' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  reason!: string;
+  reason?: string;
 }
 
 export class TapDto {

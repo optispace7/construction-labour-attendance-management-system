@@ -73,7 +73,12 @@ function buildService(prismaOver: any) {
   const redis: any = { acquireLock: jest.fn().mockResolvedValue('tok'), releaseLock: jest.fn() };
   const audit: any = { record: jest.fn() };
   const notifications: any = { create: jest.fn() };
-  return { svc: new AttendanceService(prisma, redis, audit, notifications), prisma, notifications };
+  return {
+    svc: new AttendanceService(prisma, redis, audit, notifications),
+    prisma,
+    audit,
+    notifications,
+  };
 }
 
 describe('AttendanceService.handleTap', () => {
@@ -302,6 +307,179 @@ describe('AttendanceService.handleTap', () => {
   });
 });
 
+describe('AttendanceService.dashboardStats', () => {
+  const user = { organizationId: 'org-1', role: 'SUPER_ADMIN', siteScopes: [] } as any;
+
+  /** UTC midnight of a business day, the way businessDate() returns it. */
+  const day = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
+
+  function buildStats(sessionRows: any[], workerGroups: any[], openRows: any[] = []) {
+    const prisma: any = {
+      organization: { findUnique: jest.fn().mockResolvedValue({ timezone: 'Asia/Kolkata' }) },
+      attendanceSession: {
+        // Three calls in order: open sessions, missed logouts, then the
+        // today+yesterday window that gate movement is tallied from.
+        findMany: jest
+          .fn()
+          .mockResolvedValueOnce(openRows)
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce(sessionRows),
+      },
+      worker: { groupBy: jest.fn().mockResolvedValue(workerGroups) },
+    };
+    return new AttendanceService(prisma, {} as any, {} as any, {} as any);
+  }
+
+  it('counts people rather than sessions, so a worker who re-enters counts once', async () => {
+    // Ramesh has two sessions today — he stepped out and came back.
+    const today = day(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10));
+    const svc = buildStats(
+      [
+        {
+          workerId: 'w1',
+          workDate: today,
+          state: 'CLOSED',
+          lateMinutes: 0,
+          worker: { category: 'WORKER' },
+        },
+        {
+          workerId: 'w1',
+          workDate: today,
+          state: 'OPEN',
+          lateMinutes: 0,
+          worker: { category: 'WORKER' },
+        },
+        {
+          workerId: 'w2',
+          workDate: today,
+          state: 'CLOSED',
+          lateMinutes: 15,
+          worker: { category: 'WORKER' },
+        },
+      ],
+      [{ category: 'WORKER', _count: { _all: 10 } }],
+    );
+
+    const res = await svc.dashboardStats(user);
+
+    expect(res.movement.today.checkedIn).toBe(2);
+    expect(res.movement.today.onSite).toBe(1);
+    // Derived, so the three figures always reconcile on screen.
+    expect(res.movement.today.checkedOut).toBe(1);
+    expect(res.movement.today.lateArrivals).toBe(1);
+  });
+
+  it('reports the registered workforce as the denominator for an attendance rate', async () => {
+    const svc = buildStats(
+      [],
+      [
+        { category: 'WORKER', _count: { _all: 120 } },
+        { category: 'STAFF', _count: { _all: 8 } },
+      ],
+    );
+
+    const res = await svc.dashboardStats(user);
+
+    expect(res.workforce.total).toBe(128);
+    expect(res.workforce.byCategory).toMatchObject({ WORKER: 120, STAFF: 8, VISITOR: 0 });
+  });
+
+  // The reason "on site" read 6 on one screen and 2 on another: four sessions
+  // from the previous day were never scanned out.
+  it('splits people on site into today and carried over from earlier days', async () => {
+    const today = day(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10));
+    const yesterday = new Date(today.getTime() - 86_400_000);
+    const person = (name: string, workDate: Date) => ({
+      loginAt: workDate,
+      workDate,
+      worker: { fullName: name, workerCode: name, category: 'WORKER' },
+      site: { name: 'Tower A' },
+    });
+
+    const svc = buildStats(
+      [],
+      [],
+      [
+        person('stale-1', yesterday),
+        person('stale-2', yesterday),
+        person('here-1', today),
+        person('here-2', today),
+        person('here-3', today),
+      ],
+    );
+
+    const res = await svc.dashboardStats(user);
+
+    expect(res.onSiteNow.total).toBe(5);
+    expect(res.onSiteNow.today).toBe(3);
+    expect(res.onSiteNow.carriedOver).toBe(2);
+    // The split must always reconcile with the headline, or the card lies.
+    expect(res.onSiteNow.today + res.onSiteNow.carriedOver).toBe(res.onSiteNow.total);
+
+    const people = res.onSiteNow.byCategory.WORKER.people;
+    expect(people.filter((p) => p.carriedOver).map((p) => p.fullName)).toEqual([
+      'stale-1',
+      'stale-2',
+    ]);
+  });
+
+  it('reports nothing carried over when every open session started today', async () => {
+    const today = day(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10));
+    const svc = buildStats(
+      [],
+      [],
+      [
+        {
+          loginAt: today,
+          workDate: today,
+          worker: { fullName: 'Ramesh', workerCode: 'W1', category: 'WORKER' },
+          site: { name: 'Tower A' },
+        },
+      ],
+    );
+
+    const res = await svc.dashboardStats(user);
+    expect(res.onSiteNow.today).toBe(1);
+    expect(res.onSiteNow.carriedOver).toBe(0);
+  });
+
+  it('keeps yesterday separate from today so a card can show a real change', async () => {
+    const today = day(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10));
+    const yesterday = new Date(today.getTime() - 86_400_000);
+    const svc = buildStats(
+      [
+        {
+          workerId: 'w1',
+          workDate: today,
+          state: 'OPEN',
+          lateMinutes: 0,
+          worker: { category: 'WORKER' },
+        },
+        {
+          workerId: 'w2',
+          workDate: yesterday,
+          state: 'CLOSED',
+          lateMinutes: 0,
+          worker: { category: 'WORKER' },
+        },
+        {
+          workerId: 'w3',
+          workDate: yesterday,
+          state: 'CLOSED',
+          lateMinutes: 0,
+          worker: { category: 'WORKER' },
+        },
+      ],
+      [],
+    );
+
+    const res = await svc.dashboardStats(user);
+
+    expect(res.movement.today.checkedIn).toBe(1);
+    expect(res.movement.yesterday.checkedIn).toBe(2);
+  });
+});
+
 describe('AttendanceService.loggedOutToday', () => {
   const user = {
     organizationId: 'org-1',
@@ -489,9 +667,33 @@ describe('AttendanceService safety gap', () => {
     );
   });
 
-  it('does not let an override wave through a duplicate tap as well', async () => {
-    // Overriding the cooldown would reopen the very accident the gap prevents:
-    // one badge, read twice in the same breath.
+  // The cooldown used to be absolute, and a scan inside it was silently
+  // dropped. It is now a refusal the watchman can answer: he is at the gate and
+  // can see whether it is one badge read twice or a second man who walked up.
+  it('lets a confirmed override clear the duplicate cooldown as well', async () => {
+    const { svc, prisma } = buildGapped({
+      attendanceTap: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 'tap-1' }),
+        findFirst: jest.fn().mockResolvedValue({
+          clientEventTime: new Date('2026-06-09T02:29:50Z'),
+          tapType: 'LOGIN',
+        }),
+      },
+    });
+
+    // This fixture has the worker already on site, so the scan closes the
+    // session rather than opening one — the point is that it went through.
+    const res = await svc.handleTap('org-1', makeDto({ override: {} }), {
+      deviceId: 'dev-1',
+      photoRoll: 99,
+    });
+
+    expect(res.result).toBe('LOGOUT_RECORDED');
+    expect(prisma.attendanceTap.create).toHaveBeenCalled();
+  });
+
+  it('still refuses a duplicate when nobody overrode it', async () => {
     const { svc } = buildGapped({
       attendanceTap: {
         findUnique: jest.fn().mockResolvedValue(null),
@@ -503,8 +705,24 @@ describe('AttendanceService safety gap', () => {
       },
     });
 
-    await expect(
-      svc.handleTap('org-1', makeDto({ override: { reason: 'anything' } }), { deviceId: 'dev-1' }),
-    ).rejects.toMatchObject({ code: 'DUPLICATE_TAP' });
+    await expect(svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' })).rejects.toMatchObject({
+      code: 'DUPLICATE_TAP',
+    });
+  });
+
+  // The prompt for a written reason was removed: watchmen were being asked to
+  // justify a decision they had no vocabulary for. The override still audits.
+  it('accepts an override with no reason attached', async () => {
+    const { svc, audit } = buildGapped({});
+
+    const res = await svc.handleTap('org-1', makeDto({ override: {} }), {
+      deviceId: 'dev-1',
+      photoRoll: 99,
+    });
+
+    expect(res.result).toBe('LOGOUT_RECORDED');
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'ATTENDANCE_SAFETY_GAP_OVERRIDE' }),
+    );
   });
 });

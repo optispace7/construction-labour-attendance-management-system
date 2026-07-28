@@ -91,7 +91,7 @@ class LocalDb {
         'accuracy_m': e.accuracyM,
         'is_manual_backup': e.isManualBackup ? 1 : 0,
         'manual_reason': e.manualReason,
-        'override_reason': e.overrideReason,
+        'override_reason': e.overridden ? '1' : null,
         'synced': 0,
         'attempts': 0,
       },

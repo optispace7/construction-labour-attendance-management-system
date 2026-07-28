@@ -49,7 +49,11 @@ class TapDecision {
 /// that fires twice in a second. The safety gap runs from the last *state
 /// change* and is long — it catches the read that lands a minute later, once the
 /// cooldown has lapsed. Pass `safetyGapSeconds: 0` to switch the gap off;
-/// visitors are exempt and an override sets it to zero for that one scan.
+/// visitors are exempt.
+///
+/// `overridden` clears BOTH for one scan. The watchman has seen the refusal and
+/// confirmed it: he is at the gate and can see whether it is one badge read
+/// twice or a second man who has walked up, which is more than the clock knows.
 TapDecision decideTap({
   required DateTime tapTime,
   required int cooldownSeconds,
@@ -57,8 +61,9 @@ TapDecision decideTap({
   DateTime? lastTapTime,
   String? lastTapType,
   int safetyGapSeconds = 0,
+  bool overridden = false,
 }) {
-  if (lastTapTime != null) {
+  if (lastTapTime != null && !overridden) {
     final elapsedMs = tapTime.difference(lastTapTime).inMilliseconds;
     final cooldownMs = cooldownSeconds * 1000;
     if (elapsedMs >= 0 && elapsedMs < cooldownMs) {
@@ -74,7 +79,7 @@ TapDecision decideTap({
       ? openSession.loginAt
       : (lastTapType == 'LOGOUT' ? lastTapTime : null);
 
-  if (gapMs > 0 && changedAt != null) {
+  if (gapMs > 0 && changedAt != null && !overridden) {
     final sinceChangeMs = tapTime.difference(changedAt).inMilliseconds;
     if (sinceChangeMs >= 0 && sinceChangeMs < gapMs) {
       return TapDecision(

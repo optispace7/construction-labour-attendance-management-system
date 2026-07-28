@@ -1,4 +1,32 @@
-import { MANPOWER_MAX_DAYS, resolveManpowerRange } from './attendance.service';
+import { MANPOWER_MAX_DAYS, resolveManpowerRange, vendorGroupLabel } from './attendance.service';
+
+describe('vendorGroupLabel', () => {
+  it('uses the contractor name when there is one', () => {
+    expect(vendorGroupLabel({ vendor: { name: 'Nivishka Services' }, category: 'WORKER' })).toBe(
+      'Nivishka Services',
+    );
+  });
+
+  it('files company staff under Staff, not "No vendor"', () => {
+    // Staff are on the payroll directly. Showing them as an unnamed contractor
+    // made correct data look like a gap in the records.
+    expect(vendorGroupLabel({ vendor: null, category: 'STAFF' })).toBe('Staff');
+  });
+
+  it('files visitors under Visitors', () => {
+    expect(vendorGroupLabel({ vendor: null, category: 'VISITOR' })).toBe('Visitors');
+  });
+
+  it('still says "No vendor" for a labourer who really is missing one', () => {
+    // A genuine data gap, and it must keep saying so rather than being tidied
+    // into a label that hides it.
+    expect(vendorGroupLabel({ vendor: null, category: 'WORKER' })).toBe('No vendor');
+  });
+
+  it('treats a blank contractor name as no contractor at all', () => {
+    expect(vendorGroupLabel({ vendor: { name: '   ' }, category: 'STAFF' })).toBe('Staff');
+  });
+});
 
 const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
 const key = (d: Date) => d.toISOString().slice(0, 10);

@@ -88,10 +88,10 @@ class SyncEngine {
         'isBackup': (row['is_manual_backup'] as int) == 1,
         'reason': row['manual_reason'],
       },
-      // A tap the watchman waved past the safety gap carries his reason all the
-      // way to the server, however long it sits in the outbox first.
-      if (row['override_reason'] != null)
-        'override': {'reason': row['override_reason']},
+      // A tap the watchman waved past a refusal stays overridden all the way to
+      // the server, however long it sits in the outbox first — otherwise the
+      // replay would be refused for the very reason he already answered.
+      if (row['override_reason'] != null) 'override': <String, dynamic>{},
     };
   }
 }

@@ -117,7 +117,7 @@ class OutboxEvent {
     this.accuracyM,
     this.isManualBackup = false,
     this.manualReason,
-    this.overrideReason,
+    this.overridden = false,
     this.synced = false,
     this.attempts = 0,
     this.lastError,
@@ -135,10 +135,14 @@ class OutboxEvent {
   final bool isManualBackup;
   final String? manualReason;
 
-  /// Set when the watchman answered the safety-gap refusal with "record
-  /// anyway". Travels with the event so a tap that syncs hours later is still
-  /// accepted for the reason he gave at the gate.
-  final String? overrideReason;
+  /// Set when the watchman answered a refusal — duplicate cooldown or safety
+  /// gap — with "record anyway". Travels with the event so a tap that syncs
+  /// hours later is still accepted rather than refused a second time.
+  ///
+  /// A flag, not a reason: the prompt asking watchmen to type a justification
+  /// was dropped, because they had no vocabulary for it and it only ever
+  /// produced noise. The confirmation itself is what the server audits.
+  final bool overridden;
   final bool synced;
   final int attempts;
   final String? lastError;
@@ -153,7 +157,6 @@ class OutboxEvent {
         if (lat != null && lng != null)
           'geo': {'lat': lat, 'lng': lng, if (accuracyM != null) 'accuracyM': accuracyM},
         'manual': {'isBackup': isManualBackup, 'reason': manualReason},
-        if (overrideReason != null && overrideReason!.isNotEmpty)
-          'override': {'reason': overrideReason},
+        if (overridden) 'override': <String, dynamic>{},
       };
 }
