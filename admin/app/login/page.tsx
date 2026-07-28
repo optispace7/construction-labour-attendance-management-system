@@ -3,6 +3,7 @@
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
+import { LoginGlass } from '@/components/LoginGlass';
 import {
   Alert,
   Box,
@@ -137,16 +138,11 @@ export default function LoginPage() {
   }
 
   return (
-    <Box
-      sx={{
-        minHeight: '100vh',
-        display: 'grid',
-        placeItems: 'center',
-        bgcolor: 'background.default',
-      }}
-    >
-      <Card sx={{ width: 400, maxWidth: '90vw' }}>
-        <CardContent>
+    // The glass panel replaces the plain card. Everything inside — the four
+    // modes, the auth calls, the error handling — is untouched; only the
+    // container changed.
+    <LoginGlass>
+      <Box>
           <Box sx={{ display: 'flex', justifyContent: 'center', mb: 2 }}>
             <Box sx={{ bgcolor: '#0F365D', borderRadius: 2, px: 3, py: 1.5, display: 'inline-flex' }}>
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -281,8 +277,7 @@ export default function LoginPage() {
               </Stack>
             </>
           )}
-        </CardContent>
-      </Card>
-    </Box>
+      </Box>
+    </LoginGlass>
   );
 }

@@ -5,6 +5,10 @@ build/
 coverage/
 *.tsbuildinfo
 .next/
+# Renaming .next to .next-stale-<date> is the usual way to force a clean
+# rebuild here, and the rule above does not catch the renamed copy — which
+# is how 816MB of build output ended up staged for a commit once.
+.next-stale-*/
 out/
 
 # Env / secrets

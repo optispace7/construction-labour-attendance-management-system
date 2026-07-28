@@ -1,10 +1,9 @@
 'use client';
 
 import * as React from 'react';
-import { ThemeProvider, CssBaseline } from '@mui/material';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import EmotionRegistry from '@/theme/EmotionRegistry';
-import { theme } from '@/theme/theme';
+import { ColorModeProvider } from '@/theme/ColorModeProvider';
 import { ToastProvider } from '@/components/ui/Toast';
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -17,12 +16,13 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <EmotionRegistry>
-      <ThemeProvider theme={theme}>
-        <CssBaseline />
+      {/* ColorModeProvider owns ThemeProvider + CssBaseline: the theme object
+          it supplies depends on the mode it holds, so the two cannot be split. */}
+      <ColorModeProvider>
         <QueryClientProvider client={queryClient}>
           <ToastProvider>{children}</ToastProvider>
         </QueryClientProvider>
-      </ThemeProvider>
+      </ColorModeProvider>
     </EmotionRegistry>
   );
 }

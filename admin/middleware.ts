@@ -23,6 +23,9 @@ export const config = {
     // /download serves the Android APK and must stay public.
     // /zxing holds the QR-reader WebAssembly: a static asset with no secrets,
     // and a redirect served in its place fails to instantiate.
-    '/((?!login|api/auth|download|zxing|_next/static|_next/image|favicon.ico|logo.png).*)',
+    // /vendor and login-bg.png dress the unauthenticated login page. A 307 to
+    // /login in place of a script parses as HTML and throws "Unexpected token
+    // '<'", which is how the glass effect silently never loaded.
+    '/((?!login|api/auth|download|zxing|vendor|login-bg.png|_next/static|_next/image|favicon.ico|logo.png).*)',
   ],
 };

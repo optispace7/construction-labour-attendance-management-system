@@ -1,0 +1,288 @@
+/* Tailwind's utilities only — `base` is skipped because preflight is off and
+   the MUI pages own the document baseline. */
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * A minimal, scoped reset for the Tailwind-built dashboard.
+ *
+ * Preflight is disabled globally so it cannot damage the MUI pages, but that
+ * leaves native elements carrying the browser's own styling: a Chrome <button>
+ * has a grey `buttonface` background, and a <ul> keeps its bullets and indent.
+ *
+ * Every selector is wrapped in `:where()`, which contributes NOTHING to
+ * specificity. Without it `[data-dash] button` scores (0,1,1) and beats a
+ * Tailwind utility's (0,1,0) — so `padding: 0` here would silently defeat
+ * `px-2.5` there, whatever the source order. That is exactly what flattened the
+ * date-preset pills into one run of text. With `:where()` these rules sit at
+ * element-level specificity and any utility overrides them, which is the whole
+ * point of a reset.
+ */
+:where([data-dash], [data-shell]) button,
+:where([data-dash], [data-shell]) select,
+:where([data-dash], [data-shell]) input {
+  background-color: transparent;
+  background-image: none;
+  border: 0 solid var(--clams-border);
+  color: inherit;
+  font: inherit;
+  margin: 0;
+  padding: 0;
+}
+
+:where([data-dash], [data-shell]) button {
+  cursor: pointer;
+  text-align: inherit;
+}
+
+:where([data-dash], [data-shell]) button:disabled {
+  cursor: not-allowed;
+}
+
+:where([data-dash], [data-shell]) ul,
+:where([data-dash], [data-shell]) ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+:where([data-dash], [data-shell]) h1,
+:where([data-dash], [data-shell]) h2,
+:where([data-dash], [data-shell]) h3,
+:where([data-dash], [data-shell]) h4,
+:where([data-dash], [data-shell]) p {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+:where([data-dash], [data-shell]) svg {
+  display: block;
+}
+
+/* Native pickers keep their own affordances, which need a readable colour on a
+   dark ground. */
+[data-dash] input[type='date']::-webkit-calendar-picker-indicator {
+  filter: invert(0.55);
+  cursor: pointer;
+}
+
+:where([data-dash], [data-shell]) select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%238C99AC' stroke-width='1.6'%3E%3Cpath d='m4 6.5 4 4 4-4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.5rem center;
+  background-size: 1rem;
+}
+
+[data-dash] :focus-visible,
+[data-shell] :focus-visible {
+  outline: 2px solid var(--clams-brand);
+  outline-offset: 2px;
+}
+
+/*
+ * Tailwind's composed utilities need these custom properties to exist before
+ * they mean anything. `rotate-180` sets `--tw-rotate: 180deg` and then builds
+ * one `transform` out of translate/rotate/skew/scale together — if the others
+ * are undefined the whole declaration is invalid and the browser drops it, so
+ * the utility silently does nothing. Same story for `ring-*`, `shadow-*` and
+ * `backdrop-*`.
+ *
+ * Preflight normally declares them on `*, ::before, ::after`. Preflight is off
+ * here so it cannot damage the MUI pages, which left the arrow chevrons
+ * unrotated, the card hover-lift dead, the emphasis rings invisible and the
+ * login card's frosted fallback doing nothing — all with the classes correctly
+ * present in the DOM, which is what made them hard to spot.
+ *
+ * Declared on :root rather than a scope, and they inherit from there. Custom
+ * properties paint nothing on their own, so this is inert for every element
+ * that does not use a Tailwind utility — including the whole MUI surface.
+ */
+:root {
+  --tw-translate-x: 0;
+  --tw-translate-y: 0;
+  --tw-rotate: 0;
+  --tw-skew-x: 0;
+  --tw-skew-y: 0;
+  --tw-scale-x: 1;
+  --tw-scale-y: 1;
+  --tw-ring-inset: ;
+  --tw-ring-offset-width: 0px;
+  --tw-ring-offset-color: #fff;
+  --tw-ring-color: rgb(59 130 246 / 0.5);
+  --tw-ring-offset-shadow: 0 0 #0000;
+  --tw-ring-shadow: 0 0 #0000;
+  --tw-shadow: 0 0 #0000;
+  --tw-shadow-colored: 0 0 #0000;
+  /* Gradients compose the same way, and were failing the same way. `from-line`
+     emits `--tw-gradient-from: <colour> var(--tw-gradient-from-position)`; with
+     the position variable undeclared, that value is invalid and the browser
+     throws away the whole gradient — `background-image` computes to `none`.
+     That is what left the section rules and the cards' top-edge highlight
+     invisible while their classes were plainly there in the markup. */
+  --tw-gradient-from-position: ;
+  --tw-gradient-via-position: ;
+  --tw-gradient-to-position: ;
+  --tw-gradient-from: #0000;
+  --tw-gradient-to: #0000;
+  --tw-gradient-stops: ;
+  --tw-blur: ;
+  --tw-brightness: ;
+  --tw-contrast: ;
+  --tw-grayscale: ;
+  --tw-hue-rotate: ;
+  --tw-invert: ;
+  --tw-saturate: ;
+  --tw-sepia: ;
+  --tw-drop-shadow: ;
+  --tw-backdrop-blur: ;
+  --tw-backdrop-brightness: ;
+  --tw-backdrop-contrast: ;
+  --tw-backdrop-grayscale: ;
+  --tw-backdrop-hue-rotate: ;
+  --tw-backdrop-invert: ;
+  --tw-backdrop-opacity: ;
+  --tw-backdrop-saturate: ;
+  --tw-backdrop-sepia: ;
+}
+
+
+/*
+ * The sign-in form sits on glass over a dark photograph, so it always needs the
+ * light-on-dark treatment — regardless of which colour mode the operator has
+ * chosen for the rest of the panel. Without this, a light-mode user gets near
+ * black text on a dark panel and cannot read the form at all.
+ *
+ * Scoped to the glass card, so nothing else in the app is affected.
+ */
+[data-login-glass] {
+  color: rgba(255, 255, 255, 0.94);
+}
+
+[data-login-glass] .MuiTypography-root {
+  color: rgba(255, 255, 255, 0.94);
+}
+
+[data-login-glass] .MuiTypography-body2,
+[data-login-glass] .MuiTypography-caption,
+[data-login-glass] .MuiFormHelperText-root {
+  color: rgba(255, 255, 255, 0.66);
+}
+
+[data-login-glass] .MuiInputLabel-root {
+  color: rgba(255, 255, 255, 0.62);
+}
+[data-login-glass] .MuiInputLabel-root.Mui-focused {
+  color: #ffffff;
+}
+
+/* The fields are glass in their own right, not holes cut in the card: a second
+   frosted pane sitting on the first. The extra blur is what separates them —
+   the card behind is only lightly blurred, so a field that blurs harder reads
+   as nearer to you, which is exactly how the reference reads. The bright top
+   edge and dim floor are the same inner-highlight trick the card uses. */
+[data-login-glass] .MuiOutlinedInput-root {
+  background-color: rgba(255, 255, 255, 0.16);
+  -webkit-backdrop-filter: blur(10px) saturate(1.4);
+  backdrop-filter: blur(10px) saturate(1.4);
+  /* Bottom lip only. A matching `inset 0 1px 0` along the top reads better as
+     glass, but box-shadow is not interrupted by the notch MUI cuts in the
+     outline for the floating label — so it drew a continuous line straight
+     through "Email or user ID" like a strikethrough. The outline's own top
+     border is notched properly and does that job instead.
+     Nor can `overflow: hidden` be used here: clipping the root closes the
+     notch, which brings the strikethrough back from the other direction. */
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  border-radius: 14px;
+}
+[data-login-glass] .MuiOutlinedInput-root .MuiOutlinedInput-notchedOutline {
+  /* Carries the top edge now that the inset highlight cannot. */
+  border-color: rgba(255, 255, 255, 0.34);
+}
+
+/* The input itself stays completely transparent. Everything visible belongs to
+   the root above, which the browser never repaints — so the field's appearance
+   does not depend on winning a fight with the autofill styling below. */
+[data-login-glass] .MuiOutlinedInput-input {
+  background-color: transparent;
+  /* Chrome applies its autofill background as a transition target. Give that
+     transition a duration measured in days and the field never actually
+     arrives at the filled colour. This has to sit on the resting state, not
+     inside the :-webkit-autofill block — by the time that block matches, the
+     transition it declares is too late to govern the change that triggered it.
+     That ordering is why the previous attempt still went blue. */
+  transition:
+    background-color 600000s 0s,
+    color 600000s 0s;
+}
+[data-login-glass] .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline {
+  border-color: rgba(255, 255, 255, 0.38);
+}
+[data-login-glass] .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline {
+  border-color: rgba(255, 255, 255, 0.72);
+  border-width: 1px;
+}
+[data-login-glass] .MuiOutlinedInput-input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+  opacity: 1;
+}
+
+/* Autofill.
+ *
+ * Chrome forces its own background on a filled field — pale blue in light mode,
+ * slate blue (rgba(70,90,126,1)) in dark — through a UA rule marked !important,
+ * so it cannot simply be overridden. Three defences, because no single one holds
+ * across Chrome versions and the failure mode is an ugly solid block:
+ *
+ *   1. the long background-color transition declared on the resting state above,
+ *      which is what actually keeps the fill from arriving;
+ *   2. clipping any background that does land to the glyphs, where the white
+ *      text-fill covers it;
+ *   3. a transparent inset shadow, which overrides Chrome's own shadow slot.
+ *
+ * !important throughout: the UA rule uses it, so anything competing must too.
+ * The visible field is the root's frost, which none of this touches — worst
+ * case the field looks unchanged, rather than turning into a coloured slab.
+ */
+[data-login-glass] .MuiOutlinedInput-input:-webkit-autofill,
+[data-login-glass] .MuiOutlinedInput-input:-webkit-autofill:hover,
+[data-login-glass] .MuiOutlinedInput-input:-webkit-autofill:focus,
+[data-login-glass] .MuiOutlinedInput-input:-webkit-autofill:active {
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  background-color: transparent !important;
+  -webkit-box-shadow: 0 0 0 1000px transparent inset !important;
+  box-shadow: 0 0 0 1000px transparent inset !important;
+  -webkit-text-fill-color: #ffffff !important;
+  caret-color: #ffffff;
+  transition:
+    background-color 600000s 0s,
+    color 600000s 0s;
+}
+
+[data-login-glass] .MuiButton-contained {
+  background-color: rgba(255, 255, 255, 0.94);
+  color: #10181f;
+  font-weight: 650;
+}
+[data-login-glass] .MuiButton-contained:hover {
+  background-color: #ffffff;
+}
+[data-login-glass] .MuiButton-text {
+  color: rgba(255, 255, 255, 0.8);
+}
+[data-login-glass] .MuiButton-text:hover {
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+[data-login-glass] .MuiAlert-root {
+  background-color: rgba(238, 106, 106, 0.16);
+  color: #ffffff;
+  border: 1px solid rgba(238, 106, 106, 0.4);
+}
+[data-login-glass] .MuiAlert-icon {
+  color: #ff9a9a;
+}
