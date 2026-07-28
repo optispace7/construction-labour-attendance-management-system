@@ -254,6 +254,13 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     String identifier,
     TapOutcome outcome, {
     bool isDuplicate = false,
+    // Carried through so the retry is the same punch the watchman started.
+    // Dropping the source would file a hand-typed entry as a badge scan, and
+    // dropping the reason would lose what he typed and send it for approval
+    // with nothing attached.
+    TapSource source = TapSource.qr,
+    bool manualBackup = false,
+    String? manualReason,
   }) async {
     setState(() => _status = isDuplicate
         ? 'Scanned a moment ago — not recorded yet'
@@ -288,7 +295,13 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
             : 'Logged in ${mins}m ago. Nothing recorded.',
       );
     }
-    return _handleTap(TapSource.qr, identifier, overridden: true);
+    return _handleTap(
+      source,
+      identifier,
+      overridden: true,
+      manualBackup: manualBackup,
+      manualReason: manualReason,
+    );
   }
 
   /// A wrong phone clock would record punches at the wrong time — refuse the
@@ -397,9 +410,30 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     setState(() => _busy = false);
 
     switch (outcome.action) {
+      // Both refusals below are offered to the watchman rather than ending the
+      // attempt, exactly as a scan is — see [_reviewTooSoon].
+      //
+      // A hand-typed entry used to stop dead here. That was the worse dead end
+      // of the two: he has already searched for the man, picked him and typed a
+      // reason, so the entry is deliberate by definition and cannot be the
+      // accidental double-read the gap exists to catch. Being told "too soon"
+      // with no way forward left him with a man standing at the gate and
+      // nothing he could do about it. The punch is held for the Safety Officer
+      // either way, so there is a second pair of eyes regardless.
+      //
+      // `overridden` guards the recursion: the retry below comes back through
+      // this same switch, and a refusal that survives an override is real.
       case TapAction.duplicate:
-        // The server refused it as a duplicate even though this device let it
-        // through — its view of the worker was behind. Nothing was recorded.
+        if (!overridden) {
+          return _reviewTooSoon(
+            identifier,
+            outcome,
+            isDuplicate: true,
+            source: source,
+            manualBackup: manualBackup,
+            manualReason: manualReason,
+          );
+        }
         setState(() => _status = 'Scanned a moment ago — nothing recorded');
         return ScanFeedback.info(
           '${outcome.worker?.fullName ?? 'This person'} — scanned a moment ago',
@@ -407,8 +441,15 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
         );
 
       case TapAction.tooSoon:
-        // The server refused it even though this device let it through — its
-        // view of the worker was out of date. Nothing was recorded.
+        if (!overridden) {
+          return _reviewTooSoon(
+            identifier,
+            outcome,
+            source: source,
+            manualBackup: manualBackup,
+            manualReason: manualReason,
+          );
+        }
         setState(() => _status = 'Too soon — nothing recorded');
         return ScanFeedback.warning(
           '${outcome.worker?.fullName ?? 'This person'} — too soon',
