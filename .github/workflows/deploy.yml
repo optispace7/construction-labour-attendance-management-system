@@ -252,13 +252,43 @@ jobs:
         with:
           name: clams-apk
           path: apk
-      - name: Re-use the currently deployed APK
+      # Take the newest APK this workflow ever built, NOT whatever the live site
+      # happens to be serving.
+      #
+      # Reading it off /download looks equivalent and is not. If an APK builds
+      # successfully and then the admin deploy fails — a broken lock file, a bad
+      # image, anything — that APK never reaches the site. The next admin-only
+      # push skips the `apk` job, copies the OLD binary off the still-running
+      # container, and bakes it back in. The stale build then survives every
+      # subsequent deploy, because each one keeps re-reading it from the last.
+      # That is exactly how /download ended up an APK behind.
+      #
+      # The artifact is the authoritative copy: any change under mobile/ builds
+      # one, so the newest artifact always matches the newest mobile source
+      # whether or not it has managed to reach production yet.
+      - name: Re-use the last APK this workflow built
         if: needs.apk.result == 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p apk
-          curl -fsSL "$ADMIN_BASE_URL/download" -o apk/app-release.apk
+          if gh run download --repo "$GITHUB_REPOSITORY" -n clams-apk -D apk 2>/dev/null \
+             && [ -s apk/app-release.apk ]; then
+            echo "Using the most recent clams-apk artifact."
+          else
+            # Artifacts expire (90 days). Falling back to the live copy is worse
+            # but still better than shipping an image with no APK at all.
+            echo "::warning::No clams-apk artifact found — falling back to the APK currently on /download."
+            curl -fsSL "$ADMIN_BASE_URL/download" -o apk/app-release.apk
+          fi
           test -s apk/app-release.apk
-      - run: cp apk/app-release.apk admin/public/CLAMS.apk
+
+      - name: Bake the APK into the image
+        id: apk_file
+        run: |
+          cp apk/app-release.apk admin/public/CLAMS.apk
+          echo "sha=$(sha256sum admin/public/CLAMS.apk | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          ls -l admin/public/CLAMS.apk
 
       - uses: azure/login@v2
         with:
@@ -273,8 +303,23 @@ jobs:
           az extension add --name containerapp --upgrade --only-show-errors
           az containerapp update -g $RESOURCE_GROUP -n clams-admin \
             --image $ACR.azurecr.io/clams-admin:$TAG
-      - name: Verify /download
+      # Checks WHICH binary is being served, not merely that something is.
+      # Asserting the Content-Disposition header alone passed happily for days
+      # while /download handed out a stale APK — the header is identical either
+      # way. Comparing the checksum is the only form of this test that can fail
+      # for the reason worth catching.
+      - name: Verify /download serves the APK we just baked
         run: |
           sleep 20
           curl -fsSI "$ADMIN_BASE_URL/download" | tee headers.txt
           grep -qi "content-disposition: attachment" headers.txt
+
+          curl -fsSL "$ADMIN_BASE_URL/download" -o served.apk
+          SERVED=$(sha256sum served.apk | cut -d' ' -f1)
+          echo "expected: ${{ steps.apk_file.outputs.sha }}"
+          echo "served  : $SERVED"
+          if [ "$SERVED" != "${{ steps.apk_file.outputs.sha }}" ]; then
+            echo "::error::/download is serving a different APK than this deploy baked in."
+            exit 1
+          fi
+          echo "/download matches the APK from this deploy."

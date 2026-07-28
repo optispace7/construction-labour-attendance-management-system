@@ -150,14 +150,15 @@ export function VendorDonut({
 
       {/* ---- Ranked table ---- */}
       <div className="min-w-0">
-        <div className="grid grid-cols-[minmax(0,1fr)_50px_58px] gap-2 border-b border-line pb-2 text-[12px] font-semibold uppercase tracking-[0.07em] text-ink-faint">
+        <div className="grid grid-cols-[minmax(0,1fr)_48px_74px] gap-2 border-b border-line pb-2 text-[12px] font-semibold uppercase tracking-[0.07em] text-ink-faint">
           <span>Vendor</span>
           <span className="text-right">Share</span>
-          {/* "Attendance" no longer fits its column at 12px, and widening the
-              column would come straight out of the vendor names, which already
-              truncate in a third-width panel. The figure is a headcount and the
-              panel says so above. */}
-          <span className="text-right">People</span>
+          {/* Man-days, NOT people. The figure tallies one row per worker per
+              day worked, so a contractor with ten men over a week reads about
+              seventy — calling the column "People" (as it briefly was, to fit
+              the width) turns a man-day total into a headcount an order of
+              magnitude too big. The column gets the room it needs instead. */}
+          <span className="whitespace-nowrap text-right tracking-normal">Man-days</span>
         </div>
 
         <ul>
@@ -174,7 +175,7 @@ export function VendorDonut({
                   onFocus={() => setActive(i)}
                   onBlur={() => setActive(null)}
                   className={cn(
-                    'grid w-full grid-cols-[minmax(0,1fr)_50px_58px] items-center gap-2 border-b border-line/60 py-2.5 transition-opacity',
+                    'grid w-full grid-cols-[minmax(0,1fr)_48px_74px] items-center gap-2 border-b border-line/60 py-2.5 transition-opacity',
                     dim ? 'opacity-40' : 'opacity-100',
                   )}
                 >

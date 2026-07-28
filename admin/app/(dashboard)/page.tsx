@@ -574,7 +574,7 @@ export default function DashboardV2Page() {
             <ChartPanel
               title="Vendor share"
               skeleton="donut"
-              subtitle={`Each contractor's share of total attendance over ${pluralise(windowDays, 'day')}`}
+              subtitle={`Each contractor's share of man-days over ${pluralise(windowDays, 'day')}`}
               loading={charts.isLoading && !charts.data}
               error={chartsError}
               onRetry={() => charts.refetch()}
