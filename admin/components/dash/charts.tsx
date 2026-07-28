@@ -17,6 +17,7 @@ import { motion, useReducedMotion } from 'framer-motion';
 import { cn } from '@/lib/cn';
 import { formatDay, formatNumber, formatWeekday } from '@/lib/format';
 import { categoricalPalette, type ColorMode } from '@/theme/tokens';
+import { useElementWidth } from '@/lib/useElementWidth';
 import { EASE } from './ui';
 
 /**
@@ -532,7 +533,23 @@ export function StatusSplit({
   );
 }
 
-/** Axis-free trend line drawn behind a KPI value. */
+/**
+ * Axis-free trend line drawn under a KPI value.
+ *
+ * Drawn at the element's real pixel size rather than in a 100-wide viewBox
+ * stretched to fit. `preserveAspectRatio="none"` across a 370px card meant
+ * roughly 3.7× horizontal scale against 1× vertical, and everything about a
+ * stroke suffers under that: round caps and joins come out as flattened
+ * ellipses, and the draw-on animation — which framer-motion implements with
+ * `stroke-dasharray` — measures its dashes in user units that no longer
+ * correspond to what is on screen, so the line can settle part-drawn. Under
+ * `prefers-reduced-motion` the animation is skipped and it looks fine, which is
+ * exactly why it survived the first review.
+ *
+ * Measuring costs one ResizeObserver and removes the whole class of problem:
+ * one user unit is one pixel, so the geometry is honest and no scaling
+ * correction is needed anywhere.
+ */
 export function Sparkline({
   data,
   color,
@@ -543,43 +560,57 @@ export function Sparkline({
   height?: number;
 }) {
   const id = React.useId().replace(/:/g, '');
-  const points = data.filter((n) => Number.isFinite(n));
-  if (points.length < 2) return null;
+  const reduced = useReducedMotion();
+  const [ref, width] = useElementWidth<HTMLDivElement>();
 
-  const max = Math.max(...points);
-  const min = Math.min(...points);
-  const range = max - min || 1;
-  const step = 100 / (points.length - 1);
-  const coords = points.map((v, i) => [i * step, height - ((v - min) / range) * (height - 6) - 3]);
-  const line = coords.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+  const points = React.useMemo(() => data.filter((n) => Number.isFinite(n)), [data]);
+
+  const geom = React.useMemo(() => {
+    if (points.length < 2 || width <= 0) return null;
+    // Half a stroke of breathing room, so the end caps are not sliced off by
+    // the card edge the way they were at x=0 and x=100.
+    const inset = 1.9;
+    const max = Math.max(...points);
+    const min = Math.min(...points);
+    const range = max - min || 1;
+    const stepX = (width - inset * 2) / (points.length - 1);
+    const usableH = height - inset * 2;
+
+    const line = points
+      .map((v, i) => {
+        const x = inset + i * stepX;
+        const y = inset + (1 - (v - min) / range) * usableH;
+        return `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`;
+      })
+      .join(' ');
+
+    return { line, area: `${line} L${(width - inset).toFixed(2)},${height} L${inset},${height} Z` };
+  }, [points, width, height]);
 
   return (
-    <svg
-      viewBox={`0 0 100 ${height}`}
-      preserveAspectRatio="none"
-      aria-hidden
-      className="block w-full"
-      style={{ height }}
-    >
-      <defs>
-        <linearGradient id={`sp-${id}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity={0.3} />
-          <stop offset="100%" stopColor={color} stopOpacity={0} />
-        </linearGradient>
-      </defs>
-      <path d={`${line} L100,${height} L0,${height} Z`} fill={`url(#sp-${id})`} />
-      <motion.path
-        d={line}
-        fill="none"
-        stroke={color}
-        strokeWidth={1.8}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        vectorEffect="non-scaling-stroke"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 0.9, ease: EASE }}
-      />
-    </svg>
+    <div ref={ref} className="w-full" style={{ height }} aria-hidden>
+      {geom && (
+        <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block">
+          <defs>
+            <linearGradient id={`sp-${id}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity={0.3} />
+              <stop offset="100%" stopColor={color} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <path d={geom.area} fill={`url(#sp-${id})`} />
+          <motion.path
+            d={geom.line}
+            fill="none"
+            stroke={color}
+            strokeWidth={1.8}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            initial={reduced ? false : { pathLength: 0 }}
+            animate={{ pathLength: 1 }}
+            transition={{ duration: 0.9, ease: EASE }}
+          />
+        </svg>
+      )}
+    </div>
   );
 }

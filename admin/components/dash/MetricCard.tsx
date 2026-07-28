@@ -553,7 +553,10 @@ export function ShareBar({
         )}
       </div>
       <p className="mt-1.5 truncate text-[12px] text-ink-muted">
-        {pct === null ? label : `${Math.round(pct)}% ${label}`}
+        {/* With no figure there is no percentage, and printing the bare tail
+            left "of everyone on site" sitting under an empty track reading as
+            an unfinished sentence. Say what is actually known instead. */}
+        {pct === null ? 'Nobody on site in this category' : `${Math.round(pct)}% ${label}`}
       </p>
     </div>
   );
