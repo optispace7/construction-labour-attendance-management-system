@@ -16,6 +16,7 @@ import '../printing/bulk_print_screen.dart';
 import '../printing/print_cards.dart';
 import '../sos/notification_watcher.dart';
 import '../sos/sos_button.dart';
+import 'day_summary_screen.dart';
 import 'manual_approvals_screen.dart';
 import 'supervisor_summary_screen.dart';
 import 'worker_edit_screen.dart';
@@ -284,6 +285,10 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
                 case 'manual':
                   _openManualApprovals();
                   break;
+                case 'day-summary':
+                  Navigator.of(context)
+                      .push(MaterialPageRoute(builder: (_) => const DaySummaryScreen()));
+                  break;
                 case 'bulk-print':
                   Navigator.of(context)
                       .push(MaterialPageRoute(builder: (_) => const BulkPrintScreen()));
@@ -307,6 +312,14 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
                   leading: Icon(Icons.rule),
                   title: Text('Manual entries'),
                   subtitle: Text('Accept or decline hand-typed punches'),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'day-summary',
+                child: ListTile(
+                  leading: Icon(Icons.summarize_outlined),
+                  title: Text('Attendance summary'),
+                  subtitle: Text('By designation and contractor · PDF'),
                 ),
               ),
               PopupMenuItem(

@@ -18,6 +18,7 @@ import { isCardExpired } from './engine/card-validity';
 import { computeWorkHours, ShiftConfig } from './engine/work-hours.engine';
 import { decideTap, distanceMeters, shouldVerifyPhoto } from './engine/tap-decision';
 import { TapDto } from './dto/attendance.dto';
+import { renderDaySummaryPdf } from '../reports/report.renderer';
 
 export interface TapContext {
   deviceId: string;
@@ -1076,6 +1077,51 @@ export class AttendanceService {
         .sort((a, b) => b.count - a.count),
       byCategory: [...byCategory.entries()].map(([category, v]) => ({ category, ...v })),
     };
+  }
+
+  /**
+   * The day summary as a branded PDF, for the Safety Officer to download from
+   * the mobile app and hand over at the gate.
+   *
+   * Renders from exactly the same `daySummary` figures the screen shows, so the
+   * sheet someone signs off can never disagree with the panel it was read from.
+   */
+  async daySummaryPdf(user: AuthUser, siteId?: string, dateStr?: string, category?: string) {
+    const summary = await this.daySummary(user, siteId, dateStr, category);
+    const [org, site] = await Promise.all([
+      this.prisma.organization.findUnique({
+        where: { id: user.organizationId },
+        select: { name: true },
+      }),
+      siteId && siteId !== 'all'
+        ? this.prisma.site.findFirst({
+            where: { id: siteId, organizationId: user.organizationId },
+            select: { name: true },
+          })
+        : Promise.resolve(null),
+    ]);
+
+    const buffer = await renderDaySummaryPdf(
+      {
+        date: summary.date,
+        total: summary.total,
+        activeNow: summary.activeNow,
+        byDesignation: summary.byDesignation.map((d) => ({
+          name: d.designation,
+          count: d.count,
+          active: d.active,
+        })),
+        byVendor: summary.byVendor.map((v) => ({
+          name: v.vendor,
+          count: v.count,
+          active: v.active,
+        })),
+      },
+      org?.name ?? '',
+      site?.name ?? (siteId && siteId !== 'all' ? undefined : 'All sites'),
+    );
+
+    return { buffer, filename: `attendance-summary-${summary.date}.pdf` };
   }
 
   /**

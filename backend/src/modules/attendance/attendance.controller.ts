@@ -1,6 +1,17 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  Res,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { AttendanceService } from './attendance.service';
 import { SessionAdminService } from './session-admin.service';
 import { SyncService } from './sync.service';
@@ -133,6 +144,27 @@ export class AttendanceController {
     @Query('category') category?: string,
   ) {
     return this.attendance.daySummary(user, siteId, date, category);
+  }
+
+  /**
+   * The same day summary as a downloadable PDF. Streams the bytes rather than
+   * base64 in JSON because the caller is the mobile app, which hands them
+   * straight to the OS share sheet.
+   */
+  @Get('day-summary/pdf')
+  @RequirePermissions(Permission.ATTENDANCE_VIEW)
+  async daySummaryPdf(
+    @CurrentUser() user: AuthUser,
+    @Res() res: Response,
+    @Query('siteId') siteId?: string,
+    @Query('date') date?: string,
+    @Query('category') category?: string,
+  ) {
+    const { buffer, filename } = await this.attendance.daySummaryPdf(user, siteId, date, category);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.end(buffer);
   }
 
   @Get('worker/:workerId/summary')
