@@ -474,11 +474,25 @@ export class SafetyService {
     const anchor = opts.date ? midnight(opts.date) : await this.today(user);
     const { start, end } = safetyWindow(period, anchor);
 
+    /**
+     * A daily report still gets a week of trend behind it.
+     *
+     * Its own window is one day, and a line chart of one day is three dots
+     * floating on an axis. The manpower report already answers this the same
+     * way — six days of run-up for context — so the two behave alike. Only the
+     * chart widens; every total on the page stays inside the chosen period.
+     */
+    const trendStart = period === 'daily' ? new Date(anchor.getTime() - 6 * DAY_MS) : start;
+
     const [derived, totals, trend, manpower, siteName] = await Promise.all([
       this.automated(user, sites, anchor),
       this.totalsOver(user, sites, start, end),
-      this.trendOver(user, sites, start, end),
-      this.manpowerSeries(user, sites, start, end),
+      this.trendOver(user, sites, trendStart, end),
+      // A fixed trailing month, NOT the selected window. These three cards are
+      // "as of the anchor date" snapshots rather than period aggregates — their
+      // values already ignore the window — and on a daily report the window is
+      // one day, which is a single point and therefore no line at all.
+      this.manpowerSeries(user, sites, new Date(anchor.getTime() - 29 * DAY_MS), anchor),
       opts.siteId && opts.siteId !== 'all'
         ? this.prisma.site
             .findFirst({
