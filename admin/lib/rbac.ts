@@ -13,6 +13,11 @@ export interface NavItem {
   href: string;
   roles: UserRole[];
   group: NavGroup;
+  /**
+   * Kept out of the sidebar until the reveal chord is pressed. Concealment for
+   * work in progress, never a permission — see `lib/hiddenNav.ts`.
+   */
+  hidden?: boolean;
 }
 
 export const NAV_ITEMS: NavItem[] = [
@@ -37,17 +42,23 @@ export const NAV_ITEMS: NavItem[] = [
   // The safety board is the Safety Officer's own record: they enter the daily
   // figures and read the statistics off them, so both pages are theirs as much
   // as an admin's.
+  //
+  // Hidden for now. A client with a login to this panel was asking about a board
+  // that is still being shaped, so it stays out of the sidebar until someone
+  // presses the reveal chord. Drop the `hidden` flags to ship it for real.
   {
     label: 'Safety statistics',
     href: '/safety',
     roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
     group: 'Safety',
+    hidden: true,
   },
   {
     label: 'Daily task',
     href: '/safety/daily',
     roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
     group: 'Safety',
+    hidden: true,
   },
   { label: 'Workers', href: '/workers', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
   { label: 'Staff', href: '/staff', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },

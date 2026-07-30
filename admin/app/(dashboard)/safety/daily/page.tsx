@@ -36,6 +36,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { api, apiErrorMessage } from '@/lib/api/browser';
 import { useToast } from '@/components/ui/Toast';
 import type { Site } from '@/lib/types';
+import { HiddenPageGate } from '@/components/HiddenPageGate';
 
 type MetricKind = 'AUTOMATED' | 'MANUAL';
 
@@ -73,6 +74,14 @@ const today = () => new Date().toISOString().slice(0, 10);
 type Draft = Record<string, { value?: string; comment?: string }>;
 
 export default function DailyTaskPage() {
+  return (
+    <HiddenPageGate>
+      <DailyTaskForm />
+    </HiddenPageGate>
+  );
+}
+
+function DailyTaskForm() {
   const [siteId, setSiteId] = React.useState('');
   const [date, setDate] = React.useState(today);
   const [draft, setDraft] = React.useState<Draft>({});

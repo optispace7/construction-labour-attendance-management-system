@@ -20,6 +20,7 @@ import { api, apiErrorMessage } from '@/lib/api/browser';
 import { formatNumber } from '@/lib/format';
 import * as I from '@/components/icons';
 import type { Site } from '@/lib/types';
+import { HiddenPageGate } from '@/components/HiddenPageGate';
 
 type Period = 'daily' | 'weekly' | 'monthly';
 
@@ -63,6 +64,14 @@ const PERIODS: { value: Period; label: string }[] = [
 ];
 
 export default function SafetyStatisticsPage() {
+  return (
+    <HiddenPageGate>
+      <SafetyStatisticsBoard />
+    </HiddenPageGate>
+  );
+}
+
+function SafetyStatisticsBoard() {
   const [siteId, setSiteId] = React.useState('all');
   const [date, setDate] = React.useState(today);
   const [period, setPeriod] = React.useState<Period>('daily');
