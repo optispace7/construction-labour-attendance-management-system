@@ -14,6 +14,7 @@ import '../device/device_service.dart';
 import '../printing/badge_printer.dart';
 import '../printing/bulk_print_screen.dart';
 import '../printing/print_cards.dart';
+import '../safety/safety_daily_screen.dart';
 import '../sos/notification_watcher.dart';
 import '../sos/sos_button.dart';
 import 'day_summary_screen.dart';
@@ -285,6 +286,10 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
                 case 'manual':
                   _openManualApprovals();
                   break;
+                case 'safety-daily':
+                  Navigator.of(context)
+                      .push(MaterialPageRoute(builder: (_) => const SafetyDailyScreen()));
+                  break;
                 case 'day-summary':
                   Navigator.of(context)
                       .push(MaterialPageRoute(builder: (_) => const DaySummaryScreen()));
@@ -312,6 +317,14 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
                   leading: Icon(Icons.rule),
                   title: Text('Manual entries'),
                   subtitle: Text('Accept or decline hand-typed punches'),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'safety-daily',
+                child: ListTile(
+                  leading: Icon(Icons.health_and_safety_outlined),
+                  title: Text('Daily task'),
+                  subtitle: Text("Today's safety figures"),
                 ),
               ),
               PopupMenuItem(

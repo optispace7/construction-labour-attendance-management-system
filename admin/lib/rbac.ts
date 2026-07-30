@@ -1,6 +1,12 @@
 import { UserRole } from './types';
 
-export type NavGroup = 'Overview' | 'Operations' | 'People' | 'Sites & partners' | 'Administration';
+export type NavGroup =
+  | 'Overview'
+  | 'Operations'
+  | 'Safety'
+  | 'People'
+  | 'Sites & partners'
+  | 'Administration';
 
 export interface NavItem {
   label: string;
@@ -28,6 +34,21 @@ export const NAV_ITEMS: NavItem[] = [
     group: 'Operations',
   },
   { label: 'Reports', href: '/reports', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'Operations' },
+  // The safety board is the Safety Officer's own record: they enter the daily
+  // figures and read the statistics off them, so both pages are theirs as much
+  // as an admin's.
+  {
+    label: 'Safety statistics',
+    href: '/safety',
+    roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
+    group: 'Safety',
+  },
+  {
+    label: 'Daily task',
+    href: '/safety/daily',
+    roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
+    group: 'Safety',
+  },
   { label: 'Workers', href: '/workers', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
   { label: 'Staff', href: '/staff', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
   { label: 'Visitors', href: '/visitors', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },

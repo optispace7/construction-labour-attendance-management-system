@@ -158,14 +158,15 @@ model Site {
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
-  organization Organization           @relation(fields: [organizationId], references: [id])
-  settings     SiteSettings?
-  shifts       Shift[]
-  devices      Device[]
-  assignments  WorkerSiteAssignment[]
-  sessions     AttendanceSession[]    @relation("SessionSite")
-  scopes       UserSiteScope[]
-  manualTaps   ManualAttendanceRequest[]
+  organization  Organization              @relation(fields: [organizationId], references: [id])
+  settings      SiteSettings?
+  shifts        Shift[]
+  devices       Device[]
+  assignments   WorkerSiteAssignment[]
+  sessions      AttendanceSession[]       @relation("SessionSite")
+  scopes        UserSiteScope[]
+  manualTaps    ManualAttendanceRequest[]
+  safetyEntries DailySafetyEntry[]
 
   @@unique([organizationId, code])
   @@map("sites")
@@ -348,9 +349,9 @@ model Worker {
   updatedAt              DateTime       @updatedAt @map("updated_at") @db.Timestamptz
   deletedAt              DateTime?      @map("deleted_at") @db.Timestamptz
 
-  organization Organization           @relation(fields: [organizationId], references: [id])
-  vendor       Vendor?                @relation(fields: [vendorId], references: [id])
-  designation  Designation?           @relation(fields: [designationId], references: [id])
+  organization Organization              @relation(fields: [organizationId], references: [id])
+  vendor       Vendor?                   @relation(fields: [vendorId], references: [id])
+  designation  Designation?              @relation(fields: [designationId], references: [id])
   assignments  WorkerSiteAssignment[]
   credentials  WorkerCredential[]
   sessions     AttendanceSession[]
@@ -462,10 +463,10 @@ model AttendanceTap {
   manualReason     String?           @map("manual_reason")
   createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz
 
-  device        Device?            @relation(fields: [deviceId], references: [id])
-  worker        Worker?            @relation(fields: [workerId], references: [id])
-  loginSession  AttendanceSession? @relation("LoginTap")
-  logoutSession AttendanceSession? @relation("LogoutTap")
+  device        Device?                  @relation(fields: [deviceId], references: [id])
+  worker        Worker?                  @relation(fields: [workerId], references: [id])
+  loginSession  AttendanceSession?       @relation("LoginTap")
+  logoutSession AttendanceSession?       @relation("LogoutTap")
   manualRequest ManualAttendanceRequest?
 
   @@unique([organizationId, eventId])
@@ -497,11 +498,11 @@ model AttendanceSession {
   createdAt              DateTime     @default(now()) @map("created_at") @db.Timestamptz
   updatedAt              DateTime     @updatedAt @map("updated_at") @db.Timestamptz
 
-  worker      Worker              @relation(fields: [workerId], references: [id])
-  site        Site                @relation("SessionSite", fields: [siteId], references: [id])
-  shift       Shift?              @relation(fields: [shiftId], references: [id])
-  loginTap    AttendanceTap?      @relation("LoginTap", fields: [loginTapId], references: [id])
-  logoutTap   AttendanceTap?      @relation("LogoutTap", fields: [logoutTapId], references: [id])
+  worker      Worker                    @relation(fields: [workerId], references: [id])
+  site        Site                      @relation("SessionSite", fields: [siteId], references: [id])
+  shift       Shift?                    @relation(fields: [shiftId], references: [id])
+  loginTap    AttendanceTap?            @relation("LoginTap", fields: [loginTapId], references: [id])
+  logoutTap   AttendanceTap?            @relation("LogoutTap", fields: [logoutTapId], references: [id])
   corrections CorrectionRequest[]
   manualTaps  ManualAttendanceRequest[]
 
@@ -664,19 +665,19 @@ model RefreshToken {
 
 // ---------------- Files (photos stored in Postgres) ----------------
 model PhotoBlob {
-  id             String    @id @default(uuid()) @db.Uuid
-  organizationId String    @map("organization_id") @db.Uuid
-  mimeType       String    @map("mime_type")
-  data           Bytes
-  sizeBytes      Int       @map("size_bytes")
+  id                String    @id @default(uuid()) @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  mimeType          String    @map("mime_type")
+  data              Bytes
+  sizeBytes         Int       @map("size_bytes")
   // Storage-management metadata. `sizeBytes` is the stored (compressed +
   // possibly encrypted) length; `originalSizeBytes` is what the client sent.
-  kind           PhotoKind @default(PROFILE)
-  isCompressed   Boolean   @default(false) @map("is_compressed")
-  isEncrypted    Boolean   @default(false) @map("is_encrypted")
-  originalSizeBytes Int?   @map("original_size_bytes")
-  createdBy      String?   @map("created_by") @db.Uuid
-  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  kind              PhotoKind @default(PROFILE)
+  isCompressed      Boolean   @default(false) @map("is_compressed")
+  isEncrypted       Boolean   @default(false) @map("is_encrypted")
+  originalSizeBytes Int?      @map("original_size_bytes")
+  createdBy         String?   @map("created_by") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz
 
   @@map("photo_blobs")
 }
@@ -733,6 +734,71 @@ model PushToken {
 
   @@index([organizationId])
   @@map("push_tokens")
+}
+
+// ---------------- Safety statistics ----------------
+
+/// Everything the safety board tracks for one day, one metric at a time.
+///
+/// Three of these are derived from attendance and never typed in
+/// (DAILY_MANPOWER, TOTAL_MANPOWER, TOTAL_SAFE_MAN_HOURS); the rest are the
+/// Safety Officer's daily count. Both kinds get a row here so the automated ones
+/// can still carry a comment, and a derived row leaves `value` null rather than
+/// caching a number that attendance can change under it.
+enum SafetyMetric {
+  // Derived from attendance — value is computed on read, never stored.
+  DAILY_MANPOWER
+  TOTAL_MANPOWER
+  TOTAL_SAFE_MAN_HOURS
+  // Entered by the Safety Officer.
+  LABOUR_INDUCTION
+  TOOLBOX_TALK
+  WORK_PERMIT
+  UNSAFE_ACTS
+  UNSAFE_CONDITIONS
+  UNSAFE_ACTS_CLOSED
+  UNSAFE_CONDITIONS_CLOSED
+  SAFETY_OBSERVATION
+  SAFETY_OBSERVATION_CLOSED
+  NEAR_MISS
+  FIRST_AID
+  MEDICAL_TREATMENT_CASE
+  LOST_TIME_INJURY
+  SAFETY_INSPECTION
+  WASTE_DISPOSAL
+  VISITOR_INDUCTION
+  SAFETY_AUDIT
+  TRAINING
+}
+
+/// One metric, one site, one day.
+///
+/// Deliberately tall rather than a row of twenty-one columns: the brief asks for
+/// Edit / Delete / View on every individual item across every date, which is a
+/// row operation here and a partial-column update in the wide shape. It also
+/// means a twenty-second metric costs an enum value, not a migration.
+///
+/// A missing row means "not filled in", which is a different thing from a row
+/// holding zero — zero unsafe acts is a claim the officer made, and the stats
+/// page is entitled to say so.
+model DailySafetyEntry {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  siteId         String       @map("site_id") @db.Uuid
+  entryDate      DateTime     @map("entry_date") @db.Date
+  metric         SafetyMetric
+  /// Null for the derived metrics, and for a comment-only row.
+  value          Int?
+  comment        String?
+  recordedById   String?      @map("recorded_by_id") @db.Uuid
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz
+
+  site Site @relation(fields: [siteId], references: [id])
+
+  @@unique([siteId, entryDate, metric])
+  @@index([organizationId, entryDate])
+  @@map("daily_safety_entries")
 }
 
 // ---------------- Reports ----------------

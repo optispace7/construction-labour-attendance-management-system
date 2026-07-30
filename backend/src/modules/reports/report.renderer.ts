@@ -444,14 +444,25 @@ function emptyPanel(doc: Doc, box: { x: number; y: number; w: number; h: number 
     .text(msg, box.x, box.y + box.h / 2 - 5, { width: textW(box.w), align: 'center' });
 }
 
-/** A clean axis ceiling at or above `v` — 1/2/5 × a power of ten. */
-function niceMax(v: number): number {
-  if (v <= 1) return 1;
-  const pow = 10 ** Math.floor(Math.log10(v));
-  for (const m of [1, 2, 2.5, 5, 10]) {
-    if (v <= m * pow) return m * pow;
-  }
-  return 10 * pow;
+/**
+ * A y-axis that lands on round numbers.
+ *
+ * Picking a ceiling first and dividing it into a fixed number of bands is what
+ * printed "0 17 33 50" on a peak of 50 — the ceiling was round but the step was
+ * not. This picks the *step* from the 1/2/2.5/5 series instead and lets the
+ * ceiling and band count fall out of it, so every tick is a number a reader
+ * recognises.
+ */
+function niceScale(peak: number, targetBands = 4): { ceiling: number; bands: number } {
+  if (peak <= 0) return { ceiling: 1, bands: 1 };
+  const raw = peak / targetBands;
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * pow).find((c) => c >= raw - 1e-9) ?? 10 * pow;
+  const ceiling = Math.ceil(peak / step) * step;
+  // Sub-unit steps would tick 0.5 people; a count axis stays whole.
+  if (step < 1)
+    return { ceiling: Math.max(1, Math.ceil(peak)), bands: Math.max(1, Math.ceil(peak)) };
+  return { ceiling, bands: Math.max(1, Math.round(ceiling / step)) };
 }
 
 /**
@@ -476,14 +487,12 @@ function drawTrend(
   const gutter = 30;
   const xBand = 16;
   const plot = { x: x + gutter, y, w: w - gutter, h: h - xBand };
-  const max = niceMax(peakValue);
+  const { ceiling: max, bands } = niceScale(peakValue);
   const scaleY = (v: number) => plot.y + plot.h - (v / max) * plot.h;
   const stepX = n > 1 ? plot.w / (n - 1) : 0;
   const px = (i: number) => (n > 1 ? plot.x + i * stepX : plot.x + plot.w / 2);
 
-  // Hairline guides at clean values, with the tick beside each. A small ceiling
-  // gets one band per unit — quartering a max of 1 prints "0 1 1 1 1".
-  const bands = max < 4 ? max : 4;
+  // Hairline guides on the scale's own steps, with the tick beside each.
   doc.lineWidth(0.5);
   for (let g = 0; g <= bands; g++) {
     const v = (max / bands) * g;
@@ -1104,6 +1113,356 @@ export function renderDaySummaryPdf(
       );
 
     doc.end();
+  });
+}
+
+export interface SafetyPdfReport {
+  periodLabel: string;
+  from: string;
+  to: string;
+  siteName: string | null;
+  kpis: {
+    dailyManpower: number;
+    totalManpower: number;
+    totalSafeManHours: number;
+    safetyPerformance: number | null;
+    safetyPerformanceTarget: number;
+  };
+  trend: { days: string[]; series: { label: string; values: number[] }[] };
+  observations: { bucket: string; raised: number; closed: number }[];
+  statistics: { label: string; kind: string; value: number }[];
+  categoryBreakup: { rows: { label: string; value: number; percent: number }[] };
+}
+
+/** Headline tile for the safety sheet. */
+function drawKpiTile(
+  doc: Doc,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  label: string,
+  value: string,
+  accent: string,
+) {
+  doc.roundedRect(x, y, w, h, 10).fillColor(PANEL).fill();
+  doc.roundedRect(x, y, w, h, 10).lineWidth(0.7).strokeColor(PANEL_EDGE).stroke();
+  // A short accent bar rather than a coloured card: the number is the content.
+  doc
+    .roundedRect(x + 14, y + 14, 3, h - 28, 1.5)
+    .fillColor(accent)
+    .fill();
+  doc.font('Helvetica').fontSize(7).fillColor(INK_3);
+  doc.text(fitText(doc, label.toUpperCase(), w - 40), x + 24, y + 15, {
+    width: textW(w - 34),
+    lineBreak: false,
+    characterSpacing: 0.6,
+  });
+  doc.font('Helvetica-Bold').fontSize(19).fillColor(INK);
+  doc.text(fitText(doc, value, w - 34), x + 24, y + 29, { width: textW(w - 34), lineBreak: false });
+}
+
+/** Multi-series line chart for the safety trend. */
+function drawMultiLine(
+  doc: Doc,
+  box: { x: number; y: number; w: number; h: number },
+  days: string[],
+  series: { label: string; values: number[] }[],
+) {
+  const { x, y, w, h } = box;
+  const flat = series.flatMap((s) => s.values);
+  if (days.length === 0 || flat.length === 0 || Math.max(...flat) === 0) {
+    return emptyPanel(doc, box, 'Nothing recorded in this period');
+  }
+
+  const legendH = 14;
+  const gutter = 26;
+  const xBand = 14;
+  const plot = { x: x + gutter, y: y + legendH, w: w - gutter, h: h - legendH - xBand };
+  const { ceiling: max, bands } = niceScale(Math.max(...flat), 3);
+  const scaleY = (v: number) => plot.y + plot.h - (v / max) * plot.h;
+  const n = days.length;
+  const px = (i: number) => (n > 1 ? plot.x + (i * plot.w) / (n - 1) : plot.x + plot.w / 2);
+
+  // Legend across the top — three series, so identity cannot rest on colour.
+  let lx = x + gutter;
+  series.forEach((s, i) => {
+    const colour = SERIES[i % SERIES.length];
+    doc
+      .roundedRect(lx, y + 3, 7, 3, 1.5)
+      .fillColor(colour)
+      .fill();
+    doc.font('Helvetica').fontSize(6.5).fillColor(INK_2);
+    const label = fitText(doc, s.label, 90);
+    doc.text(label, lx + 11, y + 1, { width: textW(92), lineBreak: false });
+    lx += 11 + doc.widthOfString(label) + 12;
+  });
+
+  doc.lineWidth(0.5);
+  for (let g = 0; g <= bands; g++) {
+    const v = (max / bands) * g;
+    const gy = scaleY(v);
+    doc
+      .strokeColor(GRID)
+      .moveTo(plot.x, gy)
+      .lineTo(plot.x + plot.w, gy)
+      .stroke();
+    doc.font('Helvetica').fontSize(6).fillColor(INK_3);
+    doc.text(fmt(v), x, gy - 3, { width: textW(gutter - 6), align: 'right', lineBreak: false });
+  }
+
+  series.forEach((s, i) => {
+    doc
+      .lineWidth(1.6)
+      .strokeColor(SERIES[i % SERIES.length])
+      .lineJoin('round')
+      .lineCap('round');
+    s.values.forEach((v, k) =>
+      k === 0 ? doc.moveTo(px(k), scaleY(v)) : doc.lineTo(px(k), scaleY(v)),
+    );
+    doc.stroke();
+  });
+
+  const every = Math.max(1, Math.ceil(n / 8));
+  days.forEach((day, i) => {
+    if (i % every !== 0 && i !== n - 1) return;
+    const d = new Date(`${day}T00:00:00.000Z`);
+    doc.font('Helvetica').fontSize(6).fillColor(INK_3);
+    doc.text(
+      d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }),
+      px(i) - 16,
+      plot.y + plot.h + 5,
+      { width: 32, align: 'center', lineBreak: false },
+    );
+  });
+}
+
+/** Raised against closed, grouped by window. */
+function drawGroupedBars(
+  doc: Doc,
+  box: { x: number; y: number; w: number; h: number },
+  rows: { bucket: string; raised: number; closed: number }[],
+) {
+  const { x, y, w, h } = box;
+  const max = Math.max(...rows.flatMap((r) => [r.raised, r.closed]), 0);
+  if (rows.length === 0 || max === 0) {
+    return emptyPanel(doc, box, 'Nothing raised in this period');
+  }
+  const RAISED = '#E0A438';
+  const CLOSED = '#16AD52';
+
+  const legendH = 14;
+  const xBand = 14;
+  const plot = { x, y: y + legendH, w, h: h - legendH - xBand };
+  const { ceiling } = niceScale(max);
+  const scaleY = (v: number) => plot.y + plot.h - (v / ceiling) * plot.h;
+
+  let lx = x;
+  for (const [label, colour] of [
+    ['Raised', RAISED],
+    ['Closed', CLOSED],
+  ] as const) {
+    doc
+      .roundedRect(lx, y + 2, 7, 5, 1.5)
+      .fillColor(colour)
+      .fill();
+    doc.font('Helvetica').fontSize(6.5).fillColor(INK_2);
+    doc.text(label, lx + 11, y + 1, { width: textW(40), lineBreak: false });
+    lx += 11 + doc.widthOfString(label) + 12;
+  }
+
+  const slot = plot.w / rows.length;
+  const barW = Math.min(16, slot * 0.28);
+  rows.forEach((r, i) => {
+    const centre = plot.x + slot * i + slot / 2;
+    (
+      [
+        [r.raised, RAISED, -1],
+        [r.closed, CLOSED, 1],
+      ] as const
+    ).forEach(([v, colour, side]) => {
+      const bh = Math.max(1.5, plot.y + plot.h - scaleY(v));
+      // A 2px gap between the pair: surface does the separating, not a stroke.
+      const bx = centre + side * 1 + (side < 0 ? -barW : 0);
+      barPath(doc, bx, plot.y + plot.h - bh, barW, bh, 3, 'top');
+      doc.fillColor(colour).fill();
+      doc.font('Helvetica-Bold').fontSize(6.5).fillColor(INK_2);
+      doc.text(fmt(v), bx - 4, plot.y + plot.h - bh - 9, {
+        width: barW + 8,
+        align: 'center',
+        lineBreak: false,
+      });
+    });
+    doc.font('Helvetica').fontSize(6.5).fillColor(INK_3);
+    doc.text(r.bucket, centre - slot / 2, plot.y + plot.h + 5, {
+      width: textW(slot),
+      align: 'center',
+      lineBreak: false,
+    });
+  });
+}
+
+/**
+ * The safety statistics sheet: the board a client is shown at a review meeting.
+ *
+ * Keeps its headline tiles, unlike the manpower report — here the four figures
+ * (today's manpower, the cumulative total, safe man-hours and the closure rate)
+ * are the point of the document rather than decoration above the charts.
+ */
+export function renderSafetyPdf(
+  r: SafetyPdfReport,
+  orgName: string,
+  periodName: string,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 0 });
+    const chunks: Buffer[] = [];
+    doc.on('data', (c: Buffer) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const M = 30;
+    const pageW = doc.page.width;
+    const pageH = doc.page.height;
+    const contentW = pageW - M * 2;
+
+    doc.rect(0, 0, pageW, pageH).fillColor(PAGE).fill();
+
+    // ---- Header ----
+    const headH = 72;
+    doc.rect(0, 0, pageW, headH).fillColor('#0A131A').fill();
+    const titleW = contentW * 0.6;
+    doc.font('Helvetica-Bold').fontSize(17).fillColor(INK);
+    doc.text(fitText(doc, `${periodName} safety report`, titleW), M, 20, {
+      width: titleW,
+      lineBreak: false,
+    });
+    doc.font('Helvetica').fontSize(8).fillColor(INK_3);
+    doc.text(
+      fitText(doc, [orgName, r.siteName ?? 'All sites'].join(' · ').toUpperCase(), titleW - 10),
+      M,
+      44,
+      { width: titleW, lineBreak: false, characterSpacing: 0.7 },
+    );
+    drawLogo(doc, pageW - M, 17, 16);
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK_2);
+    doc.text(r.periodLabel, M + titleW, 44, {
+      width: contentW - titleW,
+      align: 'right',
+      lineBreak: false,
+    });
+    doc.rect(0, headH, pageW, 1.6).fillColor(ACCENT).fill();
+
+    // ---- Headline tiles ----
+    const gap = 12;
+    let y = headH + 16;
+    const tileH = 58;
+    const tileW = (contentW - gap * 3) / 4;
+    const perf = r.kpis.safetyPerformance == null ? '—' : `${r.kpis.safetyPerformance}%`;
+    const tiles: [string, string, string][] = [
+      ["Today's manpower", fmt(r.kpis.dailyManpower), SERIES[0]],
+      ['Total manpower as of now', fmt(r.kpis.totalManpower), SERIES[4]],
+      ['Total safe man-hours', fmt(r.kpis.totalSafeManHours), SERIES[5]],
+      [`Safety performance (target ${r.kpis.safetyPerformanceTarget}%)`, perf, SERIES[3]],
+    ];
+    tiles.forEach(([label, value, accent], i) => {
+      drawKpiTile(doc, M + (tileW + gap) * i, y, tileW, tileH, label, value, accent);
+    });
+    y += tileH + gap;
+
+    // ---- Trend + observations ----
+    const midH = 168;
+    const trendW = contentW * 0.62;
+    drawMultiLine(
+      doc,
+      panel(doc, M, y, trendW, midH, 'Trend overview', 'Inductions, toolbox talks and visitors'),
+      r.trend.days,
+      r.trend.series,
+    );
+    drawGroupedBars(
+      doc,
+      panel(
+        doc,
+        M + trendW + gap,
+        y,
+        contentW - trendW - gap,
+        midH,
+        'Safety observations',
+        'Raised against closed',
+      ),
+      r.observations,
+    );
+    y += midH + gap;
+
+    // ---- Statistics list + category breakup ----
+    const lowH = pageH - y - 34;
+    const listW = contentW * 0.62;
+    const listBox = panel(doc, M, y, listW, lowH, 'Safety statistics', 'Every tracked item');
+    drawStatList(doc, listBox, r.statistics);
+    drawBars(
+      doc,
+      panel(
+        doc,
+        M + listW + gap,
+        y,
+        contentW - listW - gap,
+        lowH,
+        'Category-wise breakup',
+        'Findings and incidents',
+      ),
+      r.categoryBreakup.rows.map((b) => ({ name: b.label, count: b.value })),
+    );
+
+    doc.font('Helvetica').fontSize(6.5).fillColor(INK_3);
+    doc.text(
+      `Generated ${new Date().toLocaleString('en-GB', { timeZone: 'UTC' })} UTC · ` +
+        `${r.from} to ${r.to} · manpower is labour only; safe man-hours credit ten hours per man-day`,
+      M,
+      pageH - 24,
+      { width: contentW, lineBreak: false },
+    );
+
+    doc.end();
+  });
+}
+
+/** The tracked-item list, in as many columns as the panel affords. */
+function drawStatList(
+  doc: Doc,
+  box: { x: number; y: number; w: number; h: number },
+  rows: { label: string; kind: string; value: number }[],
+) {
+  const { x, y, w, h } = box;
+  if (rows.length === 0) return emptyPanel(doc, box, 'Nothing tracked yet');
+  const rowH = 13.5;
+  const perCol = Math.max(1, Math.floor(h / rowH));
+  const cols = Math.max(1, Math.ceil(rows.length / perCol));
+  const colW = (w - 10 * (cols - 1)) / cols;
+  const valueW = 30;
+
+  rows.forEach((r, i) => {
+    const col = Math.floor(i / perCol);
+    const rowIdx = i % perCol;
+    if (col >= cols) return;
+    const cx = x + col * (colW + 10);
+    const cy = y + rowIdx * rowH;
+    doc.font('Helvetica').fontSize(7).fillColor(INK_2);
+    doc.text(fitText(doc, r.label, colW - valueW - 6), cx, cy, {
+      width: textW(colW - valueW - 6),
+      lineBreak: false,
+    });
+    doc.font('Helvetica-Bold').fontSize(7).fillColor(INK);
+    doc.text(fmt(r.value), cx + colW - valueW, cy, {
+      width: textW(valueW),
+      align: 'right',
+      lineBreak: false,
+    });
+    doc
+      .lineWidth(0.4)
+      .strokeColor(GRID)
+      .moveTo(cx, cy + rowH - 3.5)
+      .lineTo(cx + colW, cy + rowH - 3.5)
+      .stroke();
   });
 }
 

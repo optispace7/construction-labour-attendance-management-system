@@ -40,6 +40,8 @@ const NAV_ICONS: Record<string, React.FC<I.IconProps>> = {
   '/corrections': I.RuleIcon,
   '/attendance/manual-entries': I.PendingIcon,
   '/reports': I.ReportsIcon,
+  '/safety': I.SafetyIcon,
+  '/safety/daily': I.DailyTaskIcon,
   '/workers': I.HelmetIcon,
   '/staff': I.BadgeIcon,
   '/visitors': I.VisitorsIcon,
@@ -56,6 +58,7 @@ const NAV_ICONS: Record<string, React.FC<I.IconProps>> = {
 const GROUP_ORDER: NavGroup[] = [
   'Overview',
   'Operations',
+  'Safety',
   'People',
   'Sites & partners',
   'Administration',

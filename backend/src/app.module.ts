@@ -26,6 +26,7 @@ import { AttendanceModule } from './modules/attendance/attendance.module';
 import { CorrectionsModule } from './modules/corrections/corrections.module';
 import { ManualApprovalsModule } from './modules/manual-approvals/manual-approvals.module';
 import { ReportsModule } from './modules/reports/reports.module';
+import { SafetyModule } from './modules/safety/safety.module';
 import { AuditQueryModule } from './modules/audit/audit-query.module';
 import { DesignationsModule } from './modules/designations/designations.module';
 import { FilesModule } from './modules/files/files.module';
@@ -55,6 +56,7 @@ import { StorageModule } from './modules/storage/storage.module';
     CorrectionsModule,
     ManualApprovalsModule,
     ReportsModule,
+    SafetyModule,
     AuditQueryModule,
     MailModule,
     DesignationsModule,

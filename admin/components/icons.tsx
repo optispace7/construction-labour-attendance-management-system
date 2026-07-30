@@ -91,6 +91,24 @@ export const HelmetIcon = (p: IconProps) => (
   </Icon>
 );
 
+/** Shield with a cross — the safety board. */
+export const SafetyIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 3.2 19.2 6v6.1c0 4.2-2.9 7.4-7.2 8.7-4.3-1.3-7.2-4.5-7.2-8.7V6L12 3.2Z" />
+    <path d="M12 9.2v5.2" />
+    <path d="M9.4 11.8h5.2" />
+  </Icon>
+);
+
+/** Clipboard with a tick — the day's task list. */
+export const DailyTaskIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="4.6" y="4.8" width="14.8" height="15.4" rx="2.1" />
+    <path d="M9 4.8V3.6A.9.9 0 0 1 9.9 2.7h4.2a.9.9 0 0 1 .9.9v1.2" />
+    <path d="M8.9 13.4l2.1 2.1 4.1-4.4" />
+  </Icon>
+);
+
 export const BadgeIcon = (p: IconProps) => (
   <Icon {...p}>
     <rect x="3.5" y="6" width="17" height="14.5" rx="2.2" />
