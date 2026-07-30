@@ -42,9 +42,11 @@ class SafetyItem {
 
 /// The Safety Officer's daily task sheet, on the phone.
 ///
-/// Three figures come from attendance and are shown read-only; the rest are the
-/// officer's own count. Every item — derived ones included — takes an optional
-/// comment, which is where the context that a number cannot carry ends up.
+/// Only the figures somebody types appear here. Manpower, total manpower and
+/// safe man-hours are computed from attendance and are read on the statistics
+/// board — a field for them would either sit dead or invite an edit that gets
+/// thrown away. Each item takes an optional comment, which is where the context
+/// a number cannot carry ends up.
 ///
 /// Writes always go to the active site: the figures belong to a site, and there
 /// is no company-wide row to save into.
@@ -104,9 +106,13 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
       final m = (res.data as Map).cast<String, dynamic>();
       if (!mounted) return;
       setState(() {
+        // Manpower and safe man-hours are computed from attendance, so a field
+        // for them would either be dead or would invite an edit that gets
+        // thrown away. They are read on the statistics board instead.
         _items = ((m['items'] as List?) ?? const [])
             .cast<Map<String, dynamic>>()
             .map(SafetyItem.fromMap)
+            .where((i) => !i.isAutomated)
             .toList();
         _values.clear();
         _comments.clear();
@@ -152,7 +158,7 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
         return {
           'metric': i.metric,
           // Blank clears back to "not filled in", which is not the same as zero.
-          'value': i.isAutomated || raw.trim().isEmpty ? null : int.tryParse(raw.trim()),
+          'value': raw.trim().isEmpty ? null : int.tryParse(raw.trim()),
           'comment': comment.trim().isEmpty ? null : comment.trim(),
         };
       }).toList();
@@ -334,33 +340,9 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    it.label,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: it.isAutomated ? ClamsColors.successTint : ClamsColors.background,
-                    borderRadius: BorderRadius.circular(ClamsRadius.control),
-                    border: Border.all(
-                      color: it.isAutomated ? ClamsColors.success : ClamsColors.border,
-                    ),
-                  ),
-                  child: Text(
-                    it.isAutomated ? 'Automated' : 'Manual',
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600,
-                      color: it.isAutomated ? ClamsColors.success : ClamsColors.textSecondary,
-                    ),
-                  ),
-                ),
-              ],
+            Text(
+              it.label,
+              style: const TextStyle(fontWeight: FontWeight.w600),
             ),
             ClamsSpacing.gapSm,
             Row(
@@ -368,24 +350,13 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
               children: [
                 SizedBox(
                   width: 110,
-                  child: it.isAutomated
-                      ? InputDecorator(
-                          decoration: const InputDecoration(
-                            labelText: 'From attendance',
-                            isDense: true,
-                          ),
-                          child: Text(
-                            it.value?.toString() ?? '—',
-                            style: const TextStyle(fontWeight: FontWeight.w600),
-                          ),
-                        )
-                      : TextFormField(
-                          initialValue: it.value?.toString() ?? '',
-                          keyboardType: TextInputType.number,
-                          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                          decoration: const InputDecoration(labelText: 'Count'),
-                          onChanged: (v) => setState(() => _values[it.metric] = v),
-                        ),
+                  child: TextFormField(
+                    initialValue: it.value?.toString() ?? '',
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: const InputDecoration(labelText: 'Count'),
+                    onChanged: (v) => setState(() => _values[it.metric] = v),
+                  ),
                 ),
                 const SizedBox(width: ClamsSpacing.md),
                 Expanded(

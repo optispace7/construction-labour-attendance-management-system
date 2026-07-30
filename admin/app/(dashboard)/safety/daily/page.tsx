@@ -7,7 +7,6 @@ import {
   Button,
   Card,
   CardContent,
-  Chip,
   CircularProgress,
   Dialog,
   DialogContent,
@@ -60,6 +59,8 @@ interface HistoryRow {
   date: string;
   value: number | null;
   comment: string | null;
+  /** False for a day with nothing entered — the API returns the whole window. */
+  recorded: boolean;
 }
 interface HistoryResult {
   metric: string;
@@ -115,7 +116,7 @@ function DailyTaskForm() {
   const save = useMutation({
     mutationFn: async () => {
       const items = (board.data?.items ?? [])
-        .filter((it) => draft[it.metric] !== undefined)
+        .filter((it) => it.kind !== 'AUTOMATED' && draft[it.metric] !== undefined)
         .map((it) => {
           const d = draft[it.metric] ?? {};
           const raw = d.value ?? (it.value == null ? '' : String(it.value));
@@ -123,7 +124,7 @@ function DailyTaskForm() {
           return {
             metric: it.metric,
             // Blank clears the number back to "not filled in" rather than zero.
-            value: it.kind === 'AUTOMATED' || raw.trim() === '' ? null : Number(raw),
+            value: raw.trim() === '' ? null : Number(raw),
             comment: comment.trim() === '' ? null : comment,
           };
         });
@@ -150,9 +151,17 @@ function DailyTaskForm() {
     onError: (e) => toast.error(apiErrorMessage(e, 'Could not clear that item.')),
   });
 
+  /**
+   * Only the items somebody actually types.
+   *
+   * Manpower and safe man-hours are computed from attendance, so a field for
+   * them would either be dead or would invite an edit that gets thrown away.
+   * They are read on the statistics board instead.
+   */
   const groups = React.useMemo(() => {
     const out = new Map<string, DailyItem[]>();
     for (const it of board.data?.items ?? []) {
+      if (it.kind === 'AUTOMATED') continue;
       if (!out.has(it.group)) out.set(it.group, []);
       out.get(it.group)!.push(it);
     }
@@ -242,25 +251,16 @@ function DailyTaskForm() {
                       sx={{ py: 1.25 }}
                     >
                       <Box sx={{ minWidth: 0, flex: '1 1 240px' }}>
-                        <Stack direction="row" spacing={1} alignItems="center">
-                          <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
-                            {it.label}
-                          </Typography>
-                          <Chip
-                            size="small"
-                            variant="outlined"
-                            label={it.kind === 'AUTOMATED' ? 'Automated' : 'Manual'}
-                            color={it.kind === 'AUTOMATED' ? 'success' : 'default'}
-                          />
-                        </Stack>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
+                          {it.label}
+                        </Typography>
                       </Box>
 
                       <TextField
                         size="small"
-                        type={it.kind === 'AUTOMATED' ? 'text' : 'number'}
-                        label={it.kind === 'AUTOMATED' ? 'From attendance' : 'Count'}
+                        type="number"
+                        label="Count"
                         value={fieldValue(it)}
-                        disabled={it.kind === 'AUTOMATED'}
                         onChange={(e) => setField(it.metric, { value: e.target.value })}
                         inputProps={{ min: 0 }}
                         sx={{ width: 150 }}
@@ -282,11 +282,7 @@ function DailyTaskForm() {
                         </Tooltip>
                         <Tooltip
                           title={
-                            it.entryId
-                              ? it.kind === 'AUTOMATED'
-                                ? 'Remove the comment'
-                                : 'Clear this entry'
-                              : 'Nothing recorded yet'
+                            it.entryId ? 'Clear this entry' : 'Nothing recorded yet'
                           }
                         >
                           <span>
@@ -317,12 +313,8 @@ function DailyTaskForm() {
 
       <ConfirmDialog
         open={Boolean(confirmClear)}
-        title={confirmClear?.kind === 'AUTOMATED' ? 'Remove this comment?' : 'Clear this entry?'}
-        message={
-          confirmClear?.kind === 'AUTOMATED'
-            ? `The comment on "${confirmClear?.label}" will be removed. The figure itself keeps coming from attendance.`
-            : `"${confirmClear?.label}" goes back to not filled in for ${date} — which is not the same as recording zero.`
-        }
+        title="Clear this entry?"
+        message={`"${confirmClear?.label}" goes back to not filled in for ${date} — which is not the same as recording zero.`}
         confirmLabel="Clear"
         danger
         busy={clearOne.isPending}
@@ -350,6 +342,12 @@ function HistoryDialog({
     enabled: Boolean(item),
   });
 
+  // The window comes back complete, gaps included; a list of blanks is noise.
+  const recordedRows = React.useMemo(
+    () => (history.data?.rows ?? []).filter((r) => r.recorded),
+    [history.data],
+  );
+
   return (
     <Dialog open={Boolean(item)} onClose={onClose} fullWidth maxWidth="sm">
       <DialogTitle>{item?.label} — all dates</DialogTitle>
@@ -362,7 +360,7 @@ function HistoryDialog({
           <Alert severity="error">
             {apiErrorMessage(history.error, 'Could not load the history.')}
           </Alert>
-        ) : (history.data?.rows.length ?? 0) === 0 ? (
+        ) : recordedRows.length === 0 ? (
           <EmptyState
             compact
             title="Nothing recorded yet"
@@ -378,7 +376,7 @@ function HistoryDialog({
               </TableRow>
             </TableHead>
             <TableBody>
-              {history.data!.rows.map((r) => (
+              {recordedRows.map((r) => (
                 <TableRow key={r.date} hover>
                   <TableCell>{r.date}</TableCell>
                   <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>

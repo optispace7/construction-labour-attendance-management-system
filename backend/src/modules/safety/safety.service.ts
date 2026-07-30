@@ -320,7 +320,14 @@ export class SafetyService {
               : spec.metric === 'TOTAL_MANPOWER'
                 ? running
                 : running * SAFE_MAN_HOURS_PER_DAY;
-          return { date: d, value, comment: comments.get(d) ?? null, entryId: null };
+          return {
+            date: d,
+            value,
+            comment: comments.get(d) ?? null,
+            entryId: null,
+            // A derived figure exists for every day by definition.
+            recorded: true,
+          };
         }),
       };
     }
@@ -349,15 +356,25 @@ export class SafetyService {
       metric: opts.metric,
       label: spec.label,
       kind: spec.kind,
-      // Only days with something recorded — a month of blank rows is noise.
-      rows: days
-        .filter((d) => perDay.has(d))
-        .map((d) => ({
+      /**
+       * Every day in the window, recorded or not.
+       *
+       * The detail drawer steps through dates and plots a continuous trend, so
+       * it needs the gaps as gaps rather than as missing rows it would have to
+       * infer. `recorded: false` is what lets it say "not filled in" instead of
+       * printing a zero nobody entered — callers that only want the entries
+       * filter on that flag.
+       */
+      rows: days.map((d) => {
+        const hit = perDay.get(d);
+        return {
           date: d,
-          value: perDay.get(d)!.value,
-          comment: perDay.get(d)!.comment,
-          entryId: single ? perDay.get(d)!.id : null,
-        })),
+          value: hit?.value ?? null,
+          comment: hit?.comment ?? null,
+          entryId: single ? (hit?.id ?? null) : null,
+          recorded: Boolean(hit),
+        };
+      }),
     };
   }
 

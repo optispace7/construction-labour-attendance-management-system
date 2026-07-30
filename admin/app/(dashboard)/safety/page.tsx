@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Box, Button, Chip, MenuItem, Stack, TextField, Typography } from '@mui/material';
+import { Alert, Box, Button, MenuItem, Stack, TextField, Typography } from '@mui/material';
 import { PageHeader } from '@/components/PageHeader';
 import { FilterBar } from '@/components/ui/FilterBar';
 import { MetricCard } from '@/components/dash/MetricCard';
@@ -21,6 +21,7 @@ import { formatNumber } from '@/lib/format';
 import * as I from '@/components/icons';
 import type { Site } from '@/lib/types';
 import { HiddenPageGate } from '@/components/HiddenPageGate';
+import { MetricDetailDrawer, type DrawerMetric } from '@/components/safety/MetricDetailDrawer';
 
 type Period = 'daily' | 'weekly' | 'monthly';
 
@@ -77,6 +78,7 @@ function SafetyStatisticsBoard() {
   const [period, setPeriod] = React.useState<Period>('daily');
   const [exporting, setExporting] = React.useState(false);
   const [exportError, setExportError] = React.useState<string | null>(null);
+  const [detail, setDetail] = React.useState<DrawerMetric | null>(null);
 
   const sites = useQuery({ queryKey: ['sites'], queryFn: () => api.get<Site[]>('/sites') });
 
@@ -196,7 +198,6 @@ function SafetyStatisticsBoard() {
             <MetricCard
               label="Today's manpower"
               value={d?.kpis.dailyManpower ?? null}
-              hint="Automated"
               tooltip="Labour man-days recorded on the selected date."
               loading={loading}
               tone="brand"
@@ -207,7 +208,6 @@ function SafetyStatisticsBoard() {
             <MetricCard
               label="Total manpower as of now"
               value={d?.kpis.totalManpower ?? null}
-              hint="Automated"
               tooltip="Every labour man-day up to and including the selected date."
               loading={loading}
               tone="info"
@@ -217,7 +217,7 @@ function SafetyStatisticsBoard() {
             <MetricCard
               label="Total safe man-hours"
               value={d?.kpis.totalSafeManHours ?? null}
-              hint="Automated · 10h per man-day"
+              hint="10h per man-day"
               tooltip="Cumulative man-days credited at ten hours each."
               loading={loading}
               tone="positive"
@@ -346,33 +346,45 @@ function SafetyStatisticsBoard() {
           <Panel>
             <PanelHead
               title="Safety statistics"
-              subtitle={`Every tracked item, ${periodLabel}`}
+              subtitle={`Every tracked item, ${periodLabel} · select one for the day-by-day detail`}
             />
-            <div className="grid gap-x-6 gap-y-0 px-5 pb-4 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-x-4 gap-y-0 px-3 pb-4 sm:grid-cols-2 xl:grid-cols-3">
               {(d?.statistics ?? []).map((s) => (
-                <div
+                <button
                   key={s.metric}
-                  className="flex min-w-0 items-center gap-2 border-b border-line py-2 last:border-0"
+                  type="button"
+                  onClick={() =>
+                    setDetail({
+                      metric: s.metric,
+                      label: s.label,
+                      group: s.group,
+                      periodValue: s.value,
+                    })
+                  }
+                  className="group flex min-w-0 items-center gap-2 rounded-lg border-b border-line px-2 py-2 text-left transition-colors last:border-0 hover:bg-surface-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
                 >
                   <span className="min-w-0 flex-1 truncate text-[13px] text-ink" title={s.label}>
                     {s.label}
                   </span>
-                  <Chip
-                    size="small"
-                    variant="outlined"
-                    label={s.kind === 'AUTOMATED' ? 'Automated' : 'Manual'}
-                    color={s.kind === 'AUTOMATED' ? 'success' : 'default'}
-                    sx={{ height: 20, fontSize: '0.68rem' }}
-                  />
-                  <span className="w-16 shrink-0 text-right text-[13px] font-bold tabular-nums text-ink">
+                  <span className="shrink-0 text-[13px] font-bold tabular-nums text-ink">
                     {formatNumber(s.value)}
                   </span>
-                </div>
+                  {/* A chevron only on hover: an arrow beside all twenty-one rows
+                      would be more ink than the numbers they sit next to. */}
+                  <I.ChevronDownIcon className="size-3.5 shrink-0 -rotate-90 text-ink-faint opacity-0 transition-opacity group-hover:opacity-100" />
+                </button>
               ))}
             </div>
           </Panel>
         </Item>
       </Stagger>
+
+      <MetricDetailDrawer
+        metric={detail}
+        siteId={siteId}
+        anchorDate={date}
+        onClose={() => setDetail(null)}
+      />
 
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
         Manpower counts labour only, matching the manpower report. Safe man-hours are cumulative
