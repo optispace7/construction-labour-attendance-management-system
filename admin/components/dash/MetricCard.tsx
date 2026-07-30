@@ -207,6 +207,7 @@ export function MetricCard({
   changeLabel,
   sentiment,
   spark,
+  sparkHeight,
   tone = 'brand',
   emphasis = false,
   loading = false,
@@ -224,6 +225,8 @@ export function MetricCard({
   changeLabel?: string;
   sentiment?: 'normal' | 'invert' | 'neutral';
   spark?: number[];
+  /** Taller than the default where the card has room to fill. */
+  sparkHeight?: number;
   tone?: Tone;
   emphasis?: boolean;
   loading?: boolean;
@@ -291,7 +294,7 @@ export function MetricCard({
           : undefined
       }
       className={cn(
-        'group h-full overflow-hidden',
+        'group flex h-full flex-col overflow-hidden',
         onClick && 'cursor-pointer',
         emphasis && 'ring-1 ring-inset',
         emphasis && toneCls.ring,
@@ -406,8 +409,8 @@ export function MetricCard({
       </div>
 
       {spark && spark.length > 1 && (
-        <div className="-mt-1 opacity-90">
-          <Sparkline data={spark} color={sparkColor} />
+        <div className="mt-auto opacity-90">
+          <Sparkline data={spark} color={sparkColor} height={sparkHeight} />
         </div>
       )}
     </Panel>

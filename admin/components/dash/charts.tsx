@@ -454,7 +454,7 @@ export function RankedBars({
         <button
           type="button"
           onClick={() => setExpanded((e) => !e)}
-          className="mt-1.5 rounded-md px-2.5 py-1 text-[12px] font-semibold text-brand transition-colors hover:bg-surface-hover"
+          className="mt-1.5 appearance-none rounded-md bg-transparent px-2.5 py-1 text-[12px] font-semibold text-brand transition-colors hover:bg-surface-hover"
         >
           {expanded ? 'Show less' : `Show all ${sorted.length}`}
         </button>

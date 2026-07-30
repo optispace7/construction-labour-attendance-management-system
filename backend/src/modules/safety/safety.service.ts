@@ -399,6 +399,52 @@ export class SafetyService {
     return new Map(rows.map((r) => [iso(r.entryDate), r.comment]));
   }
 
+  /**
+   * Manpower day by day across the window, in the three shapes the headline
+   * cards plot: that day's man-days, the running total, and the running total
+   * as safe man-hours.
+   *
+   * The cards each show one number; without a series behind them there is
+   * nothing to draw and the card is a figure floating in an empty box. The
+   * cumulative arms need the count from before the window opened, or every
+   * period would look like it started from nothing.
+   */
+  private async manpowerSeries(user: AuthUser, sites: string[] | null, start: Date, end: Date) {
+    const where = this.sessionWhere(user, sites);
+    const [sessions, priorTotal] = await Promise.all([
+      this.prisma.attendanceSession.findMany({
+        where: { ...where, workDate: { gte: start, lte: end } },
+        select: { workDate: true },
+      }),
+      this.prisma.attendanceSession.count({ where: { ...where, workDate: { lt: start } } }),
+    ]);
+
+    const perDay = new Map<string, number>();
+    for (const s of sessions) {
+      const k = iso(s.workDate);
+      perDay.set(k, (perDay.get(k) ?? 0) + 1);
+    }
+
+    const days: string[] = [];
+    for (let t = start.getTime(); t <= end.getTime(); t += DAY_MS) days.push(iso(new Date(t)));
+
+    let running = priorTotal;
+    const daily: number[] = [];
+    const cumulative: number[] = [];
+    for (const d of days) {
+      const n = perDay.get(d) ?? 0;
+      running += n;
+      daily.push(n);
+      cumulative.push(running);
+    }
+    return {
+      days,
+      daily,
+      cumulative,
+      safeManHours: cumulative.map((v) => v * SAFE_MAN_HOURS_PER_DAY),
+    };
+  }
+
   /** Sum of every typed metric over a date window. */
   private async totalsOver(user: AuthUser, sites: string[] | null, start: Date, end: Date) {
     const grouped = await this.prisma.dailySafetyEntry.groupBy({
@@ -428,10 +474,11 @@ export class SafetyService {
     const anchor = opts.date ? midnight(opts.date) : await this.today(user);
     const { start, end } = safetyWindow(period, anchor);
 
-    const [derived, totals, trend, siteName] = await Promise.all([
+    const [derived, totals, trend, manpower, siteName] = await Promise.all([
       this.automated(user, sites, anchor),
       this.totalsOver(user, sites, start, end),
       this.trendOver(user, sites, start, end),
+      this.manpowerSeries(user, sites, start, end),
       opts.siteId && opts.siteId !== 'all'
         ? this.prisma.site
             .findFirst({
@@ -492,6 +539,8 @@ export class SafetyService {
         safetyPerformanceTarget: SAFETY_PERFORMANCE_TARGET,
       },
       trend,
+      // Series behind the three headline cards, so each has a shape to plot.
+      manpower,
       // The donut: activity that is counted rather than found.
       summary: [
         { key: 'WORK_PERMIT', label: 'Work permit', value: n(totals, 'WORK_PERMIT') },

@@ -48,6 +48,7 @@ interface SafetyStats {
     safetyPerformanceTarget: number;
   };
   trend: { days: string[]; series: TrendSeries[] };
+  manpower: { days: string[]; daily: number[]; cumulative: number[]; safeManHours: number[] };
   summary: SliceRow[];
   observations: ObservationRow[];
   glance: { totalInspection: number; unsafeActsClosed: number; unsafeConditionsClosed: number };
@@ -199,6 +200,8 @@ function SafetyStatisticsBoard() {
               label="Today's manpower"
               value={d?.kpis.dailyManpower ?? null}
               tooltip="Labour man-days recorded on the selected date."
+              spark={d?.manpower?.daily}
+              sparkHeight={92}
               loading={loading}
               tone="brand"
               emphasis
@@ -209,6 +212,8 @@ function SafetyStatisticsBoard() {
               label="Total manpower as of now"
               value={d?.kpis.totalManpower ?? null}
               tooltip="Every labour man-day up to and including the selected date."
+              spark={d?.manpower?.cumulative}
+              sparkHeight={92}
               loading={loading}
               tone="info"
             />
@@ -219,6 +224,8 @@ function SafetyStatisticsBoard() {
               value={d?.kpis.totalSafeManHours ?? null}
               hint="10h per man-day"
               tooltip="Cumulative man-days credited at ten hours each."
+              spark={d?.manpower?.safeManHours}
+              sparkHeight={92}
               loading={loading}
               tone="positive"
             />
@@ -234,7 +241,7 @@ function SafetyStatisticsBoard() {
                   value={d?.kpis.safetyPerformance ?? null}
                   label="closed"
                   caption={`Target ≥ ${d?.kpis.safetyPerformanceTarget ?? 90}%`}
-                  size={150}
+                  size={124}
                 />
               </div>
             </Panel>
@@ -271,7 +278,7 @@ function SafetyStatisticsBoard() {
               bodyHeight={260}
               skeleton="donut"
             >
-              <SafetyDonut rows={d?.summary ?? []} centreLabel="total" height={210} />
+              <SafetyDonut rows={d?.summary ?? []} centreLabel="total" height={150} />
             </ChartPanel>
           </Item>
           <Item>
@@ -318,7 +325,7 @@ function SafetyStatisticsBoard() {
               bodyHeight={240}
               skeleton="donut"
             >
-              <SafetyDonut rows={d?.categoryBreakup.rows ?? []} centreLabel="total" height={200} />
+              <SafetyDonut rows={d?.categoryBreakup.rows ?? []} centreLabel="total" height={150} />
             </ChartPanel>
           </Item>
           <Item>
@@ -361,7 +368,7 @@ function SafetyStatisticsBoard() {
                       periodValue: s.value,
                     })
                   }
-                  className="group flex min-w-0 items-center gap-2 rounded-lg border-b border-line px-2 py-2 text-left transition-colors last:border-0 hover:bg-surface-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+                  className="group flex min-w-0 appearance-none items-center gap-2 rounded-lg border-b border-line bg-transparent px-2 py-2 text-left transition-colors last:border-0 hover:bg-surface-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
                 >
                   <span className="min-w-0 flex-1 truncate text-[13px] text-ink" title={s.label}>
                     {s.label}

@@ -10,13 +10,13 @@ import {
   LineChart,
   Pie,
   PieChart,
-  ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
 import { formatDay, formatNumber, formatWeekday } from '@/lib/format';
 import { useSeriesPalette, useTokens } from '@/components/dash/charts';
+import { useElementWidth } from '@/lib/useElementWidth';
 
 /**
  * The safety board's charts.
@@ -66,6 +66,30 @@ function SeriesTip({
         </div>
       ))}
     </TipShell>
+  );
+}
+
+/**
+ * A chart sized from a measured element rather than from ResponsiveContainer.
+ *
+ * These panels settle their width after the charts first mount, and Recharts
+ * kept the stale scale for the plotted marks while the axis re-rendered at the
+ * new width — bars drifting left of their own labels, and a trend line that
+ * stopped short of the right edge. Measuring first and rendering only once a
+ * real width is known removes the race rather than waiting it out.
+ */
+function Measured({
+  height,
+  children,
+}: {
+  height: number;
+  children: (width: number) => React.ReactNode;
+}) {
+  const [ref, width] = useElementWidth<HTMLDivElement>();
+  return (
+    <div ref={ref} className="w-full px-1" style={{ height }}>
+      {width > 0 && children(width)}
+    </div>
   );
 }
 
@@ -125,9 +149,14 @@ export function SafetyTrend({
       <Legend
         items={series.map((s, i) => ({ label: s.label, color: palette[i % palette.length] }))}
       />
-      <div style={{ height }} className="w-full px-1">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 8, right: 14, left: -14, bottom: 4 }}>
+      <Measured height={height}>
+        {(w) => (
+          <LineChart
+            data={data}
+            width={w}
+            height={height}
+            margin={{ top: 8, right: 14, left: -14, bottom: 4 }}
+          >
             <CartesianGrid stroke={t.grid} vertical={false} />
             <XAxis
               dataKey="label"
@@ -158,8 +187,8 @@ export function SafetyTrend({
               />
             ))}
           </LineChart>
-        </ResponsiveContainer>
-      </div>
+        )}
+      </Measured>
     </div>
   );
 }
@@ -191,10 +220,14 @@ export function SafetyDonut({
   const data = rows.filter((r) => r.value > 0);
 
   return (
-    <div className="flex min-w-0 flex-col gap-2 px-5 pb-4 sm:flex-row sm:items-center">
+    // Stacked, never side by side. These panels are a third of the page wide,
+    // and a legend sharing that row with the ring got about ninety pixels —
+    // enough to render "Unsafe conditions" as "Unsa…", which tells the reader
+    // nothing. Below the ring the labels get the full width.
+    <div className="flex min-w-0 flex-col gap-3 px-5 pb-4">
       <div style={{ height, width: height }} className="relative mx-auto shrink-0">
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
+        {/* The ring's box is a fixed square, so it can be sized directly. */}
+        <PieChart width={height} height={height}>
             <Pie
               data={data.length ? data : [{ key: 'none', label: 'None', value: 1 }]}
               dataKey="value"
@@ -212,8 +245,7 @@ export function SafetyDonut({
               ))}
             </Pie>
             {data.length > 0 && <Tooltip content={<SeriesTip />} animationDuration={140} />}
-          </PieChart>
-        </ResponsiveContainer>
+        </PieChart>
         <div className="pointer-events-none absolute inset-0 grid place-items-center">
           <div className="text-center">
             <p className="text-[22px] font-bold leading-none text-ink">{formatNumber(total)}</p>
@@ -273,9 +305,14 @@ export function ObservationBars({
           { label: 'Closed', color: t.positive },
         ]}
       />
-      <div style={{ height }} className="w-full px-1">
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={rows} margin={{ top: 8, right: 14, left: -14, bottom: 4 }}>
+      <Measured height={height}>
+        {(w) => (
+          <BarChart
+            data={rows}
+            width={w}
+            height={height}
+            margin={{ top: 8, right: 14, left: -14, bottom: 4 }}
+          >
             <CartesianGrid stroke={t.grid} vertical={false} />
             <XAxis
               dataKey="bucket"
@@ -294,8 +331,8 @@ export function ObservationBars({
             <Bar dataKey="raised" name="Raised" fill={t.warning} radius={[5, 5, 0, 0]} maxBarSize={34} />
             <Bar dataKey="closed" name="Closed" fill={t.positive} radius={[5, 5, 0, 0]} maxBarSize={34} />
           </BarChart>
-        </ResponsiveContainer>
-      </div>
+        )}
+      </Measured>
     </div>
   );
 }

@@ -106,7 +106,15 @@ export function MetricDetailDrawer({
   // Memoised so the `?? []` fallback does not hand a fresh array to the log's
   // useMemo on every render.
   const rows = React.useMemo(() => history.data?.rows ?? [], [history.data]);
-  const index = rows.findIndex((r) => r.date === selected);
+  /**
+   * Fall back to the newest day when the anchor is not in the window.
+   *
+   * Without this the drawer shows a dash, and — because both arrows disable on
+   * a missing index — offers no way out of it. The two normally agree, but a
+   * timezone edge should not strand the reader on an empty panel.
+   */
+  const found = rows.findIndex((r) => r.date === selected);
+  const index = found >= 0 ? found : rows.length - 1;
   const current = index >= 0 ? rows[index] : null;
   const peak = Math.max(1, ...rows.map((r) => r.value ?? 0));
 
