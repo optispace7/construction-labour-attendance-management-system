@@ -1,10 +1,13 @@
 import * as React from 'react';
+import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { serverApi, ApiError } from '@/lib/server/api';
 import { Me } from '@/lib/types';
 import { AppShell } from '@/components/AppShell';
 import { DevicePending } from '@/components/DevicePending';
 import { getDeviceCredentials, getDeviceUid } from '@/lib/server/session';
+import { canAccessPath, landingPathForRole } from '@/lib/rbac';
+import { PATH_HEADER } from '@/lib/config';
 
 interface DeviceStatus {
   deviceId: string | null;
@@ -37,6 +40,15 @@ export default async function DashboardLayout({ children }: { children: React.Re
     } catch {
       return <DevicePending approverLabel={approver} />;
     }
+  }
+
+  // Route gate, against the role the API just reported rather than the one in
+  // the cookie. The middleware turns most of these away before they reach here;
+  // this is the copy that cannot be talked out of it with a hand-written token.
+  const pathname = headers().get(PATH_HEADER);
+  if (pathname && !canAccessPath(me.role, pathname)) {
+    // landingPathForRole is null only for a Watchman, who has no page here.
+    redirect(landingPathForRole(me.role) ?? '/login');
   }
 
   return <AppShell me={me}>{children}</AppShell>;

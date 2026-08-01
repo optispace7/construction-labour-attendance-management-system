@@ -7,6 +7,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, apiErrorMessage } from '@/lib/api/browser';
 import { CorrectionRequest, Paginated, Site } from '@/lib/types';
 import { changeVs, daySpan, formatHours, formatNumber, pluralise } from '@/lib/format';
+import { cn } from '@/lib/cn';
+import { useCanAccess } from '@/lib/me';
 
 import {
   DashboardFilters,
@@ -85,6 +87,14 @@ export default function DashboardV2Page() {
   const qc = useQueryClient();
   const t = useTokens();
 
+  // The dashboard is the one page every panel role sees, so it is also the page
+  // most likely to hand somebody a shortcut into a page they may not open.
+  // Approving corrections and reading the audit trail are an admin's, not a
+  // Safety Officer's; for them these panels are simply not there.
+  const can = useCanAccess();
+  const canCorrections = can('/corrections');
+  const canAudit = can('/audit');
+
   const [siteId, setSiteId] = React.useState('all');
   const [range, setRange] = React.useState<DateRange>(() => rangeForDays(7));
   const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
@@ -110,6 +120,7 @@ export default function DashboardV2Page() {
   const corrections = useQuery({
     queryKey: ['corrections', 'PENDING'],
     queryFn: () => api.get<CorrectionRequest[]>('/corrections?status=PENDING'),
+    enabled: canCorrections,
   });
 
   const manualPending = useQuery({
@@ -135,6 +146,7 @@ export default function DashboardV2Page() {
       api.get<Paginated<AuditRow>>(
         '/audit?limit=9&excludeActions=ATTENDANCE_LOGIN,ATTENDANCE_LOGOUT',
       ),
+    enabled: canAudit,
     retry: false,
     refetchInterval: 60_000,
   });
@@ -254,13 +266,17 @@ export default function DashboardV2Page() {
       tone: 'warning' as const,
       onClick: () => router.push('/attendance?view=missed'),
     },
-    {
-      label: 'Corrections awaiting review',
-      description: 'Attendance changes needing approval',
-      count: corrections.data?.length ?? null,
-      tone: 'warning' as const,
-      onClick: () => router.push('/corrections'),
-    },
+    ...(canCorrections
+      ? [
+          {
+            label: 'Corrections awaiting review',
+            description: 'Attendance changes needing approval',
+            count: corrections.data?.length ?? null,
+            tone: 'warning' as const,
+            onClick: () => router.push('/corrections'),
+          },
+        ]
+      : []),
     ...(manualPending.isSuccess
       ? [
           {
@@ -409,7 +425,14 @@ export default function DashboardV2Page() {
         {/* The quiet five. Same numbers, a third of the height — four hero cards
             and five equals on one grid gave the eye nowhere to land, and left a
             lone card stranded at the end of the last row. */}
-        <Stagger className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        {/* Five across, or four when the corrections tile is not this role's to
+            see — a fifth empty column would read as a card that failed to load. */}
+        <Stagger
+          className={cn(
+            'mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3',
+            canCorrections ? 'lg:grid-cols-5' : 'lg:grid-cols-4',
+          )}
+        >
           <Item>
             <StatTile
               label="Carried over"
@@ -445,17 +468,19 @@ export default function DashboardV2Page() {
             </HoverCard>
           </Item>
 
-          <Item>
-            <StatTile
-              label="Corrections"
-              value={corrections.data?.length ?? null}
-              icon={<RuleIcon />}
-              tone={corrections.data?.length ? 'warning' : 'neutral'}
-              loading={corrections.isLoading}
-              hint="awaiting review"
-              onClick={() => router.push('/corrections')}
-            />
-          </Item>
+          {canCorrections && (
+            <Item>
+              <StatTile
+                label="Corrections"
+                value={corrections.data?.length ?? null}
+                icon={<RuleIcon />}
+                tone={corrections.data?.length ? 'warning' : 'neutral'}
+                loading={corrections.isLoading}
+                hint="awaiting review"
+                onClick={() => router.push('/corrections')}
+              />
+            </Item>
+          )}
 
           <Item>
             <StatTile
@@ -643,7 +668,14 @@ export default function DashboardV2Page() {
           title="Patterns and follow-ups"
           description="How the week behaves, what needs attention, and what changed recently."
         />
-        <Stagger className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
+        <Stagger
+          className={cn(
+            'grid grid-cols-1 items-start gap-3',
+            // Without the audit trail there is only one panel here, and it
+            // takes the full width rather than sitting beside a gap.
+            canAudit && 'md:grid-cols-2',
+          )}
+        >
           <Item>
             <ChartPanel
               title="Needs attention"
@@ -664,47 +696,51 @@ export default function DashboardV2Page() {
             </ChartPanel>
           </Item>
 
-          <Item>
-            <ChartPanel
-              title="Recent activity"
-              skeleton="rows"
-              subtitle="Changes people made, newest first"
-              loading={activity.isLoading}
-              error={
-                activity.isError ? apiErrorMessage(activity.error, 'Could not load activity') : null
-              }
-              onRetry={() => activity.refetch()}
-              empty={(activity.data?.data?.length ?? 0) === 0}
-              emptyTitle="Nothing recent"
-              emptyDescription="Attendance scans are not listed here — see the Audit page."
-              bodyHeight={220}
-              footer={
-                <button
-                  type="button"
-                  onClick={() => router.push('/audit')}
-                  className="text-[12px] font-semibold text-brand hover:underline"
-                >
-                  View the full audit trail →
-                </button>
-              }
-            >
-              <div className="py-1.5">
-                {(activity.data?.data ?? []).map((row, i, arr) => (
-                  <ActivityRow
-                    key={row.id}
-                    actor={row.actorName ?? 'System'}
-                    description={
-                      ACTIVITY_LABELS[row.action] ?? row.action.replace(/_/g, ' ').toLowerCase()
-                    }
-                    detail={row.entityName}
-                    at={row.createdAt}
-                    tone={activityTone(row.action)}
-                    last={i === arr.length - 1}
-                  />
-                ))}
-              </div>
-            </ChartPanel>
-          </Item>
+          {canAudit && (
+            <Item>
+              <ChartPanel
+                title="Recent activity"
+                skeleton="rows"
+                subtitle="Changes people made, newest first"
+                loading={activity.isLoading}
+                error={
+                  activity.isError
+                    ? apiErrorMessage(activity.error, 'Could not load activity')
+                    : null
+                }
+                onRetry={() => activity.refetch()}
+                empty={(activity.data?.data?.length ?? 0) === 0}
+                emptyTitle="Nothing recent"
+                emptyDescription="Attendance scans are not listed here — see the Audit page."
+                bodyHeight={220}
+                footer={
+                  <button
+                    type="button"
+                    onClick={() => router.push('/audit')}
+                    className="text-[12px] font-semibold text-brand hover:underline"
+                  >
+                    View the full audit trail →
+                  </button>
+                }
+              >
+                <div className="py-1.5">
+                  {(activity.data?.data ?? []).map((row, i, arr) => (
+                    <ActivityRow
+                      key={row.id}
+                      actor={row.actorName ?? 'System'}
+                      description={
+                        ACTIVITY_LABELS[row.action] ?? row.action.replace(/_/g, ' ').toLowerCase()
+                      }
+                      detail={row.entityName}
+                      at={row.createdAt}
+                      tone={activityTone(row.action)}
+                      last={i === arr.length - 1}
+                    />
+                  ))}
+                </div>
+              </ChartPanel>
+            </Item>
+          )}
         </Stagger>
       </section>
 

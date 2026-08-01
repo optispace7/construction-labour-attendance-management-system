@@ -77,6 +77,103 @@ export function navForRole(role: UserRole): NavItem[] {
   return NAV_ITEMS.filter((i) => i.roles.includes(role));
 }
 
+// ---------------------------------------------------------------------------
+// Route access
+// ---------------------------------------------------------------------------
+
+export interface RouteRule {
+  /** A route pattern; `[param]` matches any single segment. */
+  pattern: string;
+  roles: UserRole[];
+}
+
+/**
+ * Pages with no sidebar entry of their own.
+ *
+ * Every route under (dashboard) must be listed either here or in NAV_ITEMS.
+ * `canAccessPath` denies anything it does not recognise, so a page shipped
+ * without a rule is a page nobody can open — which is the failure worth having,
+ * rather than one silently open to every role.
+ */
+const EXTRA_ROUTES: RouteRule[] = [
+  // Printable badge sheets, reached from the Workers page.
+  { pattern: '/workers/badges', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'] },
+  // Shift times, grace periods, geofence. The backend guards these with
+  // SETTINGS_MANAGE, which the Safety Officer does not hold — so the page would
+  // only ever load empty and fail on save.
+  { pattern: '/sites/[id]/settings', roles: ['SUPER_ADMIN', 'SITE_ADMIN'] },
+  // A dashboard prototype kept around for comparison. Never a client's page.
+  { pattern: '/dashboard-redesign', roles: ['SUPER_ADMIN'] },
+];
+
+/** Who may open which page — the one list the nav, the middleware and the
+ *  dashboard layout all read, so none of them can drift from the others. */
+export const ROUTE_RULES: RouteRule[] = [
+  ...NAV_ITEMS.map((i) => ({ pattern: i.href, roles: i.roles })),
+  ...EXTRA_ROUTES,
+];
+
+const segmentsOf = (p: string) => p.split('/').filter(Boolean);
+
+/**
+ * How well a pattern matches a path, or null when it does not.
+ *
+ * The score is the number of segments the pattern pins down, so the most
+ * specific rule wins: `/attendance/fix` beats `/attendance`, and
+ * `/sites/[id]/settings` beats `/sites`. Without that, a nested admin-only page
+ * would inherit its parent's — more generous — rule.
+ */
+function matchScore(pattern: string, path: string): number | null {
+  const pat = segmentsOf(pattern);
+  const got = segmentsOf(path);
+  // '/' is the dashboard itself and matches nothing below it.
+  if (pat.length === 0) return got.length === 0 ? 0 : null;
+  if (got.length < pat.length) return null;
+  for (let i = 0; i < pat.length; i++) {
+    if (pat[i].startsWith('[')) continue;
+    if (pat[i] !== got[i]) return null;
+  }
+  return pat.length;
+}
+
+/** The roles allowed on a path, or null when no rule covers it. */
+export function rolesForPath(pathname: string): UserRole[] | null {
+  let best: UserRole[] | null = null;
+  let bestScore = -1;
+  for (const rule of ROUTE_RULES) {
+    const score = matchScore(rule.pattern, pathname);
+    if (score !== null && score > bestScore) {
+      best = rule.roles;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+/**
+ * Whether a role may open a page.
+ *
+ * Fails closed: an unknown path is denied. This is the panel's own gate and is
+ * about not showing somebody a page they cannot use — the real boundary is the
+ * API, which checks the signed token's role on every call.
+ */
+export function canAccessPath(role: UserRole, pathname: string): boolean {
+  const roles = rolesForPath(pathname);
+  return roles !== null && roles.includes(role);
+}
+
+/**
+ * Where a role goes when it asks for a page it may not have.
+ *
+ * The first page its own sidebar offers, which for every panel role today is
+ * the dashboard. Null for a Watchman: they hold nothing in this panel at all,
+ * and bouncing them to a landing page they also cannot open would loop. Hidden
+ * items are skipped — a landing nobody can see in the nav is a dead end.
+ */
+export function landingPathForRole(role: UserRole): string | null {
+  return navForRole(role).find((i) => !i.hidden)?.href ?? null;
+}
+
 /**
  * Display labels — enum values are kept for DB compatibility, but the UI says
  * "Admin" for SITE_ADMIN and "Safety Officer" for SUPERVISOR everywhere.

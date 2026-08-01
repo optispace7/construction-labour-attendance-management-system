@@ -8,6 +8,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { cn } from '@/lib/cn';
 import { Me } from '@/lib/types';
 import { navForRole, roleLabel, NavGroup, NavItem } from '@/lib/rbac';
+import { MeProvider } from '@/lib/me';
 import { isRevealChord, isTypingTarget, toggleRevealed, useRevealed } from '@/lib/hiddenNav';
 import { SosBanner } from '@/components/SosBanner';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
@@ -609,7 +610,9 @@ export function AppShell({ me, children }: { me: Me; children: React.ReactNode }
 
         <main id="main" className="min-w-0 flex-1 p-4 md:p-6">
           <SosBanner />
-          {children}
+          {/* The pages read the role from here rather than re-fetching /auth/me,
+              so what they offer and what the rail offers cannot disagree. */}
+          <MeProvider me={me}>{children}</MeProvider>
         </main>
       </div>
     </div>
