@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Stack, Tab, Tabs, TextField, Tooltip, Typography } from '@mui/material';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
-import { api } from '@/lib/api/browser';
+import { api, apiErrorMessage } from '@/lib/api/browser';
 import { PageHeader } from '@/components/PageHeader';
 import { DataTable, Column } from '@/components/ui/DataTable';
 import { StatusBadge, statusTone } from '@/components/ui/StatusBadge';
@@ -25,7 +25,9 @@ const EMPTY_COPY: Record<string, { title: string; description: string }> = {
   },
   REJECTED: {
     title: 'No declined entries',
-    description: 'Manual entries you decline are kept here — nothing is ever deleted.',
+    description:
+      'Manual entries you decline are kept here, along with any the system closed because the ' +
+      'worker scanned their badge before anyone got to them. Nothing is ever deleted.',
   },
 };
 
@@ -84,11 +86,13 @@ export default function ManualEntriesPage() {
     },
     onError: (err: unknown) => {
       // The worker may have turned up with their badge since. The API says
-      // exactly what happened, and that sentence is what the admin needs.
-      const detail =
-        (err as { detail?: string; message?: string })?.detail ??
-        (err as { message?: string })?.message;
-      toast.error(detail || 'Could not save that decision');
+      // exactly what happened in `body.detail`, and that sentence is what the
+      // admin needs — reading `.detail` off the error itself found nothing and
+      // fell back to the title, which is the bare word "Conflict".
+      toast.error(apiErrorMessage(err, 'Could not save that decision'));
+      // Whatever the server refused, this row is not what the page is showing
+      // any more — reload so the queue reflects the attendance that won.
+      qc.invalidateQueries({ queryKey: ['manual-approvals'] });
     },
   });
 
@@ -149,12 +153,25 @@ export default function ManualEntriesPage() {
       render: (r) => (
         <>
           <StatusBadge label={r.status} tone={statusTone(r.status)} />
-          {r.reviewedByName && (
+          {r.reviewedByName ? (
             <Tooltip arrow title={r.reviewNotes ? `Note: ${r.reviewNotes}` : ''}>
               <Typography variant="caption" display="block" color="text.secondary">
                 by {r.reviewedByName}
               </Typography>
             </Tooltip>
+          ) : (
+            // No reviewer means nobody decided it: a badge scan overtook the
+            // typed entry and the system closed it. The note is the only place
+            // that says so, so it goes on the row rather than in a tooltip.
+            r.status !== 'PENDING' &&
+            !r.reviewedBy &&
+            r.reviewNotes && (
+              <Tooltip arrow title={r.reviewNotes}>
+                <Typography variant="caption" display="block" color="text.secondary" noWrap>
+                  superseded by a badge scan
+                </Typography>
+              </Tooltip>
+            )
           )}
         </>
       ),

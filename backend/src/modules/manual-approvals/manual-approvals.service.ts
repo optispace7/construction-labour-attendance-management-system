@@ -1,11 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { ManualApprovalStatus } from '@prisma/client';
+import { DateTime } from 'luxon';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
 import { businessDate, minutesOfDay } from '../../common/time/time.util';
 import { computeWorkHours, ShiftConfig } from '../attendance/engine/work-hours.engine';
+import { capitalise, describeMovement } from '../attendance/engine/movement-words';
 import { ReviewManualDto } from './dto/manual-approval.dto';
 
 /** What the review screens show for one hand-typed punch. */
@@ -129,6 +131,23 @@ export class ManualApprovalsService {
     return request;
   }
 
+  /**
+   * The distance between two instants, said the way a person would say it.
+   *
+   * "29 seconds after this entry was typed" is the whole explanation for why a
+   * queue entry is stale — the watchman typed it and the man scanned a moment
+   * later. A bare timestamp leaves the reviewer to work that out themselves.
+   */
+  private gapInWords(from: Date, to: Date): string {
+    const seconds = Math.round((to.getTime() - from.getTime()) / 1000);
+    if (seconds < 90) return `${seconds} second${seconds === 1 ? '' : 's'}`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} minutes`;
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return `${hours} hour${hours === 1 ? '' : 's'}${rest ? ` ${rest} minutes` : ''}`;
+  }
+
   private toShiftConfig(shift: {
     startTime: Date;
     endTime: Date;
@@ -159,6 +178,10 @@ export class ManualApprovalsService {
   async approve(user: AuthUser, id: string, dto: ReviewManualDto) {
     const request = await this.loadPending(user, id);
     const tz = request.site.timezone;
+    // These sentences end up in front of a site admin, so times are site-local
+    // and written out — an ISO string tells them nothing about their own day.
+    const localTime = (at: Date) =>
+      DateTime.fromJSDate(at, { zone: tz }).toFormat('d LLL yyyy, h:mm a');
 
     const applied = await this.prisma.$transaction(async (tx) => {
       if (request.tapType === 'LOGIN') {
@@ -166,12 +189,27 @@ export class ManualApprovalsService {
         // for real in the meantime, that record is the true one.
         const open = await tx.attendanceSession.findFirst({
           where: { workerId: request.workerId, state: 'OPEN' },
-          select: { id: true, loginAt: true, site: { select: { name: true } } },
+          select: {
+            id: true,
+            loginAt: true,
+            loginTapId: true,
+            site: { select: { name: true } },
+          },
         });
         if (open) {
+          const how = describeMovement(
+            open.loginTapId
+              ? await tx.attendanceTap.findUnique({
+                  where: { id: open.loginTapId },
+                  select: { tapSource: true, isManualBackup: true },
+                })
+              : null,
+          );
           throw Errors.conflict(
-            `${request.worker.fullName} is already logged in at ${open.site.name} since ` +
-              `${open.loginAt.toISOString()}. Decline this entry instead.`,
+            `${request.worker.fullName} is already logged in at ${open.site.name}. ` +
+              `${capitalise(how)} logged them in at ${localTime(open.loginAt)}, ` +
+              'after this entry was typed. Their attendance is already recorded — decline this ' +
+              'entry; accepting it would put them on site twice.',
           );
         }
 
@@ -204,10 +242,29 @@ export class ManualApprovalsService {
       });
       if (!session) throw Errors.conflict('That attendance session no longer exists.');
       if (session.state !== 'OPEN') {
+        // Say what closed it and when. Nine times in ten it is the man's own
+        // badge, seconds after the watchman gave up on the scanner and typed
+        // the punch instead — and knowing that is what makes it obvious the
+        // typed entry can be thrown away without losing anyone's hours.
+        const how = describeMovement(
+          session.logoutTapId
+            ? await tx.attendanceTap.findUnique({
+                where: { id: session.logoutTapId },
+                select: { tapSource: true, isManualBackup: true },
+              })
+            : null,
+          session.closedReason,
+        );
         throw Errors.conflict(
           `${request.worker.fullName} has already been logged out` +
-            `${session.logoutAt ? ` at ${session.logoutAt.toISOString()}` : ''}. ` +
-            'Decline this entry instead.',
+            `${session.logoutAt ? ` at ${localTime(session.logoutAt)}` : ''} by ${how}` +
+            `${
+              session.logoutAt && session.logoutAt > request.recordedAt
+                ? `, ${this.gapInWords(request.recordedAt, session.logoutAt)} after this entry ` +
+                  'was typed'
+                : ''
+            }. That logout is already recorded, so there is nothing left to accept — decline ` +
+            'this entry and their attendance stays exactly as it is.',
         );
       }
       if (request.recordedAt <= session.loginAt) {

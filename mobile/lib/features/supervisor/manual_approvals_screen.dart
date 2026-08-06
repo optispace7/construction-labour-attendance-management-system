@@ -133,16 +133,26 @@ class _ManualApprovalsScreenState extends ConsumerState<ManualApprovalsScreen> {
       // have turned up with their badge. The server says exactly what happened;
       // show that sentence rather than a generic failure.
       final body = e.response?.data;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: ClamsColors.error,
-          content: Text(
-            body is Map
-                ? (body['detail'] as String? ?? body['title'] as String? ?? 'Could not save')
-                : 'Could not save — check your connection',
+      final message = body is Map
+          ? (body['detail'] as String? ?? body['title'] as String? ?? 'Could not save')
+          : 'Could not save — check your connection';
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            backgroundColor: ClamsColors.error,
+            // The sentence names the badge scan that beat this entry and when —
+            // several lines on a phone, and four seconds is not long enough to
+            // read it before it disappears for good.
+            duration: const Duration(seconds: 12),
+            content: Text(message),
+            action: SnackBarAction(
+              label: 'Dismiss',
+              textColor: Colors.white,
+              onPressed: () => ScaffoldMessenger.of(context).hideCurrentSnackBar(),
+            ),
           ),
-        ),
-      );
+        );
       await _load();
     } finally {
       if (mounted) setState(() => _busy.remove(r.id));

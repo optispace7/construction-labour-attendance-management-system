@@ -7,6 +7,7 @@ import {
   TapSource,
   Worker,
 } from '@prisma/client';
+import { DateTime } from 'luxon';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { RedisService } from '../../infra/redis/redis.service';
 import { AuditService } from '../../common/audit/audit.service';
@@ -17,6 +18,7 @@ import { businessDate, minutesOfDay } from '../../common/time/time.util';
 import { isCardExpired } from './engine/card-validity';
 import { computeWorkHours, ShiftConfig } from './engine/work-hours.engine';
 import { decideTap, distanceMeters, shouldVerifyPhoto } from './engine/tap-decision';
+import { describeMovement } from './engine/movement-words';
 import { TapDto } from './dto/attendance.dto';
 import { renderDaySummaryPdf } from '../reports/report.renderer';
 
@@ -597,6 +599,13 @@ export class AttendanceService {
       at: tapTime,
       extra: { workDate: workDate.toISOString().slice(0, 10), verificationMode: 'AUTO' },
     });
+    await this.supersedePendingManual(organizationId, worker, ctx, {
+      tapType: 'LOGIN',
+      at: tapTime,
+      sessionId: session.id,
+      timezone: site.timezone,
+      source: dto.source,
+    });
 
     return {
       result: 'LOGIN_RECORDED',
@@ -681,6 +690,14 @@ export class AttendanceService {
       },
     });
 
+    await this.supersedePendingManual(organizationId, worker, ctx, {
+      tapType: 'LOGOUT',
+      at: tapTime,
+      sessionId: updated.id,
+      timezone: site.timezone,
+      source: dto.source,
+    });
+
     return {
       result: 'LOGOUT_RECORDED',
       sessionId: updated.id,
@@ -689,6 +706,99 @@ export class AttendanceService {
       isCrossSite,
       logoutAt: updated.logoutAt,
     };
+  }
+
+  /**
+   * A badge scan has just moved this worker's attendance, so any hand-typed
+   * punch still waiting on a Safety Officer is now impossible to apply.
+   *
+   * This is the case that kept getting stuck: the watchman types someone out,
+   * the man finds his card and scans out properly seconds later, and the typed
+   * entry is left pointing at a session that is already closed. Accepting it
+   * could then only ever fail, and until somebody declined it by hand the man
+   * stayed on the "waiting" list, the pending badge kept counting him, and the
+   * watchman was blocked from typing another punch for him.
+   *
+   * By the time a scan reaches here the pending request cannot be applied
+   * whatever it was: a LOGOUT's session is now closed, and a LOGIN would need a
+   * second open session, which one worker may never have. So it is closed with
+   * no reviewer against it — nobody decided this, the scan did — and the note
+   * says which scan overtook it. Nothing is deleted: the typed tap stays on
+   * file, and an audit row records that the system, not a person, resolved it.
+   *
+   * Non-fatal, like the audit writes: the scan itself has already been recorded
+   * by the time this runs, and tidying the review queue must never be the thing
+   * that fails a tap at the gate.
+   */
+  private async supersedePendingManual(
+    organizationId: string,
+    worker: { id: string; fullName: string },
+    ctx: TapContext,
+    scan: {
+      tapType: 'LOGIN' | 'LOGOUT';
+      at: Date;
+      sessionId: string;
+      timezone: string;
+      source: TapSource;
+    },
+  ) {
+    try {
+      const pending = await this.prisma.manualAttendanceRequest.findFirst({
+        where: { organizationId, workerId: worker.id, status: 'PENDING' },
+        select: { id: true, tapType: true, recordedAt: true },
+      });
+      if (!pending) return;
+
+      const scannedAt = DateTime.fromJSDate(scan.at, { zone: scan.timezone }).toFormat(
+        'd LLL yyyy, h:mm a',
+      );
+      // Same words the review screen would have refused an Accept with, so the
+      // note and the error tell one story.
+      const how = describeMovement({ tapSource: scan.source, isManualBackup: false });
+      const note =
+        `Superseded automatically — ${how} logged ${worker.fullName} ` +
+        `${scan.tapType === 'LOGIN' ? 'in' : 'out'} at ${scannedAt}, so this typed entry was no ` +
+        'longer needed. Attendance follows the scan.';
+
+      await this.prisma.manualAttendanceRequest.update({
+        where: { id: pending.id },
+        // REJECTED, not APPROVED: the typed punch never became attendance. The
+        // null reviewer is what tells the queue a person did not decide this.
+        data: {
+          status: 'REJECTED',
+          reviewedAt: new Date(),
+          reviewNotes: note,
+        },
+      });
+
+      await this.audit.record({
+        organizationId,
+        action: 'MANUAL_ATTENDANCE_SUPERSEDED',
+        entityType: 'ManualAttendanceRequest',
+        entityId: pending.id,
+        deviceId: ctx.deviceId,
+        ipAddress: ctx.ip,
+        oldValue: {
+          status: 'PENDING',
+          tapType: pending.tapType,
+          recordedAt: pending.recordedAt,
+        },
+        newValue: {
+          status: 'REJECTED',
+          supersededBy: {
+            tapType: scan.tapType,
+            at: scan.at,
+            sessionId: scan.sessionId,
+            source: scan.source,
+          },
+        },
+        reason: note,
+      });
+    } catch (e) {
+      this.logger.error(
+        `Could not supersede the pending manual entry for worker=${worker.id}: ${String(e)}`,
+      );
+    }
   }
 
   /**
@@ -860,6 +970,19 @@ export class AttendanceService {
       at: tap.clientEventTime,
       extra: { workDate: workDate.toISOString().slice(0, 10), verificationMode: 'MANUAL' },
     });
+    const worker = await this.prisma.worker.findUnique({
+      where: { id: tap.workerId },
+      select: { id: true, fullName: true },
+    });
+    if (worker) {
+      await this.supersedePendingManual(organizationId, worker, ctx, {
+        tapType: 'LOGIN',
+        at: tap.clientEventTime,
+        sessionId: session.id,
+        timezone: site?.timezone ?? 'Asia/Kolkata',
+        source: tap.tapSource,
+      });
+    }
     return { result: 'LOGIN_RECORDED', sessionId: session.id, loginAt: session.loginAt };
   }
 

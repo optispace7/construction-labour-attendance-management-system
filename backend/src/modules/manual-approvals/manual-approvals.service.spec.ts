@@ -42,6 +42,10 @@ function build(over: any = {}) {
         workedMinutes: 570,
       }),
     },
+    // Read only when a conflict has to name what moved the session first.
+    attendanceTap: {
+      findUnique: jest.fn().mockResolvedValue({ tapSource: 'QR', isManualBackup: false }),
+    },
     ...(over.tx ?? {}),
   };
   const prisma: any = {
@@ -86,6 +90,7 @@ describe('ManualApprovalsService.approve', () => {
           findFirst: jest.fn().mockResolvedValue({
             id: 'sess-real',
             loginAt: new Date('2026-06-09T03:00:00Z'),
+            loginTapId: 'tap-real',
             site: { name: 'Tower A' },
           }),
           create: jest.fn(),
@@ -97,6 +102,29 @@ describe('ManualApprovalsService.approve', () => {
 
     await expect(svc.approve(reviewer, 'req-1', {})).rejects.toMatchObject({ code: 'CONFLICT' });
     expect(tx.attendanceSession.create).not.toHaveBeenCalled();
+  });
+
+  it('names the badge and the site-local time when a scan logged them in first', async () => {
+    const { svc } = build({
+      tx: {
+        attendanceSession: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'sess-real',
+            loginAt: new Date('2026-06-09T03:00:00Z'), // 08:30 IST
+            loginTapId: 'tap-real',
+            site: { name: 'Tower A' },
+          }),
+          create: jest.fn(),
+          update: jest.fn(),
+          findUnique: jest.fn(),
+        },
+      },
+    });
+
+    await expect(svc.approve(reviewer, 'req-1', {})).rejects.toMatchObject({
+      code: 'CONFLICT',
+      detail: expect.stringContaining('A QR badge scan logged them in at 9 Jun 2026, 8:30 AM'),
+    });
   });
 
   it('closes the pinned session for an approved logout and scores the hours', async () => {
@@ -145,6 +173,8 @@ describe('ManualApprovalsService.approve', () => {
             siteId: 'site-1',
             loginAt: new Date('2026-06-09T01:00:00Z'),
             logoutAt: new Date('2026-06-09T02:00:00Z'),
+            logoutTapId: 'tap-real',
+            closedReason: null,
             shift: null,
           }),
           findFirst: jest.fn(),
@@ -156,6 +186,67 @@ describe('ManualApprovalsService.approve', () => {
 
     await expect(svc.approve(reviewer, 'req-1', {})).rejects.toMatchObject({ code: 'CONFLICT' });
     expect(tx.attendanceSession.update).not.toHaveBeenCalled();
+  });
+
+  it('tells the reviewer it was a QR scan, when, and how long after they typed it', async () => {
+    const { svc } = build({
+      // Typed at 08:00 IST; the badge scanned out 29 seconds later, which is
+      // exactly how the Brigade WTC entry got stuck on 5 Aug 2026.
+      request: { ...baseRequest, tapType: 'LOGOUT', sessionId: 'sess-1' },
+      tx: {
+        attendanceSession: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'sess-1',
+            state: 'CLOSED',
+            siteId: 'site-1',
+            loginAt: new Date('2026-06-09T01:00:00Z'),
+            logoutAt: new Date('2026-06-09T02:30:29Z'),
+            logoutTapId: 'tap-real',
+            closedReason: null,
+            shift: null,
+          }),
+          findFirst: jest.fn(),
+          create: jest.fn(),
+          update: jest.fn(),
+        },
+      },
+    });
+
+    await expect(svc.approve(reviewer, 'req-1', {})).rejects.toMatchObject({
+      code: 'CONFLICT',
+      detail: expect.stringContaining(
+        'already been logged out at 9 Jun 2026, 8:00 AM by a QR badge scan, ' +
+          '29 seconds after this entry was typed',
+      ),
+    });
+  });
+
+  it('says so plainly when an office screen closed the session, not a badge', async () => {
+    const { svc } = build({
+      request: { ...baseRequest, tapType: 'LOGOUT', sessionId: 'sess-1' },
+      tx: {
+        attendanceSession: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'sess-1',
+            state: 'CLOSED',
+            siteId: 'site-1',
+            loginAt: new Date('2026-06-09T01:00:00Z'),
+            logoutAt: new Date('2026-06-09T04:00:00Z'),
+            logoutTapId: null,
+            closedReason: 'ADMIN_BULK_LOGOUT',
+            shift: null,
+          }),
+          findFirst: jest.fn(),
+          create: jest.fn(),
+          update: jest.fn(),
+        },
+      },
+    });
+
+    await expect(svc.approve(reviewer, 'req-1', {})).rejects.toMatchObject({
+      code: 'CONFLICT',
+      detail: expect.stringContaining('by a bulk logout in Fix attendance'),
+    });
   });
 
   it('will not review an entry that was already decided', async () => {

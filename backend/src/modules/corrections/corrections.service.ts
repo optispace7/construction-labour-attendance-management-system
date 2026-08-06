@@ -217,6 +217,22 @@ export class CorrectionsService {
           throw Errors.conflict('Session changed since the request was filed; please re-file');
         }
 
+        // A logout that lands before its own login is a typo, not a correction.
+        // Nothing downstream rejects it: the session closes with negative time,
+        // the hours engine floors that to zero, and the day quietly reads as
+        // worked-nothing. The Fix-attendance panel already refuses this; the
+        // approval path did not, and two days in August were saved that way.
+        // Compared against whatever the row will hold afterwards, so correcting
+        // only one end of a session is checked against the end left alone.
+        const finalLoginAt = (patch.loginAt as Date | undefined) ?? session?.loginAt;
+        const finalLogoutAt = (patch.logoutAt as Date | undefined) ?? session?.logoutAt;
+        if (finalLoginAt && finalLogoutAt && finalLogoutAt <= finalLoginAt) {
+          throw Errors.businessRule(
+            'The corrected logout time is not after the login time. Fix the times on the ' +
+              'request — approving this would record the day as zero hours worked.',
+          );
+        }
+
         // A MISSING correction has no row to patch — the whole point is that the
         // worker was never scanned in. Materialise the session from the proposed
         // login time instead of approving into the void.

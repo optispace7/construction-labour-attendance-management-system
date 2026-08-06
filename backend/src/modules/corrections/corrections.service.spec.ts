@@ -325,6 +325,58 @@ describe('CorrectionsService.approve (approval gate)', () => {
     );
   });
 
+  it('refuses a logout that lands before the login it belongs to', async () => {
+    const workDate = new Date(Date.UTC(2026, 7, 5));
+    const session = {
+      id: 's1',
+      updatedAt: new Date('2026-08-05T16:20:00Z'),
+      loginAt: new Date('2026-08-05T16:14:10Z'), // 21:44 IST
+      logoutAt: null,
+      siteId: 'site1',
+      shiftId: null,
+      workDate,
+      shift: null,
+      site: { timezone: 'Asia/Kolkata' },
+    };
+    const tx: any = {
+      correctionRequest: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'c1',
+          status: 'PENDING',
+          organizationId: 'org1',
+          workerId: 'w1',
+          siteId: 'site1',
+          sessionId: null,
+          workDate,
+          createdAt: new Date('2026-08-06T05:30:00Z'),
+          // 18:26 IST — earlier in the day than the login above.
+          items: [{ field: 'logout_at', proposedValue: '2026-08-05T12:56:00Z' }],
+        }),
+        update: jest.fn(),
+      },
+      site: {
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ id: 'site1', timezone: 'Asia/Kolkata', settings: null }),
+      },
+      attendanceSession: {
+        findUnique: jest.fn(),
+        findFirst: jest.fn().mockResolvedValue(session),
+        create: jest.fn(),
+        update: jest.fn(),
+      },
+    };
+    const prisma: any = { $transaction: (fn: any) => fn(tx) };
+    const audit: any = { record: jest.fn() };
+    const svc = new CorrectionsService(prisma, audit);
+
+    await expect(svc.approve(user, 'c1', {})).rejects.toMatchObject({ code: 'BUSINESS_RULE' });
+    // Nothing was written: the day keeps whatever it had rather than closing
+    // with negative time that the hours engine floors to zero.
+    expect(tx.attendanceSession.update).not.toHaveBeenCalled();
+    expect(tx.correctionRequest.update).not.toHaveBeenCalled();
+  });
+
   it('does not mutate attendance when rejecting', async () => {
     const prisma: any = {
       correctionRequest: {

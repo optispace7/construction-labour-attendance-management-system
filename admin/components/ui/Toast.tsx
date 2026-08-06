@@ -42,7 +42,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       <Snackbar
         key={toast?.key}
         open={open}
-        autoHideDuration={4000}
+        // An error is usually a sentence explaining what the server refused and
+        // what to do about it — four seconds is not long enough to read one, and
+        // it cannot be got back once it has gone.
+        autoHideDuration={toast?.severity === 'error' ? 12000 : 4000}
         onClose={(_, reason) => reason !== 'clickaway' && setOpen(false)}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       >
@@ -50,7 +53,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           severity={toast?.severity ?? 'info'}
           variant="filled"
           onClose={() => setOpen(false)}
-          sx={{ minWidth: 280, boxShadow: 6 }}
+          // Capped, or a long sentence stretches to the full width of a desktop
+          // screen and reads as one unbroken line.
+          sx={{ minWidth: 280, maxWidth: 560, boxShadow: 6 }}
         >
           {toast?.message}
         </Alert>
