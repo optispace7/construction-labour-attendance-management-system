@@ -102,14 +102,23 @@ export default function DevicesPage() {
     },
   });
 
-  // Delete confirmation target. The API refuses to delete a device that has
-  // marked attendance, so the error toast is the real guard here.
+  // Delete confirmation target. Any device can be deleted: the API revokes it
+  // first, then copies its name onto every punch it took, so nothing about the
+  // attendance itself is at stake and the dialog does not need to warn.
   const [deleting, setDeleting] = React.useState<Device | null>(null);
 
   const remove = useMutation({
-    mutationFn: (id: string) => api.del(`/devices/${id}`),
-    onSuccess: () => {
-      toast.success('Device deleted');
+    mutationFn: (id: string) =>
+      api.del<{ deleted: boolean; punchesStamped: number }>(`/devices/${id}`),
+    onSuccess: (res) => {
+      // Say what was kept, not just what went — an admin deleting a tablet with
+      // a year of attendance behind it deserves to see the records are fine.
+      const kept = res?.punchesStamped ?? 0;
+      toast.success(
+        kept > 0
+          ? `Device deleted — ${kept.toLocaleString()} ${kept === 1 ? 'punch keeps' : 'punches keep'} its name`
+          : 'Device deleted',
+      );
       setDeleting(null);
       qc.invalidateQueries({ queryKey: ['devices'] });
     },
@@ -330,8 +339,7 @@ export default function DevicesPage() {
         message={
           deleting ? (
             <>
-              <b>{deleting.label || deleting.deviceUid}</b> will be removed from the list entirely.
-              A device that has already marked attendance cannot be deleted — revoke it instead.
+              Are you sure you want to delete <b>{deleting.label || deleting.deviceUid}</b>?
             </>
           ) : (
             ''

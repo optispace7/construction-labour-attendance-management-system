@@ -77,11 +77,19 @@ export class DevicesService {
   }
 
   /**
-   * Hard-delete a device that was registered by mistake (a test phone, a browser
-   * nobody uses). Refused once the device has marked attendance: AttendanceTap
-   * .deviceId is an optional FK, so Prisma would SetNull on delete and quietly
-   * strip the device off historical punches. Revoking is the right move there —
-   * it blocks sign-in and keeps the trail intact.
+   * Delete a device — a tablet that has been retired, lost or replaced, as well
+   * as the test phone somebody registered by mistake.
+   *
+   * A device that has marked attendance used to be refused, because
+   * AttendanceTap.deviceId is SET NULL on delete and deleting would have
+   * stripped the device off every punch it ever took. The punches themselves
+   * were never at risk — only the record of which device made them — so the
+   * name is copied onto those punches first and then the row goes. "Which
+   * device took this" outlives the device.
+   *
+   * Revoked before deleted, in that order and never the reverse: revoking is
+   * what kills the device's token. If the delete then fails on anything, the
+   * device is already locked out rather than still able to mark attendance.
    */
   async remove(user: AuthUser, id: string) {
     const device = await this.prisma.device.findFirst({
@@ -95,13 +103,29 @@ export class DevicesService {
       throw Errors.forbidden("Only the Super Admin can delete an Admin's device.");
     }
 
-    const taps = await this.prisma.attendanceTap.count({ where: { deviceId: id } });
-    if (taps > 0) {
-      throw Errors.conflict(
-        `This device has recorded ${taps} attendance ${taps === 1 ? 'punch' : 'punches'}. ` +
-          'Deleting it would strip the device from those records — revoke it instead.',
-      );
+    // The name the punches will keep. A device nobody ever named has only its
+    // uid, which is still better than an empty column.
+    const keptName = device.label?.trim() || device.deviceUid;
+
+    if (device.status !== 'REVOKED') {
+      await this.prisma.device.update({ where: { id }, data: { status: 'REVOKED' } });
+      await this.audit.record({
+        organizationId: user.organizationId,
+        actorUserId: user.userId,
+        actorRole: user.role,
+        action: 'DEVICE_UPDATE',
+        entityType: 'Device',
+        entityId: id,
+        oldValue: { status: device.status },
+        newValue: { status: 'REVOKED' },
+        reason: 'Revoked automatically before deletion',
+      });
     }
+
+    const stamped = await this.prisma.attendanceTap.updateMany({
+      where: { deviceId: id },
+      data: { deviceLabel: keptName },
+    });
 
     await this.prisma.device.delete({ where: { id } });
 
@@ -118,8 +142,11 @@ export class DevicesService {
         status: device.status,
         platform: device.platform,
       },
+      // How many punches now carry the name instead of the link, so the trail
+      // says what became of them.
+      newValue: { keptName, punchesStamped: stamped.count },
     });
 
-    return { deleted: true };
+    return { deleted: true, punchesStamped: stamped.count };
   }
 }

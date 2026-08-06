@@ -447,6 +447,9 @@ model AttendanceTap {
   organizationId   String            @map("organization_id") @db.Uuid
   siteId           String            @map("site_id") @db.Uuid
   deviceId         String?           @map("device_id") @db.Uuid
+  // Snapshot of the device's name, written only when that device is deleted —
+  // device_id is SET NULL on delete, and this is what survives it.
+  deviceLabel      String?           @map("device_label")
   workerId         String?           @map("worker_id") @db.Uuid
   rawIdentifier    String?           @map("raw_identifier")
   tapSource        TapSource         @map("tap_source")
