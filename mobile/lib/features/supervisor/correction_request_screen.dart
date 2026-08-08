@@ -123,7 +123,11 @@ class _CorrectionRequestScreenState extends ConsumerState<CorrectionRequestScree
               borderRadius:
                   BorderRadius.all(Radius.circular(ClamsRadius.control)),
             ),
-            title: const Text('Work date'),
+            // Named for the stamp being corrected, not "work date": a night
+            // shift logs out the *next* morning, and the approval finds the
+            // session from this date and time, so the 5th and the 6th are two
+            // different requests.
+            title: Text(_type == 'LOGOUT' ? 'Date they went out' : 'Date they came in'),
             subtitle: Text('${_date.year}-${_date.month.toString().padLeft(2, '0')}-${_date.day.toString().padLeft(2, '0')}'),
             trailing: const Icon(Icons.calendar_today),
             onTap: () async {

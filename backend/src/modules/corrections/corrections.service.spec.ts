@@ -377,6 +377,76 @@ describe('CorrectionsService.approve (approval gate)', () => {
     expect(tx.correctionRequest.update).not.toHaveBeenCalled();
   });
 
+  it('closes the night shift running into the day a logout correction names', async () => {
+    // In at 21:30 IST on the 5th, out at 08:00 IST on the 6th. The 6th has no
+    // session of its own — the row to close is the one still open from the 5th.
+    const session = {
+      id: 's1',
+      updatedAt: new Date('2026-08-05T16:00:00Z'),
+      loginAt: new Date('2026-08-05T16:00:00Z'), // 21:30 IST on the 5th
+      logoutAt: null,
+      siteId: 'site1',
+      shiftId: null,
+      workDate: new Date(Date.UTC(2026, 7, 5)),
+      shift: null,
+      site: { timezone: 'Asia/Kolkata' },
+    };
+    const proposedLogout = new Date('2026-08-06T02:30:00Z'); // 08:00 IST on the 6th
+    const findFirst = jest
+      .fn()
+      // Resolved by day first: nothing on the 6th…
+      .mockResolvedValueOnce(null)
+      // …then by the shift running into it.
+      .mockResolvedValueOnce(session);
+    const tx: any = {
+      correctionRequest: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'c1',
+          status: 'PENDING',
+          organizationId: 'org1',
+          workerId: 'w1',
+          siteId: 'site1',
+          sessionId: null,
+          workDate: new Date(Date.UTC(2026, 7, 5)),
+          createdAt: new Date('2026-08-06T04:00:00Z'),
+          items: [{ field: 'logout_at', proposedValue: proposedLogout.toISOString() }],
+        }),
+        update: jest.fn().mockResolvedValue({ id: 'c1', status: 'APPROVED' }),
+      },
+      site: {
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ id: 'site1', timezone: 'Asia/Kolkata', settings: null }),
+      },
+      attendanceSession: {
+        findUnique: jest.fn(),
+        findFirst,
+        create: jest.fn(),
+        update: jest.fn().mockResolvedValue({ ...session, logoutAt: proposedLogout }),
+      },
+    };
+    const prisma: any = { $transaction: (fn: any) => fn(tx) };
+    const audit: any = { record: jest.fn() };
+    const svc = new CorrectionsService(prisma, audit);
+
+    const res = await svc.approve(user, 'c1', {});
+
+    expect(res.status).toBe('APPROVED');
+    // No row was invented for the 6th…
+    expect(tx.attendanceSession.create).not.toHaveBeenCalled();
+    // …the previous evening's session was closed instead, and it stays filed
+    // under the day the shift started.
+    expect(tx.attendanceSession.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 's1' },
+        data: expect.objectContaining({ logoutAt: proposedLogout }),
+      }),
+    );
+    expect(tx.attendanceSession.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: { workDate: new Date(Date.UTC(2026, 7, 6)) } }),
+    );
+  });
+
   it('does not mutate attendance when rejecting', async () => {
     const prisma: any = {
       correctionRequest: {

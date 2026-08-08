@@ -169,7 +169,8 @@ export async function renderAttendanceSheetXlsx(
   writeAttSheetRows(ws, rows, 5, n, lastCol, thin);
 
   for (let c = 1; c <= n; c++) ws.getColumn(c).width = c === 1 ? 6 : 16;
-  for (let c = n + 1; c <= lastCol; c++) ws.getColumn(c).width = 6;
+  // Wide enough for an overnight Out — "08:00 +1" — not just "08:00".
+  for (let c = n + 1; c <= lastCol; c++) ws.getColumn(c).width = 8;
   ws.views = [{ state: 'frozen', xSplit: n, ySplit: 4 }];
 
   return Buffer.from(await wb.xlsx.writeBuffer());

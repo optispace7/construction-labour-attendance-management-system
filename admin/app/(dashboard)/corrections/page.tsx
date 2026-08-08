@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Box, Button, Stack, Tab, Tabs, Tooltip, Typography } from '@mui/material';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
-import { api } from '@/lib/api/browser';
+import { api, apiErrorMessage } from '@/lib/api/browser';
 import { PageHeader } from '@/components/PageHeader';
 import { DataTable, Column } from '@/components/ui/DataTable';
 import { StatusBadge, statusTone } from '@/components/ui/StatusBadge';
@@ -38,6 +38,36 @@ const EMPTY_COPY: Record<string, { title: string; description: string }> = {
   },
 };
 
+const FIELD_LABEL: Record<string, string> = {
+  login_at: 'Login',
+  logout_at: 'Logout',
+  site_id: 'Site',
+  shift_id: 'Shift',
+};
+
+/**
+ * A proposed value as the reviewer needs to read it.
+ *
+ * Times arrive as ISO instants, and a night shift's proposed logout lands on the
+ * day *after* the work date — so the date is shown, not just the clock, or the
+ * admin cannot tell an 8 am correction from an 8 am mistake.
+ */
+function proposedValue(value: unknown): string {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleString(undefined, {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    }
+  }
+  return String(value);
+}
+
 type PendingDecision = { id: string; action: 'approve' | 'reject'; who: string; date: string };
 
 export default function CorrectionsPage() {
@@ -59,9 +89,18 @@ export default function CorrectionsPage() {
       toast.success(vars.action === 'approve' ? 'Correction approved' : 'Correction rejected');
       setDecision(null);
     },
-    onError: (_, vars) => {
+    // The server says *why* it refused — "no session on that day", "the worker
+    // already has an open session", "the times run backwards". Swallowing that
+    // behind "Failed to approve" leaves the admin with a request they cannot
+    // approve and nothing to act on, so the message goes through as it came.
+    onError: (e, vars) => {
       toast.error(
-        vars.action === 'approve' ? 'Failed to approve correction' : 'Failed to reject correction',
+        apiErrorMessage(
+          e,
+          vars.action === 'approve'
+            ? 'Failed to approve correction'
+            : 'Failed to reject correction',
+        ),
       );
     },
   });
@@ -131,7 +170,7 @@ export default function CorrectionsPage() {
         <>
           {c.items?.map((i) => (
             <Typography key={i.id} variant="caption" display="block">
-              {i.field} → {String(i.proposedValue)}
+              {FIELD_LABEL[i.field] ?? i.field} → {proposedValue(i.proposedValue)}
             </Typography>
           ))}
         </>

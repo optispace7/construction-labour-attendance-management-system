@@ -17,6 +17,7 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  FormControlLabel,
   IconButton,
   LinearProgress,
   ListItemIcon,
@@ -130,6 +131,23 @@ function toTimeInput(iso: string): string {
 /** "YYYY-MM-DD" + "HH:mm" read as local wall-clock → ISO instant. */
 function fromTimeInput(date: string, hhmm: string): string {
   return new Date(`${date}T${hhmm}:00`).toISOString();
+}
+
+/** "YYYY-MM-DD" one day on — where a night shift's out time lands. */
+function nextDayOf(date: string): string {
+  const d = new Date(`${date}T00:00:00`);
+  d.setDate(d.getDate() + 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate(),
+  ).padStart(2, '0')}`;
+}
+
+/** "06 Aug" — the short day label the overnight tick-box carries. */
+function dayLabel(date: string): string {
+  return new Date(`${date}T00:00:00`).toLocaleDateString(undefined, {
+    day: '2-digit',
+    month: 'short',
+  });
 }
 
 /** "7h 35m" */
@@ -322,6 +340,7 @@ function TimesDialog({
   const toast = useToast();
   const [loginTime, setLoginTime] = React.useState('');
   const [logoutTime, setLogoutTime] = React.useState('');
+  const [nextDay, setNextDay] = React.useState(false);
   const [reason, setReason] = React.useState('');
 
   React.useEffect(() => {
@@ -332,10 +351,21 @@ function TimesDialog({
     }
   }, [session]);
 
+  // A night shift ends on the following morning, so an out time earlier than the
+  // in time can only mean the next day — tick it for them rather than refusing
+  // the edit. The box stays there to be untucked when the time really is a typo.
+  React.useEffect(() => {
+    if (loginTime && logoutTime) setNextDay(logoutTime <= loginTime);
+  }, [loginTime, logoutTime]);
+
+  const outDate = nextDay ? nextDayOf(date) : date;
   const loginIso = loginTime ? fromTimeInput(date, loginTime) : null;
-  const logoutIso = logoutTime ? fromTimeInput(date, logoutTime) : null;
+  const logoutIso = logoutTime ? fromTimeInput(outDate, logoutTime) : null;
   const mins = loginIso && logoutIso ? minutesBetween(loginIso, logoutIso) : null;
   const backwards = mins !== null && mins <= 0;
+  // Not refused — a 16-hour day is legal, if unusual — but worth a second look,
+  // because it is also what a mistyped hour looks like once "next day" is on.
+  const overlong = mins !== null && mins > 16 * 60;
 
   const save = useMutation({
     mutationFn: () =>
@@ -383,13 +413,35 @@ function TimesDialog({
               error={backwards}
               helperText={
                 backwards
-                  ? 'The out time must be later than the in time'
+                  ? 'The out time must be later than the in time — tick the box below if they worked through the night'
                   : logoutTime
-                    ? undefined
+                    ? `On ${dayLabel(outDate)}`
                     : 'Leave empty to put this person back on site'
               }
             />
           </Stack>
+
+          {/* Night shift: in at 9:30 pm, out at 8 am the following morning. */}
+          {!!logoutTime && (
+            <FormControlLabel
+              sx={{ mt: -1 }}
+              control={
+                <Checkbox
+                  size="small"
+                  checked={nextDay}
+                  onChange={(e) => setNextDay(e.target.checked)}
+                />
+              }
+              label={`They went out the next day (${dayLabel(nextDayOf(date))})`}
+            />
+          )}
+
+          {overlong && (
+            <Alert severity="warning">
+              That is {duration(mins!)} on site. Check the times and the next-day box before
+              saving.
+            </Alert>
+          )}
 
           {mins !== null && !backwards && session && (
             <Box>
@@ -927,7 +979,16 @@ export default function FixAttendancePage() {
             fontWeight: s.logoutAt ? 400 : 600,
           }}
         >
-          {s.logoutAt ? clock(s.logoutAt) : 'Still on site'}
+          {s.logoutAt
+            ? // A night shift's out time belongs to the next morning; without the
+              // day beside it "08:00" reads as an in time typed the wrong way round.
+              new Date(s.logoutAt).toDateString() !== new Date(s.loginAt).toDateString()
+              ? `${clock(s.logoutAt)} · ${new Date(s.logoutAt).toLocaleDateString(undefined, {
+                  day: '2-digit',
+                  month: 'short',
+                })}`
+              : clock(s.logoutAt)
+            : 'Still on site'}
         </Typography>
       ),
     },

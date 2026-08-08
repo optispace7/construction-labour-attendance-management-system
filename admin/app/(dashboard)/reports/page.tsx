@@ -86,13 +86,13 @@ function mondayOf(d: Dayjs): Dayjs {
   return d.subtract((d.day() + 6) % 7, 'day').startOf('day');
 }
 
-/** Render ISO timestamps from the API as readable local date-times. */
-function cell(header: string, value: string | number | null): string {
+/**
+ * A preview cell. Timestamps arrive already written out in the site's own
+ * timezone ("05 Aug 2026, 09:30 PM"), so the preview shows exactly what the
+ * downloaded file will hold — no second conversion against the browser's clock.
+ */
+function cell(value: string | number | null): string {
   if (value == null || value === '') return '—';
-  if ((header === 'Login' || header === 'Logout' || header === 'Reviewed At') && typeof value === 'string') {
-    const d = dayjs(value);
-    if (d.isValid()) return d.format('DD MMM YYYY, hh:mm A');
-  }
   return String(value);
 }
 
@@ -624,7 +624,7 @@ export default function ReportsPage() {
                     {data.rows.slice(0, PREVIEW_LIMIT).map((row, i) => (
                       <TableRow key={i} hover>
                         {row.map((v, j) => (
-                          <TableCell key={j}>{cell(data.headers[j], v)}</TableCell>
+                          <TableCell key={j}>{cell(v)}</TableCell>
                         ))}
                       </TableRow>
                     ))}

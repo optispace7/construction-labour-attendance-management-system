@@ -208,6 +208,39 @@ export class CorrectionsService {
               orderBy: { loginAt: 'desc' },
             });
 
+        // A night shift's logout falls on the *next* calendar day, so a
+        // logout-only correction ("he came in at 21:30 and left at 08:00")
+        // resolves to a day that has no session of its own. The row it means is
+        // the one still running from the evening before, so fall back to the
+        // worker's last session that started within the day before the proposed
+        // logout. Without this every overnight correction sat PENDING for ever:
+        // approving it only ever answered "no attendance session for that day".
+        if (!session && !req.sessionId && patch.logoutAt && !patch.loginAt) {
+          const proposedLogout = patch.logoutAt as Date;
+          const runningInto = {
+            organizationId: req.organizationId,
+            workerId: req.workerId,
+            loginAt: {
+              lt: proposedLogout,
+              gte: new Date(proposedLogout.getTime() - 24 * 60 * 60 * 1000),
+            },
+          };
+          // A session still OPEN is the one this logout is for. Only if there is
+          // none does an already-closed shift come into it — otherwise a stray
+          // request would silently stretch a finished day shift across the night.
+          session =
+            (await tx.attendanceSession.findFirst({
+              where: { ...runningInto, state: 'OPEN' },
+              include: { shift: true, site: true },
+              orderBy: { loginAt: 'desc' },
+            })) ??
+            (await tx.attendanceSession.findFirst({
+              where: runningInto,
+              include: { shift: true, site: true },
+              orderBy: { loginAt: 'desc' },
+            }));
+        }
+
         if (req.sessionId && !session) throw Errors.conflict('Target session no longer exists');
 
         // Freshness: if a pinned session changed after the request was filed, abort.
@@ -238,12 +271,13 @@ export class CorrectionsService {
         // login time instead of approving into the void.
         if (!session) {
           if (!patch.loginAt) {
-            // Refuse rather than guess: a logout-only correction with no session
-            // on the target day (e.g. an overnight shift whose logout falls on
-            // the next day) needs a human, not an invented row.
+            // Refuse rather than guess: a logout-only correction that matches no
+            // session on the target day and no shift running into it from the
+            // day before needs a human, not an invented row.
             throw Errors.conflict(
-              `No attendance session for ${targetDate.toISOString().slice(0, 10)}; ` +
-                'the correction must propose a login time',
+              `No attendance session for ${targetDate.toISOString().slice(0, 10)}, and no shift ` +
+                'running into that time from the day before. The correction must propose a ' +
+                'login time.',
             );
           }
           // uq_open_session_per_worker allows only ONE open session per worker,

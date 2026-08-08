@@ -63,6 +63,43 @@ export class ReportsService {
     }
   }
 
+  /** One Intl formatter per timezone — building them per row is expensive. */
+  private static readonly stampFormatters = new Map<
+    string,
+    { date: Intl.DateTimeFormat; time: Intl.DateTimeFormat }
+  >();
+
+  /**
+   * "05 Aug 2026, 09:30 PM" — an instant as the site read it on the clock.
+   *
+   * Every timestamp a person sees in a report goes through here. Downloads used
+   * to carry the raw UTC instant ("2026-08-05T16:00:00.000Z"), which is neither
+   * the date nor the time anyone worked.
+   */
+  private formatStamp(d: Date, timezone: string): string {
+    const tz = timezone || 'Asia/Kolkata';
+    let fmt = ReportsService.stampFormatters.get(tz);
+    if (!fmt) {
+      fmt = {
+        date: new Intl.DateTimeFormat('en-GB', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          timeZone: tz,
+        }),
+        // en-US for the uppercase AM/PM; en-GB renders it lowercase.
+        time: new Intl.DateTimeFormat('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+          timeZone: tz,
+        }),
+      };
+      ReportsService.stampFormatters.set(tz, fmt);
+    }
+    return `${fmt.date.format(d)}, ${fmt.time.format(d)}`;
+  }
+
   /**
    * Generate a report. All formats render inline in the API process — CSV as
    * text, XLSX/PDF as base64 — so no separate worker deployment is required.
@@ -478,11 +515,15 @@ export class ReportsService {
     const org = user.organizationId;
 
     if (type === ReportType.CORRECTION) {
-      const reqs = await this.prisma.correctionRequest.findMany({
-        where: { organizationId: org },
-        include: { worker: true },
-        orderBy: { createdAt: 'desc' },
-      });
+      const [reqs, orgRow] = await Promise.all([
+        this.prisma.correctionRequest.findMany({
+          where: { organizationId: org },
+          include: { worker: true },
+          orderBy: { createdAt: 'desc' },
+        }),
+        this.prisma.organization.findUnique({ where: { id: org } }),
+      ]);
+      const tz = orgRow?.timezone || 'Asia/Kolkata';
       return {
         headers: ['Date', 'Worker', 'Type', 'Reason', 'Status', 'Reviewed At'],
         rows: reqs.map((r) => [
@@ -491,7 +532,7 @@ export class ReportsService {
           r.type,
           r.reason,
           r.status,
-          r.reviewedAt ? r.reviewedAt.toISOString() : null,
+          r.reviewedAt ? this.formatStamp(r.reviewedAt, tz) : null,
         ]),
       };
     }
@@ -543,8 +584,8 @@ export class ReportsService {
       'Designation',
       'Vendor',
       'Site',
-      'Login',
-      'Logout',
+      'Login Date & Time',
+      'Logout Date & Time',
       'Worked (h)',
       'Overtime (h)',
       'Late (min)',
@@ -553,6 +594,7 @@ export class ReportsService {
     ];
 
     const day = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : '');
+    const stamp = (d: Date | null, tz: string) => (d ? this.formatStamp(d, tz) : null);
     const sensitiveCells = (w: (typeof sessions)[number]['worker']): (string | number | null)[] => [
       w.fatherName ?? '',
       day(w.dateOfBirth),
@@ -589,8 +631,11 @@ export class ReportsService {
         s.worker.designation?.name ?? '',
         s.worker.vendor?.name ?? '',
         s.site.name,
-        s.loginAt ? s.loginAt.toISOString() : null,
-        t.logoutAt ? t.logoutAt.toISOString() : null,
+        // Date *and* time, in the site's own timezone: a night shift logs out on
+        // the day after the one the row is filed under, and a bare "08:00" next
+        // to a work date of the 5th reads as a mistake rather than a night shift.
+        stamp(s.loginAt, s.site.timezone),
+        stamp(t.logoutAt, s.site.timezone),
         minutesToHours(t.workedMinutes),
         minutesToHours(t.overtimeMinutes),
         s.lateMinutes ?? 0,
@@ -770,6 +815,23 @@ export class ReportsService {
       timeZone: tz,
     });
     const fmtTime = (d: Date | null) => (d ? timeFmt.format(d) : null);
+    // The day a stamp fell on in site time, to tell an overnight Out from a
+    // same-day one.
+    const dayFmt = new Intl.DateTimeFormat('en-CA', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      timeZone: tz,
+    });
+    /**
+     * The Out cell of a day column. A night shift ends the next morning, so its
+     * out time sits in the column of the day the shift *started* — "08:00" there
+     * would read as an in time. "+1" says it belongs to the following day.
+     */
+    const fmtOut = (d: Date | null, dkey: string) => {
+      if (!d) return null;
+      return dayFmt.format(d) === dkey ? fmtTime(d) : `${fmtTime(d)} +1`;
+    };
     const dateFmt = new Intl.DateTimeFormat('en-GB', {
       day: '2-digit',
       month: 'short',
@@ -866,7 +928,7 @@ export class ReportsService {
           cells.push(employed ? (shift ? 'P' : 'A') : '');
         } else {
           cells.push(fmtTime(shift?.inAt ?? null));
-          cells.push(fmtTime(shift?.outAt ?? null));
+          cells.push(fmtOut(shift?.outAt ?? null, dkey));
         }
       }
       return cells;
