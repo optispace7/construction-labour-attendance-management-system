@@ -88,6 +88,7 @@ describe('renderAttendanceSheetXlsx', () => {
     {
       info: [2, 'Kailu Pasvan', 'W-0084'],
       cells: [night('20:20'), night('07:52', '06 Aug'), night('20:14'), night('08:01', '07 Aug')],
+      night: true,
     },
   ];
 
@@ -110,7 +111,7 @@ describe('renderAttendanceSheetXlsx', () => {
     expect(ws.views[0]).toMatchObject({ xSplit: infoHeaders.length, ySplit: 5 });
   });
 
-  it('fills every time cell on a night-shift row, leaving the text alone', async () => {
+  it('fills a night-shift row end to end, leaving the text alone', async () => {
     const buf = await renderAttendanceSheetXlsx(months, infoHeaders, rows);
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buf as unknown as ArrayBuffer);
@@ -127,9 +128,16 @@ describe('renderAttendanceSheetXlsx', () => {
     // The text itself is untouched, so it stays black on the fill.
     expect((nightOut.font as ExcelJS.Font | undefined)?.color?.argb).toBeUndefined();
 
-    // The worker's name is not filled — only the times carry the colour.
-    expect(filled(ws.getCell(7, 2))).toBeNull();
-    // And a day man's row is untouched throughout.
+    // The band runs from the serial number across every column of the row…
+    const wholeRow = Array.from({ length: infoHeaders.length + 4 }, (_, i) =>
+      filled(ws.getCell(7, i + 1)),
+    );
+    expect(wholeRow).toEqual(Array(infoHeaders.length + 4).fill('FFDCE9F7'));
+    // …and the serial number is still a number, not text.
+    expect(ws.getCell(7, 1).value).toBe(2);
+
+    // A day man's row is untouched throughout.
+    expect(filled(ws.getCell(6, 1))).toBeNull();
     expect(filled(ws.getCell(6, infoHeaders.length + 2))).toBeNull();
   });
 });

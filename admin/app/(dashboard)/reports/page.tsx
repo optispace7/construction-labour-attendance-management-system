@@ -122,7 +122,9 @@ function cell(value: PreviewCell): React.ReactNode {
   if (value == null || value === '') return '—';
   if (isNight(value)) {
     // The cell itself is filled (see the TableCell below); the text is left
-    // alone. Only the out time has a date worth naming.
+    // alone. A day not worked keeps its dash and is filled like the rest of the
+    // row. Only the out time has a date worth naming.
+    if (!value.value) return '—';
     return value.day ? (
       <Tooltip arrow title={`Out on ${value.day} — a night shift`}>
         <Box component="span">{value.value}</Box>

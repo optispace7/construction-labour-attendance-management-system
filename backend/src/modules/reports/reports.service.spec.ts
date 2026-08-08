@@ -170,15 +170,14 @@ describe('ReportsService — attendance sheet shifts', () => {
     );
     const out = await svc.preview(user, ReportType.ATTENDANCE_SHEET, params);
 
-    // The IN is coloured too, so the shift reads as one stretch rather than an
-    // out time singled out from its own login.
-    const [inCell, outCell] = out.rows[0].slice(-2);
-    expect(isNightTime(inCell)).toBe(true);
-    expect(isNightTime(outCell)).toBe(true);
+    // The whole row is marked, serial number to out time, so the fill runs
+    // unbroken rather than singling the out time out from its own login.
+    expect(out.rows[0].every(isNightTime)).toBe(true);
     // Only the out time names a date, and that is what CSV falls back on.
     expect(times(out.rows[0])).toEqual(['22:00', '06:00 (12 Jul)']);
-    // The worker's own columns are left alone.
-    expect(out.rows[0][1]).toBe('Kailu');
+    // The worker's columns still read as themselves.
+    expect(cellText(out.rows[0][1])).toBe('Kailu');
+    expect(cellText(out.rows[0][0])).toBe('1');
   });
 
   it('leaves the times alone when the cap is off', async () => {

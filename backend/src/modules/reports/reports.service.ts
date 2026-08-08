@@ -854,15 +854,16 @@ export class ReportsService {
     };
 
     /**
-     * A row that holds a night shift is written in the night colour throughout —
-     * the IN as well as the Out. Colouring the out time alone reads as if the
-     * two halves of one shift were unrelated, which is the confusion the colour
-     * is there to clear up in the first place.
+     * A row that holds a night shift is filled from end to end — the serial
+     * number through to the out time, blank days included, so the band is
+     * unbroken. Filling the out time alone reads as if the two halves of one
+     * shift were unrelated, which is the confusion the colour is there to clear
+     * up in the first place.
      */
     const markNightRow = (cells: Cell[]): Cell[] =>
       cells.some(isNightTime)
         ? cells.map((c) =>
-            isNightTime(c) || c === null || c === '' ? c : { value: String(c), night: true },
+            isNightTime(c) ? c : { value: c == null ? '' : String(c), night: true },
           )
         : cells;
     const dateFmt = new Intl.DateTimeFormat('en-GB', {
@@ -1011,7 +1012,15 @@ export class ReportsService {
       // Serial numbers restart in each block — they number the rows of that
       // block, not the workforce.
       inBlock.forEach((w, idx) => {
-        rows.push({ info: infoCells(w, idx + 1), cells: shiftCells(w, shiftIndex) });
+        const cells = shiftCells(w, shiftIndex);
+        rows.push({
+          info: infoCells(w, idx + 1),
+          cells,
+          // The worker's own columns are filled too, so the band runs from the
+          // serial number to the out time. They keep their own types — a serial
+          // number stays a number in the workbook.
+          night: cells.some(isNightTime),
+        });
       });
     }
 
@@ -1030,14 +1039,20 @@ export class ReportsService {
     // A heading spans the sheet in XLSX; flat formats carry it in the first
     // cell with the rest of the row blank, matching the section dividers the
     // other reports already emit.
-    const flatRows = rows.map((r) =>
-      r.heading
-        ? [
-            `===== ${r.heading} =====`,
-            ...Array<string>(Math.max(0, flatHeaders.length - 1)).fill(''),
-          ]
-        : [...r.info, ...r.cells],
-    );
+    const flatRows = rows.map((r) => {
+      if (r.heading) {
+        return [
+          `===== ${r.heading} =====`,
+          ...Array<string>(Math.max(0, flatHeaders.length - 1)).fill(''),
+        ];
+      }
+      // The flat formats have no row-level styling to hang the fill on, so a
+      // night row's worker columns carry it cell by cell like the times do.
+      const info: Cell[] = r.night
+        ? r.info.map((c) => ({ value: c == null ? '' : String(c), night: true as const }))
+        : r.info;
+      return [...info, ...r.cells];
+    });
 
     return { months, infoHeaders, rows, flatHeaders, flatRows, presence };
   }

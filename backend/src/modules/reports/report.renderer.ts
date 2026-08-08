@@ -54,6 +54,11 @@ export interface AttSheetRow {
   info: (string | number | null)[];
   cells: Cell[];
   /**
+   * The row holds a night shift, so it is filled from the serial number to the
+   * out time — the worker's columns as well as the times.
+   */
+  night?: boolean;
+  /**
    * Section divider — when set, the row is a banner spanning the whole sheet
    * ("SECOND LOGIN OF THE DAY") and `info`/`cells` are empty.
    */
@@ -93,12 +98,12 @@ function writeAttSheetRows(
     const wsRow = ws.getRow(r);
     [...row.info, ...row.cells].forEach((v, j) => {
       const cell = wsRow.getCell(j + 1);
-      // Every time on a night-shift row is filled, so the shift reads as one
-      // stretch; the legend above the grid explains the colour.
+      // A night-shift row is filled end to end, worker columns included, so the
+      // band is unbroken; the legend above the grid explains the colour.
       cell.value = (isNightTime(v) ? v.value : v) as ExcelJS.CellValue;
       cell.border = thin;
       if (j >= infoCols) cell.alignment = { horizontal: 'center' };
-      if (isNightTime(v)) {
+      if (row.night || isNightTime(v)) {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NIGHT_FILL_ARGB } };
       }
     });
