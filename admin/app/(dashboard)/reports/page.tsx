@@ -27,6 +27,7 @@ import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import TableChartOutlinedIcon from '@mui/icons-material/TableChartOutlined';
 import GridOnOutlinedIcon from '@mui/icons-material/GridOnOutlined';
 import PictureAsPdfOutlinedIcon from '@mui/icons-material/PictureAsPdfOutlined';
+import { Theme, alpha } from '@mui/material/styles';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
 import { DatePicker } from '@mui/x-date-pickers/DatePicker';
@@ -103,8 +104,14 @@ function mondayOf(d: Dayjs): Dayjs {
   return d.subtract((d.day() + 6) % 7, 'day').startOf('day');
 }
 
-/** The blue a night shift's times are written in, here and in the downloads. */
-const NIGHT_INK = '#1F5FA8';
+/**
+ * The wash behind a night shift's times, matching the filled cells of the Excel
+ * and PDF downloads. Taken from the theme rather than fixed, because the panel
+ * runs light or dark and a pale blue that reads on white disappears on charcoal
+ * — and would take the text with it.
+ */
+const nightFill = (theme: Theme) =>
+  alpha(theme.palette.info.main, theme.palette.mode === 'dark' ? 0.28 : 0.16);
 
 /**
  * A preview cell. Timestamps arrive already written out in the site's own
@@ -114,19 +121,14 @@ const NIGHT_INK = '#1F5FA8';
 function cell(value: PreviewCell): React.ReactNode {
   if (value == null || value === '') return '—';
   if (isNight(value)) {
-    const time = (
-      <Box component="span" sx={{ color: NIGHT_INK, fontWeight: 600 }}>
-        {value.value}
-      </Box>
-    );
-    // Only the out time has a date worth naming; the rest of the row is simply
-    // part of the same night shift.
+    // The cell itself is filled (see the TableCell below); the text is left
+    // alone. Only the out time has a date worth naming.
     return value.day ? (
       <Tooltip arrow title={`Out on ${value.day} — a night shift`}>
-        {time}
+        <Box component="span">{value.value}</Box>
       </Tooltip>
     ) : (
-      time
+      value.value
     );
   }
   return String(value);
@@ -653,10 +655,10 @@ export default function ReportsPage() {
                   <Typography
                     variant="caption"
                     display="block"
-                    sx={{ mb: 1, color: NIGHT_INK, fontStyle: 'italic' }}
+                    sx={{ mb: 1, color: 'info.main', fontStyle: 'italic' }}
                   >
-                    Times are site time, shown under the day the shift started. Times in blue are
-                    a night shift: its out time falls on the following morning.
+                    Times are site time, shown under the day the shift started. Times on a blue
+                    background are a night shift: its out time falls on the following morning.
                   </Typography>
                 )}
                 <Card variant="outlined" sx={{ maxWidth: '100%', overflowX: 'auto' }}>
@@ -672,7 +674,12 @@ export default function ReportsPage() {
                       {data.rows.slice(0, PREVIEW_LIMIT).map((row, i) => (
                         <TableRow key={i} hover>
                           {row.map((v, j) => (
-                            <TableCell key={j}>{cell(v)}</TableCell>
+                            <TableCell
+                              key={j}
+                              sx={isNight(v) ? { backgroundColor: nightFill } : undefined}
+                            >
+                              {cell(v)}
+                            </TableCell>
                           ))}
                         </TableRow>
                       ))}

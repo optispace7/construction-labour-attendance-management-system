@@ -110,30 +110,32 @@ describe('renderAttendanceSheetXlsx', () => {
     expect(ws.views[0]).toMatchObject({ xSplit: infoHeaders.length, ySplit: 5 });
   });
 
-  it('colours every time on a night-shift row, and adds no marker', async () => {
+  it('fills every time cell on a night-shift row, leaving the text alone', async () => {
     const buf = await renderAttendanceSheetXlsx(months, infoHeaders, rows);
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buf as unknown as ArrayBuffer);
     const ws = wb.getWorksheet('Attendance')!;
-    const blue = { argb: 'FF1F5FA8' };
+    const filled = (c: ExcelJS.Cell) =>
+      (c.fill as ExcelJS.FillPattern | undefined)?.fgColor?.argb ?? null;
 
     const nightIn = ws.getCell(7, infoHeaders.length + 1);
     const nightOut = ws.getCell(7, infoHeaders.length + 2);
-    // The clock times alone — the blue is what says it is a night shift.
+    // The clock times alone — the filled cell is what says it is a night shift.
     expect([nightIn.value, nightOut.value]).toEqual(['20:20', '07:52']);
-    expect((nightIn.font as ExcelJS.Font).color).toEqual(blue);
-    expect((nightOut.font as ExcelJS.Font).color).toEqual(blue);
+    expect(filled(nightIn)).toBe('FFDCE9F7');
+    expect(filled(nightOut)).toBe('FFDCE9F7');
+    // The text itself is untouched, so it stays black on the fill.
+    expect((nightOut.font as ExcelJS.Font | undefined)?.color?.argb).toBeUndefined();
 
-    // The worker's name stays black — only the times carry the colour.
-    expect((ws.getCell(7, 2).font as ExcelJS.Font | undefined)?.color?.argb).toBeUndefined();
+    // The worker's name is not filled — only the times carry the colour.
+    expect(filled(ws.getCell(7, 2))).toBeNull();
     // And a day man's row is untouched throughout.
-    const dayOut = ws.getCell(6, infoHeaders.length + 2);
-    expect((dayOut.font as ExcelJS.Font | undefined)?.color?.argb).toBeUndefined();
+    expect(filled(ws.getCell(6, infoHeaders.length + 2))).toBeNull();
   });
 });
 
 describe('renderPdf', () => {
-  it('draws a next-morning out time in blue, and the rest in black', async () => {
+  it('fills the cells of a night shift and leaves the text black', async () => {
     const buf = await renderPdf(
       'Attendance sheet',
       ['Workers Name', '5 Aug IN', '5 Aug Out'],
@@ -150,22 +152,25 @@ describe('renderPdf', () => {
     const content = pdfContent(buf);
     const text = pdfText(buf);
 
-    // #1F5FA8 as PDFKit writes a DeviceRGB fill: "0.1215… 0.3725… 0.6588… scn".
-    expect(content).toMatch(/0\.1215\d* 0\.3725\d* 0\.6588\d* scn/);
+    // #DCE9F7 as PDFKit writes a DeviceRGB fill: "0.8627… 0.9137… 0.9686… scn",
+    // and `re f` is the rectangle it paints behind the cell.
+    expect(content).toMatch(
+      /[\d.]+ [\d.]+ [\d.]+ [\d.]+ re\n\/DeviceRGB cs\n0\.8627\d* 0\.9137\d* 0\.9686\d* scn\nf/,
+    );
     // The clock time alone reaches the page — no marker was appended.
     expect(text).toContain('07:52');
     expect(text).not.toContain('+1');
-    // And the colour is put back, or every later cell would inherit the blue.
+    // The ink goes back to black for the text, which sits on top of the fill.
     expect(content).toMatch(/\b0 0 0 scn/);
   });
 
-  it('needs no colour when nothing runs overnight', async () => {
+  it('needs no fill when nothing runs overnight', async () => {
     const buf = await renderPdf(
       'Attendance sheet',
       ['Workers Name', 'IN', 'Out'],
       [['Ankesh Kumar', '11:06', '19:14']],
     );
-    expect(pdfContent(buf)).not.toMatch(/0\.1215\d* 0\.3725\d* 0\.6588\d* scn/);
+    expect(pdfContent(buf)).not.toMatch(/0\.8627\d* 0\.9137\d* 0\.9686\d* scn/);
   });
 });
 

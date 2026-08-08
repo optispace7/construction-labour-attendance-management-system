@@ -8,9 +8,14 @@ import { Cell, isNightTime } from './report.builder';
 
 type Row = Cell[];
 
-/** The blue a night shift's times are written in, everywhere they can be. */
+/**
+ * The blue a night shift's times sit ON — a filled cell, not tinted text, so a
+ * night shift is visible at arm's length from a printed sheet.
+ */
+const NIGHT_FILL = '#DCE9F7';
+const NIGHT_FILL_ARGB = 'FFDCE9F7';
+/** The legend's own ink; the only place the blue is written rather than filled. */
 const NIGHT_INK = '#1F5FA8';
-const NIGHT_ARGB = 'FF1F5FA8';
 
 /** Renders report rows to an XLSX buffer (in-process — no worker needed). */
 export async function renderXlsx(title: string, headers: string[], rows: Row[]): Promise<Buffer> {
@@ -38,7 +43,7 @@ export async function renderXlsx(title: string, headers: string[], rows: Row[]):
 /** The line above the muster grid that explains what the blue means. */
 export const ATT_SHEET_LEGEND =
   'IN and Out are site times, shown under the day the shift STARTED. ' +
-  'Times in blue are a night shift: its out time falls on the following morning.';
+  'Times on a blue background are a night shift: its out time falls on the following morning.';
 
 export interface AttSheetMonth {
   label: string;
@@ -88,12 +93,14 @@ function writeAttSheetRows(
     const wsRow = ws.getRow(r);
     [...row.info, ...row.cells].forEach((v, j) => {
       const cell = wsRow.getCell(j + 1);
-      // Every time on a night-shift row is blue, so the shift reads as one
+      // Every time on a night-shift row is filled, so the shift reads as one
       // stretch; the legend above the grid explains the colour.
       cell.value = (isNightTime(v) ? v.value : v) as ExcelJS.CellValue;
       cell.border = thin;
       if (j >= infoCols) cell.alignment = { horizontal: 'center' };
-      if (isNightTime(v)) cell.font = { color: { argb: NIGHT_ARGB }, bold: true };
+      if (isNightTime(v)) {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NIGHT_FILL_ARGB } };
+      }
     });
   });
 }
@@ -1541,10 +1548,14 @@ export function renderPdf(
         y = 28;
       }
       doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(6.5);
+      // The fills go down first, or each one would cover the text already drawn
+      // in the cell to its left.
       cells.forEach((cell, i) => {
-        // Same blue as the workbook for a next-morning out time; every other
-        // cell is black, so the colour has to be set back each time.
-        doc.fillColor(isNightTime(cell) ? NIGHT_INK : 'black');
+        if (!isNightTime(cell)) return;
+        doc.rect(left + i * colW - 1, y - 2.5, colW, rowH - 1).fill(NIGHT_FILL);
+      });
+      doc.fillColor('black');
+      cells.forEach((cell, i) => {
         doc.text(
           isNightTime(cell) ? cell.value : cell == null ? '' : String(cell),
           left + i * colW,
@@ -1556,7 +1567,6 @@ export function renderPdf(
           },
         );
       });
-      doc.fillColor('black');
       y += rowH;
     };
 
