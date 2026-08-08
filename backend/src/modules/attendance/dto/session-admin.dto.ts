@@ -106,6 +106,14 @@ export class BulkLogoutDto {
   @IsUUID('4', { each: true })
   sessionIds?: string[];
 
+  @ApiProperty({
+    required: false,
+    description: 'Stamp the time on the morning after the work date (night shifts)',
+  })
+  @IsOptional()
+  @IsBoolean()
+  nextDay?: boolean;
+
   @ApiProperty({ required: false, description: 'Preview the outcome without writing' })
   @IsOptional()
   @IsBoolean()

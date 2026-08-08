@@ -1,5 +1,6 @@
 import { ReportsService } from './reports.service';
 import { ReportType } from './dto/report.dto';
+import { Cell, cellText } from './report.builder';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 
 /**
@@ -53,11 +54,14 @@ describe('ReportsService — attendance sheet shifts', () => {
   };
 
   const params = { from: '2026-07-11', to: '2026-07-11' };
-  /** Strip the info columns — the assertions are about the IN/Out pair. */
-  const times = (row: (string | number | null)[]) => row.slice(-2);
+  /**
+   * Strip the info columns — the assertions are about the IN/Out pair. An out
+   * time on the following morning arrives as a value carrying its own day, so
+   * it is flattened to text here the way a colourless format would render it.
+   */
+  const times = (row: Cell[]) => row.slice(-2).map(cellText);
   /** Banner rows carry their text in the first cell; worker rows in the second. */
-  const names = (rows: (string | number | null)[][]) =>
-    rows.map((r) => (String(r[0]).includes('=====') ? r[0] : r[1]));
+  const names = (rows: Cell[][]) => rows.map((r) => (String(r[0]).includes('=====') ? r[0] : r[1]));
 
   it('keeps a single block when nobody logged in twice', async () => {
     const svc = build(

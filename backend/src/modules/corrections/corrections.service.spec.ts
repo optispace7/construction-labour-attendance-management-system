@@ -95,7 +95,7 @@ describe('CorrectionsService.approve (approval gate)', () => {
     // The session was located without a pinned id and actually patched.
     expect(tx.attendanceSession.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { organizationId: 'org1', workerId: 'w1', workDate },
+        where: expect.objectContaining({ organizationId: 'org1', workerId: 'w1', workDate }),
       }),
     );
     expect(tx.attendanceSession.update).toHaveBeenCalledWith(
@@ -444,6 +444,74 @@ describe('CorrectionsService.approve (approval gate)', () => {
     );
     expect(tx.attendanceSession.update).not.toHaveBeenCalledWith(
       expect.objectContaining({ data: { workDate: new Date(Date.UTC(2026, 7, 6)) } }),
+    );
+  });
+
+  it('applies a logout to the shift it can close, not a later stray tap', async () => {
+    // 5 Aug 2026, W-0017: a real day 11:06-19:14, then a second tap 37 seconds
+    // after the out tap. The officer's "he left at 18:19" belongs to the day,
+    // but the day's *latest* session is the stray — which is how two rows came
+    // to hold a logout earlier than their own login.
+    const realDay = {
+      id: 'day',
+      updatedAt: new Date('2026-08-05T13:44:15Z'),
+      loginAt: new Date('2026-08-05T05:36:02Z'),
+      logoutAt: new Date('2026-08-05T13:44:15Z'),
+      siteId: 'site1',
+      shiftId: null,
+      workDate: new Date(Date.UTC(2026, 7, 5)),
+      shift: null,
+      site: { timezone: 'Asia/Kolkata' },
+    };
+    const stray = { ...realDay, id: 'stray', loginAt: new Date('2026-08-05T13:44:52Z') };
+    const proposedLogout = new Date('2026-08-05T12:49:00Z'); // 18:19 IST
+
+    // Stands in for the database: hands back the latest session matching the
+    // filter, so a query that does not exclude the stray would pick it.
+    const findFirst = jest.fn().mockImplementation(({ where }) => {
+      const rows = [realDay, stray]
+        .filter((s) => !where.loginAt?.lt || s.loginAt < where.loginAt.lt)
+        .sort((a, b) => b.loginAt.getTime() - a.loginAt.getTime());
+      return Promise.resolve(rows[0] ?? null);
+    });
+    const tx: any = {
+      correctionRequest: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'c1',
+          status: 'PENDING',
+          organizationId: 'org1',
+          workerId: 'w1',
+          siteId: 'site1',
+          sessionId: null,
+          workDate: new Date(Date.UTC(2026, 7, 5)),
+          createdAt: new Date('2026-08-05T14:00:00Z'),
+          items: [{ field: 'logout_at', proposedValue: proposedLogout.toISOString() }],
+        }),
+        update: jest.fn().mockResolvedValue({ id: 'c1', status: 'APPROVED' }),
+      },
+      site: {
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ id: 'site1', timezone: 'Asia/Kolkata', settings: null }),
+      },
+      attendanceSession: {
+        findUnique: jest.fn(),
+        findFirst,
+        create: jest.fn(),
+        update: jest.fn().mockResolvedValue({ ...realDay, logoutAt: proposedLogout }),
+      },
+    };
+    const prisma: any = { $transaction: (fn: any) => fn(tx) };
+    const audit: any = { record: jest.fn() };
+    const svc = new CorrectionsService(prisma, audit);
+
+    await svc.approve(user, 'c1', {});
+
+    expect(tx.attendanceSession.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'day' },
+        data: expect.objectContaining({ logoutAt: proposedLogout }),
+      }),
     );
   });
 

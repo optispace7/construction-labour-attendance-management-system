@@ -20,6 +20,7 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
@@ -65,9 +66,25 @@ const FORMATS: { value: string; label: string; icon: React.ReactNode }[] = [
   { value: 'PDF', label: 'PDF', icon: <PictureAsPdfOutlinedIcon /> },
 ];
 
+/**
+ * An out time that belongs to the following morning. The API sends it as a
+ * value rather than decorated text, so the preview can colour it exactly as the
+ * Excel and PDF downloads do.
+ */
+interface NextDayTime {
+  value: string;
+  day: string;
+  nextDay: true;
+}
+type PreviewCell = string | number | null | NextDayTime;
+
+function isNextDay(v: PreviewCell): v is NextDayTime {
+  return typeof v === 'object' && v !== null && (v as NextDayTime).nextDay === true;
+}
+
 interface PreviewResult {
   headers: string[];
-  rows: (string | number | null)[][];
+  rows: PreviewCell[][];
   rowCount: number;
 }
 
@@ -86,13 +103,25 @@ function mondayOf(d: Dayjs): Dayjs {
   return d.subtract((d.day() + 6) % 7, 'day').startOf('day');
 }
 
+/** The blue a next-morning out time is written in, here and in the downloads. */
+const NEXT_DAY_INK = '#1F5FA8';
+
 /**
  * A preview cell. Timestamps arrive already written out in the site's own
  * timezone ("05 Aug 2026, 09:30 PM"), so the preview shows exactly what the
  * downloaded file will hold — no second conversion against the browser's clock.
  */
-function cell(value: string | number | null): string {
+function cell(value: PreviewCell): React.ReactNode {
   if (value == null || value === '') return '—';
+  if (isNextDay(value)) {
+    return (
+      <Tooltip arrow title={`Out on ${value.day} — a night shift`}>
+        <Box component="span" sx={{ color: NEXT_DAY_INK, fontWeight: 600 }}>
+          {value.value}
+        </Box>
+      </Tooltip>
+    );
+  }
   return String(value);
 }
 
@@ -611,26 +640,39 @@ export default function ReportsPage() {
                 description="Nothing matched the selected period and filters — nothing to download."
               />
             ) : (
-              <Card variant="outlined" sx={{ maxWidth: '100%', overflowX: 'auto' }}>
-                <Table size="small" sx={{ minWidth: 'max-content' }}>
-                  <TableHead>
-                    <TableRow>
-                      {data.headers.map((h) => (
-                        <TableCell key={h}>{h}</TableCell>
-                      ))}
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {data.rows.slice(0, PREVIEW_LIMIT).map((row, i) => (
-                      <TableRow key={i} hover>
-                        {row.map((v, j) => (
-                          <TableCell key={j}>{cell(v)}</TableCell>
+              <>
+                {/* Only worth saying when the period actually holds a night shift. */}
+                {data.rows.some((r) => r.some(isNextDay)) && (
+                  <Typography
+                    variant="caption"
+                    display="block"
+                    sx={{ mb: 1, color: NEXT_DAY_INK, fontStyle: 'italic' }}
+                  >
+                    Times are site time, shown under the day the shift started. An out time in
+                    blue is on the following morning — a night shift, not a morning entry.
+                  </Typography>
+                )}
+                <Card variant="outlined" sx={{ maxWidth: '100%', overflowX: 'auto' }}>
+                  <Table size="small" sx={{ minWidth: 'max-content' }}>
+                    <TableHead>
+                      <TableRow>
+                        {data.headers.map((h) => (
+                          <TableCell key={h}>{h}</TableCell>
                         ))}
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </Card>
+                    </TableHead>
+                    <TableBody>
+                      {data.rows.slice(0, PREVIEW_LIMIT).map((row, i) => (
+                        <TableRow key={i} hover>
+                          {row.map((v, j) => (
+                            <TableCell key={j}>{cell(v)}</TableCell>
+                          ))}
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </Card>
+              </>
             )}
           </CardContent>
         </Card>

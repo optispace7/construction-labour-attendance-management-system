@@ -146,9 +146,51 @@ describe('SessionAdminService.bulkLogout — the end-of-shift sweep', () => {
     expect(result.closed[0].workerCode).toBe('W-0010');
     expect(result.closed[0].workedMinutes).toBe(455);
     expect(result.skipped).toEqual([
-      expect.objectContaining({ workerCode: 'W-0012', reason: 'Logged in after this time' }),
+      expect.objectContaining({
+        workerCode: 'W-0012',
+        reason: 'Logged in after this time — tick "next morning" for a night shift',
+      }),
     ]);
     expect(prisma.attendanceSession.update).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('stamps the morning after the work date when told the shift ran overnight', async () => {
+    const { prisma, audit, svc } = harness();
+    // A night man: in at 20:20 IST on the 21st, still open.
+    prisma.attendanceSession.findMany.mockResolvedValue([
+      {
+        ...session({
+          id: 'n',
+          loginAt: new Date('2026-07-21T14:50:00Z'),
+          worker: { fullName: 'Kailu', workerCode: 'W-0084' },
+        }),
+        shiftId: null,
+      },
+    ]);
+
+    const sameDay = await svc.bulkLogout(user, {
+      date: '2026-07-21',
+      time: '08:00',
+      reason: 'night shift ended',
+      dryRun: true,
+    });
+    // 08:00 on the 21st is before he arrived, so the sweep cannot take him.
+    expect(sameDay.closed).toHaveLength(0);
+    expect(sameDay.skipped).toHaveLength(1);
+
+    const nextDay = await svc.bulkLogout(user, {
+      date: '2026-07-21',
+      time: '08:00',
+      nextDay: true,
+      reason: 'night shift ended',
+      dryRun: true,
+    });
+    expect(nextDay.skipped).toHaveLength(0);
+    expect(nextDay.closed).toHaveLength(1);
+    // 20:20 on the 21st → 08:00 on the 22nd is 11h40m.
+    expect(nextDay.closed[0].logoutAt).toEqual(new Date('2026-07-22T02:30:00Z'));
+    expect(nextDay.closed[0].workedMinutes).toBe(700);
     expect(audit.record).not.toHaveBeenCalled();
   });
 

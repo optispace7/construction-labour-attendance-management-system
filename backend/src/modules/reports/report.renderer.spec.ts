@@ -1,5 +1,44 @@
 import * as fs from 'fs';
-import { ManpowerReport, renderManpowerPdf } from './report.renderer';
+import * as zlib from 'node:zlib';
+import * as ExcelJS from 'exceljs';
+import {
+  ATT_SHEET_LEGEND,
+  ManpowerReport,
+  renderAttendanceSheetXlsx,
+  renderManpowerPdf,
+  renderPdf,
+} from './report.renderer';
+
+/**
+ * The text of a PDF's content streams. PDFKit deflates them, so each candidate
+ * chunk is inflated and the ones that are not streams are skipped.
+ */
+function pdfContent(buf: Buffer): string {
+  const parts: string[] = [];
+  const text = buf.toString('latin1');
+  const re = /stream\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const start = m.index + m[0].length;
+    const end = text.indexOf('endstream', start);
+    if (end < 0) continue;
+    try {
+      parts.push(
+        zlib.inflateSync(Buffer.from(text.slice(start, end), 'latin1')).toString('latin1'),
+      );
+    } catch {
+      /* not a deflated stream — an image or font file */
+    }
+  }
+  return parts.join('\n');
+}
+
+/** The visible text of a PDF — PDFKit writes each run as a hex string. */
+function pdfText(buf: Buffer): string {
+  return (pdfContent(buf).match(/<([0-9a-f]+)>/g) ?? [])
+    .map((h) => Buffer.from(h.slice(1, -1), 'hex').toString('latin1'))
+    .join('\n');
+}
 
 function sample(overrides: Partial<ManpowerReport> = {}): ManpowerReport {
   const days: string[] = [];
@@ -38,6 +77,87 @@ function sample(overrides: Partial<ManpowerReport> = {}): ManpowerReport {
     ...overrides,
   };
 }
+
+describe('renderAttendanceSheetXlsx', () => {
+  const months = [{ label: 'August 2026', days: [5, 6] }];
+  const infoHeaders = ['SL No', 'Workers Name', 'EMP - ID NO'];
+  const nextMorning = (value: string, day: string) => ({ value, day, nextDay: true as const });
+  const rows = [
+    // A day man, then a night man whose out time carries to the next morning.
+    { info: [1, 'Ankesh Kumar', 'W-0017'], cells: ['11:06', '19:14', '11:02', '18:58'] },
+    {
+      info: [2, 'Kailu Pasvan', 'W-0084'],
+      cells: ['20:20', nextMorning('07:52', '06 Aug'), '20:14', nextMorning('08:01', '07 Aug')],
+    },
+  ];
+
+  it('puts the legend above the grid and leaves the headers and data below it', async () => {
+    const buf = await renderAttendanceSheetXlsx(months, infoHeaders, rows);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ArrayBuffer);
+    const ws = wb.getWorksheet('Attendance')!;
+
+    // Row 1 explains the colour; the four header rows follow; data starts at 6.
+    expect(ws.getCell(1, 1).value).toBe(ATT_SHEET_LEGEND);
+    expect(ws.getCell(2, 1).value).toBe('SL No');
+    expect(ws.getCell(2, infoHeaders.length + 1).value).toBe('August 2026');
+    expect(ws.getCell(4, infoHeaders.length + 1).value).toBe(5);
+    expect(ws.getCell(5, infoHeaders.length + 1).value).toBe('IN');
+    expect(ws.getCell(5, infoHeaders.length + 2).value).toBe('Out');
+    expect(ws.getCell(6, 2).value).toBe('Ankesh Kumar');
+    expect(ws.getCell(6, infoHeaders.length + 2).value).toBe('19:14');
+    // Frozen below the headers, so scrolling a month keeps them in view.
+    expect(ws.views[0]).toMatchObject({ xSplit: infoHeaders.length, ySplit: 5 });
+  });
+
+  it('colours an out time that belongs to the next morning, and adds no marker', async () => {
+    const buf = await renderAttendanceSheetXlsx(months, infoHeaders, rows);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ArrayBuffer);
+    const ws = wb.getWorksheet('Attendance')!;
+
+    const nightOut = ws.getCell(7, infoHeaders.length + 2);
+    const dayOut = ws.getCell(6, infoHeaders.length + 2);
+    // The clock time alone — the blue is what says it is the next morning.
+    expect(nightOut.value).toBe('07:52');
+    expect((nightOut.font as ExcelJS.Font).color).toEqual({ argb: 'FF1F5FA8' });
+    // A same-day out keeps the sheet's default ink (a theme colour, no argb).
+    expect((dayOut.font as ExcelJS.Font | undefined)?.color?.argb).toBeUndefined();
+  });
+});
+
+describe('renderPdf', () => {
+  it('draws a next-morning out time in blue, and the rest in black', async () => {
+    const buf = await renderPdf(
+      'Attendance sheet',
+      ['Workers Name', '5 Aug IN', '5 Aug Out'],
+      [
+        ['Ankesh Kumar', '11:06', '19:14'],
+        ['Kailu Pasvan', '20:20', { value: '07:52', day: '06 Aug', nextDay: true }],
+      ],
+      ATT_SHEET_LEGEND,
+    );
+    const content = pdfContent(buf);
+    const text = pdfText(buf);
+
+    // #1F5FA8 as PDFKit writes a DeviceRGB fill: "0.1215… 0.3725… 0.6588… scn".
+    expect(content).toMatch(/0\.1215\d* 0\.3725\d* 0\.6588\d* scn/);
+    // The clock time alone reaches the page — no marker was appended.
+    expect(text).toContain('07:52');
+    expect(text).not.toContain('+1');
+    // And the colour is put back, or every later cell would inherit the blue.
+    expect(content).toMatch(/\b0 0 0 scn/);
+  });
+
+  it('needs no colour when nothing runs overnight', async () => {
+    const buf = await renderPdf(
+      'Attendance sheet',
+      ['Workers Name', 'IN', 'Out'],
+      [['Ankesh Kumar', '11:06', '19:14']],
+    );
+    expect(pdfContent(buf)).not.toMatch(/0\.1215\d* 0\.3725\d* 0\.6588\d* scn/);
+  });
+});
 
 describe('renderManpowerPdf', () => {
   it('renders a non-trivial PDF', async () => {

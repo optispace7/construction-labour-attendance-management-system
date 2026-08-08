@@ -821,6 +821,7 @@ export default function FixAttendancePage() {
   const [date, setDate] = React.useState(todayLocal());
   const [siteId, setSiteId] = React.useState('all');
   const [logoutTime, setLogoutTime] = React.useState('18:00');
+  const [bulkNextDay, setBulkNextDay] = React.useState(false);
   const [bulkReason, setBulkReason] = React.useState('');
   const [preview, setPreview] = React.useState<BulkPreview | null>(null);
 
@@ -858,6 +859,7 @@ export default function FixAttendancePage() {
     time: logoutTime,
     siteId: siteId === 'all' ? undefined : siteId,
     sessionIds: picked.length ? picked : undefined,
+    nextDay: bulkNextDay,
     reason: bulkReason.trim(),
     dryRun,
   });
@@ -1115,15 +1117,33 @@ export default function FixAttendancePage() {
             </Stack>
 
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="flex-start">
-              <TextField
-                label="They left at"
-                type="time"
-                value={logoutTime}
-                onChange={(e) => setLogoutTime(e.target.value)}
-                InputLabelProps={{ shrink: true }}
-                helperText={`Site time (${day.data?.timezone ?? 'Asia/Kolkata'})`}
-                sx={{ width: { xs: '100%', md: 190 }, flexShrink: 0 }}
-              />
+              <Box sx={{ width: { xs: '100%', md: 190 }, flexShrink: 0 }}>
+                <TextField
+                  label="They left at"
+                  type="time"
+                  value={logoutTime}
+                  onChange={(e) => setLogoutTime(e.target.value)}
+                  InputLabelProps={{ shrink: true }}
+                  helperText={`Site time (${day.data?.timezone ?? 'Asia/Kolkata'})`}
+                  fullWidth
+                />
+                {/* Night shift: everyone still open started the evening before. */}
+                <FormControlLabel
+                  sx={{ mt: 0.5 }}
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={bulkNextDay}
+                      onChange={(e) => setBulkNextDay(e.target.checked)}
+                    />
+                  }
+                  label={
+                    <Typography variant="body2">
+                      Next morning ({dayLabel(nextDayOf(date))})
+                    </Typography>
+                  }
+                />
+              </Box>
               <TextField
                 label="Why are you logging them out?"
                 value={bulkReason}
@@ -1298,7 +1318,7 @@ export default function FixAttendancePage() {
       <BulkLogoutDialog
         open={!!preview}
         preview={preview}
-        time={logoutTime}
+        time={bulkNextDay ? `${logoutTime} on ${dayLabel(nextDayOf(date))}` : logoutTime}
         busy={applyBulk.isPending}
         onConfirm={() => applyBulk.mutate()}
         onClose={() => setPreview(null)}

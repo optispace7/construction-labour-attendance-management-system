@@ -193,6 +193,13 @@ export class CorrectionsService {
         // Requests filed from the mobile app don't pin a sessionId, so fall back
         // to the worker's session for the target day. Without this the approval
         // silently changed nothing and attendance/reports kept the old values.
+        // Which of the day's sessions does a logout correction mean? The latest
+        // one that had already *started* by then — not simply the latest, which
+        // on 5 Aug 2026 put an 18:19 logout onto a stray tap made at 19:14 and
+        // left the row reading zero hours worked for both men it hit.
+        const startedBeforeLogout =
+          patch.logoutAt && !patch.loginAt ? { loginAt: { lt: patch.logoutAt as Date } } : {};
+
         let session = req.sessionId
           ? await tx.attendanceSession.findUnique({
               where: { id: req.sessionId },
@@ -203,6 +210,7 @@ export class CorrectionsService {
                 organizationId: req.organizationId,
                 workerId: req.workerId,
                 workDate: targetDate,
+                ...startedBeforeLogout,
               },
               include: { shift: true, site: true },
               orderBy: { loginAt: 'desc' },

@@ -4,7 +4,13 @@ import { join } from 'node:path';
 import * as ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 
-type Row = (string | number | null)[];
+import { Cell, isNextDayTime } from './report.builder';
+
+type Row = Cell[];
+
+/** The blue a next-morning out time is written in, everywhere it can be. */
+const NEXT_DAY_INK = '#1F5FA8';
+const NEXT_DAY_ARGB = 'FF1F5FA8';
 
 /** Renders report rows to an XLSX buffer (in-process — no worker needed). */
 export async function renderXlsx(title: string, headers: string[], rows: Row[]): Promise<Buffer> {
@@ -18,7 +24,7 @@ export async function renderXlsx(title: string, headers: string[], rows: Row[]):
     pattern: 'solid',
     fgColor: { argb: 'FFE8EEF7' },
   };
-  for (const row of rows) ws.addRow(row);
+  for (const row of rows) ws.addRow(row.map((c) => (isNextDayTime(c) ? c.value : c)));
 
   ws.columns.forEach((col, i) => {
     const headerLen = headers[i]?.length ?? 10;
@@ -29,6 +35,11 @@ export async function renderXlsx(title: string, headers: string[], rows: Row[]):
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
+/** The line above the muster grid that explains what the blue means. */
+export const ATT_SHEET_LEGEND =
+  'IN and Out are site times, shown under the day the shift STARTED. ' +
+  'An out time in blue is on the following morning — a night shift, not a morning entry.';
+
 export interface AttSheetMonth {
   label: string;
   /** Day-of-month numbers included for this block (may be a partial month). */
@@ -36,7 +47,7 @@ export interface AttSheetMonth {
 }
 export interface AttSheetRow {
   info: (string | number | null)[];
-  cells: (string | null)[];
+  cells: Cell[];
   /**
    * Section divider — when set, the row is a banner spanning the whole sheet
    * ("SECOND LOGIN OF THE DAY") and `info`/`cells` are empty.
@@ -77,9 +88,12 @@ function writeAttSheetRows(
     const wsRow = ws.getRow(r);
     [...row.info, ...row.cells].forEach((v, j) => {
       const cell = wsRow.getCell(j + 1);
-      cell.value = v as ExcelJS.CellValue;
+      // An out time carried over to the next morning reads as the plain clock
+      // time and says so in blue; the legend above the grid explains the colour.
+      cell.value = (isNextDayTime(v) ? v.value : v) as ExcelJS.CellValue;
       cell.border = thin;
       if (j >= infoCols) cell.alignment = { horizontal: 'center' };
+      if (isNextDayTime(v)) cell.font = { color: { argb: NEXT_DAY_ARGB }, bold: true };
     });
   });
 }
@@ -118,11 +132,14 @@ export async function renderAttendanceSheetXlsx(
   };
 
   const n = infoHeaders.length;
+  // Row 1 is the legend; the four header rows and the data below it all sit one
+  // row lower than the plain presence sheet, which needs no explaining.
+  const TOP = 2;
   // Info columns: one header each, merged down all four header rows.
   infoHeaders.forEach((h, i) => {
     const c = i + 1;
-    ws.mergeCells(1, c, 4, c);
-    const cell = ws.getCell(1, c);
+    ws.mergeCells(TOP, c, TOP + 3, c);
+    const cell = ws.getCell(TOP, c);
     cell.value = h;
     cell.font = { bold: true };
     cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
@@ -135,24 +152,24 @@ export async function renderAttendanceSheetXlsx(
   for (const mo of months) {
     const blockStart = col;
     const blockWidth = mo.days.length * 2;
-    ws.mergeCells(1, blockStart, 2, blockStart + blockWidth - 1);
-    const mcell = ws.getCell(1, blockStart);
+    ws.mergeCells(TOP, blockStart, TOP + 1, blockStart + blockWidth - 1);
+    const mcell = ws.getCell(TOP, blockStart);
     mcell.value = mo.label;
     mcell.font = { bold: true };
     mcell.alignment = { horizontal: 'center', vertical: 'middle' };
     mcell.fill = monthFill;
     mcell.border = thin;
     for (const day of mo.days) {
-      ws.mergeCells(3, col, 3, col + 1);
-      const dcell = ws.getCell(3, col);
+      ws.mergeCells(TOP + 2, col, TOP + 2, col + 1);
+      const dcell = ws.getCell(TOP + 2, col);
       dcell.value = day;
       dcell.font = { bold: true };
       dcell.alignment = { horizontal: 'center' };
       dcell.fill = headerFill;
       dcell.border = thin;
-      const inCell = ws.getCell(4, col);
+      const inCell = ws.getCell(TOP + 3, col);
       inCell.value = 'IN';
-      const outCell = ws.getCell(4, col + 1);
+      const outCell = ws.getCell(TOP + 3, col + 1);
       outCell.value = 'Out';
       for (const hc of [inCell, outCell]) {
         hc.font = { bold: true, size: 9 };
@@ -165,13 +182,21 @@ export async function renderAttendanceSheetXlsx(
   }
   const lastCol = col - 1;
 
-  // Data rows start at row 5 (after the four header rows).
-  writeAttSheetRows(ws, rows, 5, n, lastCol, thin);
+  // The legend, written last so it can span every column the grid ended up with.
+  ws.mergeCells(1, 1, 1, lastCol);
+  const legend = ws.getCell(1, 1);
+  legend.value = ATT_SHEET_LEGEND;
+  legend.font = { italic: true, size: 10, color: { argb: 'FF1F5FA8' } };
+  legend.alignment = { vertical: 'middle', horizontal: 'left' };
+
+  // Data rows start below the legend and the four header rows.
+  writeAttSheetRows(ws, rows, TOP + 4, n, lastCol, thin);
 
   for (let c = 1; c <= n; c++) ws.getColumn(c).width = c === 1 ? 6 : 16;
-  // Wide enough for an overnight Out — "08:00 +1" — not just "08:00".
-  for (let c = n + 1; c <= lastCol; c++) ws.getColumn(c).width = 8;
-  ws.views = [{ state: 'frozen', xSplit: n, ySplit: 4 }];
+  // A clock time and nothing more — the next-morning ones are told apart by
+  // colour, so no column has to widen to carry a marker.
+  for (let c = n + 1; c <= lastCol; c++) ws.getColumn(c).width = 6;
+  ws.views = [{ state: 'frozen', xSplit: n, ySplit: TOP + 3 }];
 
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
@@ -1467,8 +1492,18 @@ function drawStatList(
   });
 }
 
-/** Renders report rows to a simple landscape-A4 PDF table buffer. */
-export function renderPdf(title: string, headers: string[], rows: Row[]): Promise<Buffer> {
+/**
+ * Renders report rows to a simple landscape-A4 PDF table buffer.
+ *
+ * `note` is a line under the title — the muster sheet uses it for the legend
+ * that explains its blue out times.
+ */
+export function renderPdf(
+  title: string,
+  headers: string[],
+  rows: Row[],
+  note?: string,
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 24 });
     const chunks: Buffer[] = [];
@@ -1490,6 +1525,16 @@ export function renderPdf(title: string, headers: string[], rows: Row[]): Promis
       .text(title, left, 24, { width: usable - logoW - 12, ellipsis: true, lineBreak: false });
     let y = 46;
 
+    if (note) {
+      doc
+        .font('Helvetica-Oblique')
+        .fontSize(7)
+        .fillColor(NEXT_DAY_INK)
+        .text(note, left, y, { width: usable, ellipsis: true, lineBreak: false });
+      doc.fillColor('black');
+      y += 12;
+    }
+
     const drawRow = (cells: Row, bold: boolean) => {
       if (y + rowH > bottom) {
         doc.addPage();
@@ -1497,12 +1542,21 @@ export function renderPdf(title: string, headers: string[], rows: Row[]): Promis
       }
       doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(6.5);
       cells.forEach((cell, i) => {
-        doc.text(cell == null ? '' : String(cell), left + i * colW, y, {
-          width: colW - 3,
-          ellipsis: true,
-          lineBreak: false,
-        });
+        // Same blue as the workbook for a next-morning out time; every other
+        // cell is black, so the colour has to be set back each time.
+        doc.fillColor(isNextDayTime(cell) ? NEXT_DAY_INK : 'black');
+        doc.text(
+          isNextDayTime(cell) ? cell.value : cell == null ? '' : String(cell),
+          left + i * colW,
+          y,
+          {
+            width: colW - 3,
+            ellipsis: true,
+            lineBreak: false,
+          },
+        );
       });
+      doc.fillColor('black');
       y += rowH;
     };
 

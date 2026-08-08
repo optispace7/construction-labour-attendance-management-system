@@ -6,8 +6,9 @@ import { AuditService } from '../../common/audit/audit.service';
 import { Permission, roleHasPermission } from '../../common/rbac/permissions';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
-import { CappedSession, capWorkerDay, minutesToHours, toCsv } from './report.builder';
+import { CappedSession, Cell, capWorkerDay, minutesToHours, toCsv } from './report.builder';
 import {
+  ATT_SHEET_LEGEND,
   AttSheetMonth,
   AttSheetRow,
   renderAttendanceSheetXlsx,
@@ -137,7 +138,13 @@ export class ReportsService {
         };
       }
       if (dto.format === 'PDF') {
-        const buffer = await renderPdf('Attendance sheet', sheet.flatHeaders, sheet.flatRows);
+        const buffer = await renderPdf(
+          'Attendance sheet',
+          sheet.flatHeaders,
+          sheet.flatRows,
+          // Only the times layout has out times that can run to the next morning.
+          sheet.presence ? undefined : ATT_SHEET_LEGEND,
+        );
         return {
           ...base,
           contentType: 'application/pdf',
@@ -828,9 +835,15 @@ export class ReportsService {
      * out time sits in the column of the day the shift *started* — "08:00" there
      * would read as an in time. "+1" says it belongs to the following day.
      */
-    const fmtOut = (d: Date | null, dkey: string) => {
+    const shortDay = new Intl.DateTimeFormat('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      timeZone: tz,
+    });
+    const fmtOut = (d: Date | null, dkey: string): Cell => {
       if (!d) return null;
-      return dayFmt.format(d) === dkey ? fmtTime(d) : `${fmtTime(d)} +1`;
+      if (dayFmt.format(d) === dkey) return fmtTime(d);
+      return { value: fmtTime(d) as string, day: shortDay.format(d), nextDay: true };
     };
     const dateFmt = new Intl.DateTimeFormat('en-GB', {
       day: '2-digit',
@@ -917,10 +930,10 @@ export class ReportsService {
     }
 
     /** One worker's cells for a given shift of the day (0 = their first). */
-    const shiftCells = (w: (typeof workers)[number], shiftIndex: number): (string | null)[] => {
+    const shiftCells = (w: (typeof workers)[number], shiftIndex: number): Cell[] => {
       const wm = byWorkerDay.get(w.id);
       const emp = dkeyOf(w);
-      const cells: (string | null)[] = [];
+      const cells: Cell[] = [];
       for (const dkey of dayKeys) {
         const shift = wm?.get(dkey)?.[shiftIndex];
         if (presence) {

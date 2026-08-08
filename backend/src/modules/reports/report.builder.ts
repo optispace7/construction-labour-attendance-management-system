@@ -1,9 +1,37 @@
 /** Pure CSV helpers used by the reports service (kept dependency-free & testable). */
 
-export function toCsv(headers: string[], rows: (string | number | null | undefined)[][]): string {
-  const escape = (v: string | number | null | undefined): string => {
-    if (v === null || v === undefined) return '';
-    const s = String(v);
+/**
+ * An out time belonging to the morning *after* the column it sits in — a night
+ * shift, in the muster grid where each day owns one IN/Out pair.
+ *
+ * It travels as a value rather than decorated text so every format can say it
+ * its own way: colour in Excel, the PDF and the web preview; the date spelled
+ * out in CSV, which has no formatting to colour.
+ */
+export interface NextDayTime {
+  /** The clock time itself, "07:52". */
+  value: string;
+  /** The day it fell on, "06 Aug", for formats that cannot carry colour. */
+  day: string;
+  nextDay: true;
+}
+
+export type Cell = string | number | NextDayTime | null;
+
+export function isNextDayTime(v: unknown): v is NextDayTime {
+  return typeof v === 'object' && v !== null && (v as NextDayTime).nextDay === true;
+}
+
+/** The plain text of a cell — what a colourless format has to fall back on. */
+export function cellText(v: Cell | undefined): string {
+  if (v === null || v === undefined) return '';
+  if (isNextDayTime(v)) return `${v.value} (${v.day})`;
+  return String(v);
+}
+
+export function toCsv(headers: string[], rows: (Cell | undefined)[][]): string {
+  const escape = (v: Cell | undefined): string => {
+    const s = cellText(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines = [headers.map(escape).join(',')];

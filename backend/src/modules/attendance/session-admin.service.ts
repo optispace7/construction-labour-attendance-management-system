@@ -329,8 +329,14 @@ export class SessionAdminService {
 
     for (const s of open) {
       // The chosen wall-clock time on this session's own site day.
+      // A night shift ends on the morning after its work date, so the sweep can
+      // be told to stamp the following day. Without it a 20:00 start could never
+      // be swept at all: every candidate time fell before the login.
+      const stampDay = new Date(s.workDate);
+      if (dto.nextDay) stampDay.setUTCDate(stampDay.getUTCDate() + 1);
+
       const logoutAt = this.atLocalTime(
-        s.workDate,
+        stampDay,
         Number(match[1]),
         Number(match[2]),
         s.site?.timezone ?? tz,
@@ -341,7 +347,9 @@ export class SessionAdminService {
           id: s.id,
           workerCode: s.worker.workerCode,
           fullName: s.worker.fullName,
-          reason: 'Logged in after this time',
+          reason: dto.nextDay
+            ? 'Logged in after this time on the next day too'
+            : 'Logged in after this time — tick "next morning" for a night shift',
         });
         continue;
       }
