@@ -81,13 +81,13 @@ function sample(overrides: Partial<ManpowerReport> = {}): ManpowerReport {
 describe('renderAttendanceSheetXlsx', () => {
   const months = [{ label: 'August 2026', days: [5, 6] }];
   const infoHeaders = ['SL No', 'Workers Name', 'EMP - ID NO'];
-  const nextMorning = (value: string, day: string) => ({ value, day, nextDay: true as const });
+  const night = (value: string, day?: string) => ({ value, day, night: true as const });
   const rows = [
     // A day man, then a night man whose out time carries to the next morning.
     { info: [1, 'Ankesh Kumar', 'W-0017'], cells: ['11:06', '19:14', '11:02', '18:58'] },
     {
       info: [2, 'Kailu Pasvan', 'W-0084'],
-      cells: ['20:20', nextMorning('07:52', '06 Aug'), '20:14', nextMorning('08:01', '07 Aug')],
+      cells: [night('20:20'), night('07:52', '06 Aug'), night('20:14'), night('08:01', '07 Aug')],
     },
   ];
 
@@ -110,18 +110,24 @@ describe('renderAttendanceSheetXlsx', () => {
     expect(ws.views[0]).toMatchObject({ xSplit: infoHeaders.length, ySplit: 5 });
   });
 
-  it('colours an out time that belongs to the next morning, and adds no marker', async () => {
+  it('colours every time on a night-shift row, and adds no marker', async () => {
     const buf = await renderAttendanceSheetXlsx(months, infoHeaders, rows);
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buf as unknown as ArrayBuffer);
     const ws = wb.getWorksheet('Attendance')!;
+    const blue = { argb: 'FF1F5FA8' };
 
+    const nightIn = ws.getCell(7, infoHeaders.length + 1);
     const nightOut = ws.getCell(7, infoHeaders.length + 2);
+    // The clock times alone — the blue is what says it is a night shift.
+    expect([nightIn.value, nightOut.value]).toEqual(['20:20', '07:52']);
+    expect((nightIn.font as ExcelJS.Font).color).toEqual(blue);
+    expect((nightOut.font as ExcelJS.Font).color).toEqual(blue);
+
+    // The worker's name stays black — only the times carry the colour.
+    expect((ws.getCell(7, 2).font as ExcelJS.Font | undefined)?.color?.argb).toBeUndefined();
+    // And a day man's row is untouched throughout.
     const dayOut = ws.getCell(6, infoHeaders.length + 2);
-    // The clock time alone — the blue is what says it is the next morning.
-    expect(nightOut.value).toBe('07:52');
-    expect((nightOut.font as ExcelJS.Font).color).toEqual({ argb: 'FF1F5FA8' });
-    // A same-day out keeps the sheet's default ink (a theme colour, no argb).
     expect((dayOut.font as ExcelJS.Font | undefined)?.color?.argb).toBeUndefined();
   });
 });
@@ -133,7 +139,11 @@ describe('renderPdf', () => {
       ['Workers Name', '5 Aug IN', '5 Aug Out'],
       [
         ['Ankesh Kumar', '11:06', '19:14'],
-        ['Kailu Pasvan', '20:20', { value: '07:52', day: '06 Aug', nextDay: true }],
+        [
+          'Kailu Pasvan',
+          { value: '20:20', night: true },
+          { value: '07:52', day: '06 Aug', night: true },
+        ],
       ],
       ATT_SHEET_LEGEND,
     );

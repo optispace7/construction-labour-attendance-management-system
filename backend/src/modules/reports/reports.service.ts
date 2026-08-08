@@ -6,7 +6,14 @@ import { AuditService } from '../../common/audit/audit.service';
 import { Permission, roleHasPermission } from '../../common/rbac/permissions';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
-import { CappedSession, Cell, capWorkerDay, minutesToHours, toCsv } from './report.builder';
+import {
+  CappedSession,
+  Cell,
+  capWorkerDay,
+  isNightTime,
+  minutesToHours,
+  toCsv,
+} from './report.builder';
 import {
   ATT_SHEET_LEGEND,
   AttSheetMonth,
@@ -843,8 +850,21 @@ export class ReportsService {
     const fmtOut = (d: Date | null, dkey: string): Cell => {
       if (!d) return null;
       if (dayFmt.format(d) === dkey) return fmtTime(d);
-      return { value: fmtTime(d) as string, day: shortDay.format(d), nextDay: true };
+      return { value: fmtTime(d) as string, day: shortDay.format(d), night: true };
     };
+
+    /**
+     * A row that holds a night shift is written in the night colour throughout —
+     * the IN as well as the Out. Colouring the out time alone reads as if the
+     * two halves of one shift were unrelated, which is the confusion the colour
+     * is there to clear up in the first place.
+     */
+    const markNightRow = (cells: Cell[]): Cell[] =>
+      cells.some(isNightTime)
+        ? cells.map((c) =>
+            isNightTime(c) || c === null || c === '' ? c : { value: String(c), night: true },
+          )
+        : cells;
     const dateFmt = new Intl.DateTimeFormat('en-GB', {
       day: '2-digit',
       month: 'short',
@@ -944,7 +964,7 @@ export class ReportsService {
           cells.push(fmtOut(shift?.outAt ?? null, dkey));
         }
       }
-      return cells;
+      return markNightRow(cells);
     };
 
     // How many times the busiest worker-day was tapped. PRESENCE mode answers

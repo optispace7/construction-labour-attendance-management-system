@@ -1,6 +1,6 @@
 import { ReportsService } from './reports.service';
 import { ReportType } from './dto/report.dto';
-import { Cell, cellText } from './report.builder';
+import { Cell, cellText, isNightTime } from './report.builder';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 
 /**
@@ -154,6 +154,31 @@ describe('ReportsService — attendance sheet shifts', () => {
     expect(times(out.rows[1])).toEqual(['06:00', '12:00']);
     // The afternoon keeps the 3 hours the ceiling leaves: 13:00 + 3h.
     expect(times(out.rows[3])).toEqual(['13:00', '16:00']);
+  });
+
+  it('marks both times of a shift that ends the next morning', async () => {
+    const svc = build(
+      [worker('w1', 'Kailu', 'W-0084')],
+      [
+        {
+          ...shift('s1', 'w1', 22, 22),
+          // In at 22:00 on the 11th, out at 06:00 on the 12th.
+          logoutAt: new Date(Date.UTC(2026, 6, 12, 6)),
+          workedMinutes: 480,
+        },
+      ],
+    );
+    const out = await svc.preview(user, ReportType.ATTENDANCE_SHEET, params);
+
+    // The IN is coloured too, so the shift reads as one stretch rather than an
+    // out time singled out from its own login.
+    const [inCell, outCell] = out.rows[0].slice(-2);
+    expect(isNightTime(inCell)).toBe(true);
+    expect(isNightTime(outCell)).toBe(true);
+    // Only the out time names a date, and that is what CSV falls back on.
+    expect(times(out.rows[0])).toEqual(['22:00', '06:00 (12 Jul)']);
+    // The worker's own columns are left alone.
+    expect(out.rows[0][1]).toBe('Kailu');
   });
 
   it('leaves the times alone when the cap is off', async () => {

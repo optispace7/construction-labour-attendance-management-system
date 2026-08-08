@@ -1,31 +1,35 @@
 /** Pure CSV helpers used by the reports service (kept dependency-free & testable). */
 
 /**
- * An out time belonging to the morning *after* the column it sits in — a night
- * shift, in the muster grid where each day owns one IN/Out pair.
+ * A clock time that belongs to a night shift, in the muster grid where each day
+ * owns one IN/Out pair. Every time on such a row carries it, so the shift reads
+ * as one stretch rather than an out time singled out from its own login.
  *
  * It travels as a value rather than decorated text so every format can say it
  * its own way: colour in Excel, the PDF and the web preview; the date spelled
  * out in CSV, which has no formatting to colour.
  */
-export interface NextDayTime {
+export interface NightTime {
   /** The clock time itself, "07:52". */
   value: string;
-  /** The day it fell on, "06 Aug", for formats that cannot carry colour. */
-  day: string;
-  nextDay: true;
+  /**
+   * Set only on the out time that lands the following morning — "06 Aug" — and
+   * used by the formats that cannot carry colour, and for the panel's tooltip.
+   */
+  day?: string;
+  night: true;
 }
 
-export type Cell = string | number | NextDayTime | null;
+export type Cell = string | number | NightTime | null;
 
-export function isNextDayTime(v: unknown): v is NextDayTime {
-  return typeof v === 'object' && v !== null && (v as NextDayTime).nextDay === true;
+export function isNightTime(v: unknown): v is NightTime {
+  return typeof v === 'object' && v !== null && (v as NightTime).night === true;
 }
 
 /** The plain text of a cell — what a colourless format has to fall back on. */
 export function cellText(v: Cell | undefined): string {
   if (v === null || v === undefined) return '';
-  if (isNextDayTime(v)) return `${v.value} (${v.day})`;
+  if (isNightTime(v)) return v.day ? `${v.value} (${v.day})` : v.value;
   return String(v);
 }
 

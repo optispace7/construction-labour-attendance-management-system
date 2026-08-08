@@ -4,13 +4,13 @@ import { join } from 'node:path';
 import * as ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 
-import { Cell, isNextDayTime } from './report.builder';
+import { Cell, isNightTime } from './report.builder';
 
 type Row = Cell[];
 
-/** The blue a next-morning out time is written in, everywhere it can be. */
-const NEXT_DAY_INK = '#1F5FA8';
-const NEXT_DAY_ARGB = 'FF1F5FA8';
+/** The blue a night shift's times are written in, everywhere they can be. */
+const NIGHT_INK = '#1F5FA8';
+const NIGHT_ARGB = 'FF1F5FA8';
 
 /** Renders report rows to an XLSX buffer (in-process — no worker needed). */
 export async function renderXlsx(title: string, headers: string[], rows: Row[]): Promise<Buffer> {
@@ -24,7 +24,7 @@ export async function renderXlsx(title: string, headers: string[], rows: Row[]):
     pattern: 'solid',
     fgColor: { argb: 'FFE8EEF7' },
   };
-  for (const row of rows) ws.addRow(row.map((c) => (isNextDayTime(c) ? c.value : c)));
+  for (const row of rows) ws.addRow(row.map((c) => (isNightTime(c) ? c.value : c)));
 
   ws.columns.forEach((col, i) => {
     const headerLen = headers[i]?.length ?? 10;
@@ -38,7 +38,7 @@ export async function renderXlsx(title: string, headers: string[], rows: Row[]):
 /** The line above the muster grid that explains what the blue means. */
 export const ATT_SHEET_LEGEND =
   'IN and Out are site times, shown under the day the shift STARTED. ' +
-  'An out time in blue is on the following morning — a night shift, not a morning entry.';
+  'Times in blue are a night shift: its out time falls on the following morning.';
 
 export interface AttSheetMonth {
   label: string;
@@ -88,12 +88,12 @@ function writeAttSheetRows(
     const wsRow = ws.getRow(r);
     [...row.info, ...row.cells].forEach((v, j) => {
       const cell = wsRow.getCell(j + 1);
-      // An out time carried over to the next morning reads as the plain clock
-      // time and says so in blue; the legend above the grid explains the colour.
-      cell.value = (isNextDayTime(v) ? v.value : v) as ExcelJS.CellValue;
+      // Every time on a night-shift row is blue, so the shift reads as one
+      // stretch; the legend above the grid explains the colour.
+      cell.value = (isNightTime(v) ? v.value : v) as ExcelJS.CellValue;
       cell.border = thin;
       if (j >= infoCols) cell.alignment = { horizontal: 'center' };
-      if (isNextDayTime(v)) cell.font = { color: { argb: NEXT_DAY_ARGB }, bold: true };
+      if (isNightTime(v)) cell.font = { color: { argb: NIGHT_ARGB }, bold: true };
     });
   });
 }
@@ -1529,7 +1529,7 @@ export function renderPdf(
       doc
         .font('Helvetica-Oblique')
         .fontSize(7)
-        .fillColor(NEXT_DAY_INK)
+        .fillColor(NIGHT_INK)
         .text(note, left, y, { width: usable, ellipsis: true, lineBreak: false });
       doc.fillColor('black');
       y += 12;
@@ -1544,9 +1544,9 @@ export function renderPdf(
       cells.forEach((cell, i) => {
         // Same blue as the workbook for a next-morning out time; every other
         // cell is black, so the colour has to be set back each time.
-        doc.fillColor(isNextDayTime(cell) ? NEXT_DAY_INK : 'black');
+        doc.fillColor(isNightTime(cell) ? NIGHT_INK : 'black');
         doc.text(
-          isNextDayTime(cell) ? cell.value : cell == null ? '' : String(cell),
+          isNightTime(cell) ? cell.value : cell == null ? '' : String(cell),
           left + i * colW,
           y,
           {

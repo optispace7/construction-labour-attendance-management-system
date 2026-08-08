@@ -10,7 +10,12 @@ describe('report.builder', () => {
   it('spells the day out in CSV, which has no colour to carry it', () => {
     const csv = toCsv(
       ['5 Aug IN', '5 Aug Out'],
-      [['20:20', { value: '07:52', day: '06 Aug', nextDay: true }]],
+      [
+        [
+          { value: '20:20', night: true },
+          { value: '07:52', day: '06 Aug', night: true },
+        ],
+      ],
     );
     // A reader of the CSV still learns the shift ended the next morning.
     expect(csv.split('\n')[1]).toBe('20:20,07:52 (06 Aug)');
