@@ -28,10 +28,13 @@ describe('navForRole', () => {
       'Sites',
       'Vendors',
       'Designations',
+      // Theirs to file on — deciding one is still an admin's, which the page
+      // and the API enforce; the sidebar entry only gets them to the form.
+      'Corrections',
     ]) {
       expect(labels).toContain(allowed);
     }
-    for (const denied of ['Corrections', 'Users', 'Devices', 'Company', 'Storage', 'Audit']) {
+    for (const denied of ['Users', 'Devices', 'Company', 'Storage', 'Audit']) {
       expect(labels).not.toContain(denied);
     }
   });
@@ -43,9 +46,9 @@ describe('navForRole', () => {
 
 describe('canAccessPath', () => {
   it('refuses the pages a role has no nav entry for', () => {
-    // The bug this exists for: /corrections is off the Safety Officer's sidebar,
-    // but typing the URL used to open it anyway.
-    for (const denied of ['/corrections', '/users', '/devices', '/company', '/storage', '/audit']) {
+    // The bug this exists for: a page off the Safety Officer's sidebar could
+    // still be opened by typing the URL.
+    for (const denied of ['/users', '/devices', '/company', '/storage', '/audit']) {
       expect(canAccessPath('SUPERVISOR', denied)).toBe(false);
       expect(canAccessPath('SITE_ADMIN', denied)).toBe(true);
     }
@@ -61,6 +64,9 @@ describe('canAccessPath', () => {
       '/sites',
       '/safety',
       '/safety/daily',
+      // Theirs to file on, not to decide — the page hides approve/reject from
+      // a role without CORRECTION_APPROVE, and the API refuses it regardless.
+      '/corrections',
     ]) {
       expect(canAccessPath('SUPERVISOR', allowed)).toBe(true);
     }

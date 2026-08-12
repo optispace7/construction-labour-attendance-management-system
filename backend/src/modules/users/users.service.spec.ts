@@ -116,4 +116,53 @@ describe('UsersService.update — email/username clearing', () => {
     );
     expect(detail).toMatch(/Email is required/i);
   });
+
+  /**
+   * Who may hand out the right to apply corrections unreviewed.
+   *
+   * An Admin manages Safety Officer accounts, so without this check they could
+   * grant one the approval bypass — or take it for themselves through an
+   * account they control — which is a route around the approval step rather
+   * than a use of it.
+   */
+  describe('canApplyCorrections grant', () => {
+    const officer = { id: 'u-3', role: 'SUPERVISOR', email: 'so@clams.local', username: null };
+    const admin: AuthUser = {
+      userId: 'admin-2',
+      organizationId: 'org-1',
+      role: 'SITE_ADMIN',
+      siteScopes: [],
+    } as AuthUser;
+
+    it('lets the Super Admin grant it', async () => {
+      build(officer);
+      await service.update(superAdmin, 'u-3', {
+        canApplyCorrections: true,
+      } as UpdateUserDto);
+      expect(dataSentToPrisma().canApplyCorrections).toBe(true);
+    });
+
+    it('lets the Super Admin take it back', async () => {
+      build({ ...officer, canApplyCorrections: true });
+      await service.update(superAdmin, 'u-3', {
+        canApplyCorrections: false,
+      } as UpdateUserDto);
+      expect(dataSentToPrisma().canApplyCorrections).toBe(false);
+    });
+
+    it('refuses an Admin trying to grant it', async () => {
+      build(officer);
+      const detail = await detailOf(
+        service.update(admin, 'u-3', { canApplyCorrections: true } as UpdateUserDto),
+      );
+      expect(detail).toMatch(/Only the Super Admin/i);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('leaves the grant alone on an edit that does not mention it', async () => {
+      build({ ...officer, canApplyCorrections: true });
+      await service.update(admin, 'u-3', { fullName: 'Safety Officer' } as UpdateUserDto);
+      expect(dataSentToPrisma().canApplyCorrections).toBeUndefined();
+    });
+  });
 });

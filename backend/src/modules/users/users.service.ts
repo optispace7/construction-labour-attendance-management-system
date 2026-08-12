@@ -15,6 +15,7 @@ const PUBLIC_SELECT = {
   username: true,
   phone: true,
   isActive: true,
+  canApplyCorrections: true,
   lastLoginAt: true,
   createdAt: true,
   organizationId: true,
@@ -40,6 +41,23 @@ export class UsersService {
     private readonly crypto: CryptoService,
     private readonly audit: AuditService,
   ) {}
+
+  /**
+   * Handing out the approval bypass is the Super Admin's alone.
+   *
+   * An Admin manages Safety Officer accounts, so without this they could grant
+   * an officer the right to apply corrections unreviewed — or grant it to
+   * themselves through an account they control — which is a way around the
+   * approval step rather than a use of it.
+   */
+  private assertCanGrantDirectApply(actor: AuthUser, requested: boolean | undefined) {
+    if (requested === undefined) return;
+    if (actor.role !== 'SUPER_ADMIN') {
+      throw Errors.forbidden(
+        'Only the Super Admin can decide whose corrections apply without approval.',
+      );
+    }
+  }
 
   private assertCanManage(actor: AuthUser, targetRole: UserRole) {
     if (!MANAGEABLE[actor.role]?.includes(targetRole)) {
@@ -70,6 +88,7 @@ export class UsersService {
 
   async create(user: AuthUser, dto: CreateUserDto) {
     this.assertCanManage(user, dto.role);
+    this.assertCanGrantDirectApply(user, dto.canApplyCorrections);
     // Watchmen sign in with a user ID (no email); every other role resets
     // passwords via email OTP, so email is mandatory for them.
     if (dto.role === 'WATCHMAN' && !dto.username?.trim()) {
@@ -88,6 +107,7 @@ export class UsersService {
         username: dto.username?.trim() || null,
         phone: dto.phone,
         passwordHash,
+        canApplyCorrections: dto.canApplyCorrections ?? false,
         siteScopes: dto.siteIds?.length
           ? { create: dto.siteIds.map((siteId) => ({ siteId })) }
           : undefined,
@@ -112,6 +132,7 @@ export class UsersService {
     // follows the role hierarchy.
     if (id !== user.userId) this.assertCanManage(user, target.role);
     if (dto.role && dto.role !== target.role) this.assertCanManage(user, dto.role);
+    this.assertCanGrantDirectApply(user, dto.canApplyCorrections);
 
     // undefined = key absent = leave the column alone. null (or a blank string)
     // = clear it, which frees the email/username for reuse. Mapping blanks to
@@ -144,6 +165,7 @@ export class UsersService {
       username,
       phone: dto.phone,
       isActive: dto.isActive,
+      canApplyCorrections: dto.canApplyCorrections,
     };
     if (dto.password) data.passwordHash = await this.crypto.hashPassword(dto.password);
 
@@ -170,6 +192,7 @@ export class UsersService {
         role: updated.role,
         isActive: updated.isActive,
         passwordChanged: !!dto.password,
+        canApplyCorrections: updated.canApplyCorrections,
       },
     });
     return updated;

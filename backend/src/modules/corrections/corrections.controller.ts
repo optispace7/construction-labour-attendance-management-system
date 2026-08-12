@@ -27,8 +27,17 @@ export class CorrectionsController {
     @Query('status') status?: CorrectionStatus,
     @Query('siteId') siteId?: string,
     @Query('workerId') workerId?: string,
+    // The Super Admin's after-the-fact review: the corrections that were
+    // applied by their own author, with nobody else in the loop.
+    @Query('autoApplied') autoApplied?: string,
   ) {
-    return this.corrections.list(user, status, siteId, workerId);
+    return this.corrections.list(
+      user,
+      status,
+      siteId,
+      workerId,
+      autoApplied === undefined ? undefined : autoApplied === 'true',
+    );
   }
 
   @Get(':id')

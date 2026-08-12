@@ -51,6 +51,17 @@ export class CreateUserDto {
   @Length(8, 128)
   password!: string;
 
+  @ApiProperty({
+    required: false,
+    default: false,
+    description:
+      'Their attendance corrections apply immediately instead of queueing for ' +
+      'approval. Super Admin only — see UsersService.assertCanGrantDirectApply.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  canApplyCorrections?: boolean;
+
   @ApiProperty({ type: [String], required: false, description: 'Site IDs in scope' })
   @IsOptional()
   @IsArray()

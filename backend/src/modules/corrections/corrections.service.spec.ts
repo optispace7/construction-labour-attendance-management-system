@@ -258,7 +258,15 @@ describe('CorrectionsService.approve (approval gate)', () => {
       attendanceSession: {
         findUnique: jest.fn(),
         findFirst: jest.fn().mockImplementation(async ({ where }: any) => {
-          if (where.state === 'OPEN') return { id: 'sOpen' }; // already clocked in
+          // Already clocked in — on a later day than the one being corrected,
+          // which is the shape the message has to explain.
+          if (where.state === 'OPEN') {
+            return {
+              id: 'sOpen',
+              loginAt: new Date('2026-07-16T05:00:00Z'),
+              site: { name: 'Brigade WTC', timezone: 'Asia/Kolkata' },
+            };
+          }
           return null;
         }),
         create: jest.fn(),
@@ -268,7 +276,14 @@ describe('CorrectionsService.approve (approval gate)', () => {
     const prisma: any = { $transaction: (fn: any) => fn(tx) };
     const svc = new CorrectionsService(prisma, { record: jest.fn() } as any);
 
-    await expect(svc.approve(user, 'c1', {})).rejects.toMatchObject({ code: 'CONFLICT' });
+    // The approver is told which day is in the way, not just that one is.
+    await expect(svc.approve(user, 'c1', {})).rejects.toMatchObject({
+      code: 'CONFLICT',
+      detail: expect.stringContaining('2026-07-16'),
+    });
+    await expect(svc.approve(user, 'c1', {})).rejects.toMatchObject({
+      detail: expect.stringContaining('Brigade WTC'),
+    });
     expect(tx.attendanceSession.create).not.toHaveBeenCalled();
   });
 

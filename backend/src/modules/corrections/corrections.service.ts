@@ -15,47 +15,90 @@ export class CorrectionsService {
     private readonly audit: AuditService,
   ) {}
 
-  async create(user: AuthUser, dto: CreateCorrectionDto) {
-    const request = await this.prisma.correctionRequest.create({
-      data: {
-        organizationId: user.organizationId,
-        workerId: dto.workerId,
-        siteId: dto.siteId,
-        sessionId: dto.sessionId,
-        workDate: new Date(dto.workDate),
-        type: dto.type,
-        reason: dto.reason,
-        notes: dto.notes,
-        requestedBy: user.userId,
-        items: {
-          create: dto.items.map((i) => ({
-            field: i.field,
-            proposedValue: i.proposedValue as Prisma.InputJsonValue,
-          })),
-        },
-      },
-      include: { items: true },
+  /**
+   * May this person's corrections skip the queue?
+   *
+   * Read from the row on every call rather than from the token: the grant is
+   * per person and the Super Admin must be able to take it back now, not
+   * fifteen minutes from now when an access token happens to expire.
+   */
+  private async mayApplyDirectly(user: AuthUser): Promise<boolean> {
+    const row = await this.prisma.user.findFirst({
+      where: { id: user.userId, organizationId: user.organizationId, deletedAt: null },
+      select: { canApplyCorrections: true },
     });
-
-    await this.audit.record({
-      organizationId: user.organizationId,
-      actorUserId: user.userId,
-      actorRole: user.role,
-      action: 'CORRECTION_REQUEST',
-      entityType: 'CorrectionRequest',
-      entityId: request.id,
-      newValue: { type: dto.type, reason: dto.reason, items: dto.items },
-    });
-    return request;
+    return row?.canApplyCorrections ?? false;
   }
 
-  async list(user: AuthUser, status?: CorrectionStatus, siteId?: string, workerId?: string) {
+  async create(user: AuthUser, dto: CreateCorrectionDto) {
+    const applyNow = await this.mayApplyDirectly(user);
+    const data = {
+      organizationId: user.organizationId,
+      workerId: dto.workerId,
+      siteId: dto.siteId,
+      sessionId: dto.sessionId,
+      workDate: new Date(dto.workDate),
+      type: dto.type,
+      reason: dto.reason,
+      notes: dto.notes,
+      requestedBy: user.userId,
+      items: {
+        create: dto.items.map((i) => ({
+          field: i.field,
+          proposedValue: i.proposedValue as Prisma.InputJsonValue,
+        })),
+      },
+    };
+
+    const recordFiling = (id: string) =>
+      this.audit.record({
+        organizationId: user.organizationId,
+        actorUserId: user.userId,
+        actorRole: user.role,
+        action: 'CORRECTION_REQUEST',
+        entityType: 'CorrectionRequest',
+        entityId: id,
+        newValue: { type: dto.type, reason: dto.reason, items: dto.items, autoApplied: applyNow },
+      });
+
+    if (!applyNow) {
+      const request = await this.prisma.correctionRequest.create({
+        data,
+        include: { items: true },
+      });
+      await recordFiling(request.id);
+      return request;
+    }
+
+    // Filed and applied as one transaction: a request that was never going to
+    // wait for a reviewer must not be able to survive its own failed
+    // application and sit in the queue as if somebody still had to look at it.
+    // The apply step is the same one an approver runs — see applyInTx.
+    const applied = await this.prisma.$transaction(async (tx) => {
+      const request = await tx.correctionRequest.create({ data, select: { id: true } });
+      return this.applyInTx(tx, user, request.id, {
+        reviewNotes: dto.notes,
+        autoApplied: true,
+      });
+    });
+    await recordFiling(applied.id);
+    return applied;
+  }
+
+  async list(
+    user: AuthUser,
+    status?: CorrectionStatus,
+    siteId?: string,
+    workerId?: string,
+    autoApplied?: boolean,
+  ) {
     const rows = await this.prisma.correctionRequest.findMany({
       where: {
         organizationId: user.organizationId,
         ...(status ? { status } : {}),
         ...(siteId ? { siteId } : {}),
         ...(workerId ? { workerId } : {}),
+        ...(autoApplied === undefined ? {} : { autoApplied }),
       },
       include: {
         items: true,
@@ -137,12 +180,31 @@ export class CorrectionsService {
   }
 
   /**
-   * APPROVE — the ONLY path that mutates attendance from a correction.
+   * APPROVE — a reviewer signs off a request somebody else filed.
    * Runs in a transaction: re-validate freshness → apply field changes →
    * recompute hours → mark APPROVED → write an audit record with old/new.
    */
   async approve(user: AuthUser, id: string, dto: ReviewCorrectionDto) {
-    return this.prisma.$transaction(async (tx) => {
+    return this.prisma.$transaction((tx) => this.applyInTx(tx, user, id, dto));
+  }
+
+  /**
+   * The ONLY path that mutates attendance from a correction, shared by the
+   * approver's sign-off and by an author who holds canApplyCorrections.
+   *
+   * It stays one function on purpose. Everything below — resolving which
+   * session a night shift's logout belongs to, refusing a logout that precedes
+   * its login, rebasing workDate onto the corrected time, recomputing the hours
+   * — was learned the hard way, and a second "apply directly" path would have
+   * to learn it all again.
+   */
+  private async applyInTx(
+    tx: Prisma.TransactionClient,
+    user: AuthUser,
+    id: string,
+    dto: ReviewCorrectionDto & { autoApplied?: boolean },
+  ) {
+    {
       const req = await tx.correctionRequest.findFirst({
         where: { id, organizationId: user.organizationId },
         include: { items: true },
@@ -294,10 +356,23 @@ export class CorrectionsService {
           if (!patch.logoutAt) {
             const alreadyOpen = await tx.attendanceSession.findFirst({
               where: { workerId: req.workerId, state: 'OPEN' },
+              include: { site: true },
             });
             if (alreadyOpen) {
+              // Name the day that is in the way. The conflicting session is
+              // usually *today* — the worker is on site right now — while the
+              // correction is for a day gone by, and an approver reading
+              // "already has an open session" has no way to guess that.
+              const openDay = businessDate(alreadyOpen.loginAt, alreadyOpen.site.timezone)
+                .toISOString()
+                .slice(0, 10);
               throw Errors.conflict(
-                'Worker already has an open session; add a logout time to the correction or close that session first',
+                `This correction would open a second session for ${targetDate
+                  .toISOString()
+                  .slice(0, 10)}, but the worker is still clocked in from ${openDay} at ` +
+                  `${alreadyOpen.site.name}. A worker can only have one session open at a ` +
+                  'time. Add a logout time to the correction — a past day needs one anyway — ' +
+                  'or close the open session first.',
               );
             }
           }
@@ -390,17 +465,21 @@ export class CorrectionsService {
           reviewedBy: user.userId,
           reviewedAt: new Date(),
           reviewNotes: dto.reviewNotes,
+          autoApplied: dto.autoApplied ?? false,
           // Record which session the approval actually landed on, so the request
           // is traceable back to the row it changed.
           ...(req.sessionId ? {} : { sessionId: appliedSessionId }),
         },
+        include: { items: true },
       });
 
       await this.audit.record({
         organizationId: user.organizationId,
         actorUserId: user.userId,
         actorRole: user.role,
-        action: 'CORRECTION_APPROVE',
+        // A distinct action, so "who changed attendance without review" is a
+        // question the audit log can answer on its own.
+        action: dto.autoApplied ? 'CORRECTION_AUTO_APPLY' : 'CORRECTION_APPROVE',
         entityType: 'AttendanceSession',
         entityId: appliedSessionId ?? req.id,
         oldValue: sessionBefore,
@@ -409,6 +488,6 @@ export class CorrectionsService {
       });
 
       return updated;
-    });
+    }
   }
 }

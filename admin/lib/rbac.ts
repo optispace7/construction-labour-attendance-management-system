@@ -26,9 +26,15 @@ export const NAV_ITEMS: NavItem[] = [
   // Editing a recorded session is the Super Admin's escape hatch (ATTENDANCE_EDIT).
   // Everyone else raises a correction instead, which an admin then approves.
   { label: 'Fix attendance', href: '/attendance/fix', roles: ['SUPER_ADMIN'], group: 'Operations' },
-  // Safety Officers raise corrections from the mobile app; the web list is for
-  // the admins who approve them, so it stays off the Safety Officer's nav.
-  { label: 'Corrections', href: '/corrections', roles: ['SUPER_ADMIN', 'SITE_ADMIN'], group: 'Operations' },
+  // Safety Officers raise corrections here as well as on the phone — a run of
+  // them is easier to work through at a desk. Deciding them is still an
+  // admin's: the page hides approve/reject from anyone without the permission.
+  {
+    label: 'Corrections',
+    href: '/corrections',
+    roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
+    group: 'Operations',
+  },
   // Punches a watchman typed in by hand. The Safety Officer is the first
   // reviewer and normally does this on the phone, but they keep the web page
   // too — a run of entries is easier to work through at a desk.

@@ -4,11 +4,14 @@ import * as React from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
+  Box,
   Button,
+  Checkbox,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControlLabel,
   IconButton,
   MenuItem,
   Stack,
@@ -37,6 +40,7 @@ interface UserRow {
   username: string | null;
   role: UserRole;
   isActive: boolean;
+  canApplyCorrections: boolean;
 }
 
 interface UserForm {
@@ -45,7 +49,11 @@ interface UserForm {
   username: string;
   password: string;
   role: UserRole;
+  canApplyCorrections: boolean;
 }
+
+/** Roles that can file a correction at all — the grant is meaningless elsewhere. */
+const CORRECTION_ROLES: UserRole[] = ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'];
 
 /** Matches what the API's @IsEmail() will accept, so we fail fast in the form. */
 const EMAIL_RULE = {
@@ -126,6 +134,14 @@ export default function UsersPage() {
         ...(v.password ? { password: v.password } : {}),
       };
 
+      // Only the Super Admin may send this key at all — the API rejects it from
+      // anyone else, so an Admin editing a Safety Officer must not include it.
+      if (isSuperAdmin) {
+        body.canApplyCorrections = CORRECTION_ROLES.includes(v.role)
+          ? !!v.canApplyCorrections
+          : false;
+      }
+
       if (isWatchman) {
         body.username = username;
         // A watchman's email is optional: on edit, blank means "clear it", and
@@ -146,7 +162,14 @@ export default function UsersPage() {
       setOpen(false);
       setError(null);
       toast.success(editing ? 'Changes saved' : 'User created');
-      reset({ fullName: '', email: '', username: '', password: '', role: 'WATCHMAN' });
+      reset({
+        fullName: '',
+        email: '',
+        username: '',
+        password: '',
+        role: 'WATCHMAN',
+        canApplyCorrections: false,
+      });
     },
     onError: (e) => fail(e, 'Failed to save user'),
   });
@@ -186,6 +209,7 @@ export default function UsersPage() {
       username: '',
       password: '',
       role: assignableRoles[assignableRoles.length - 1],
+      canApplyCorrections: false,
     });
     setOpen(true);
   };
@@ -198,6 +222,7 @@ export default function UsersPage() {
       username: u.username ?? '',
       password: '',
       role: u.role,
+      canApplyCorrections: u.canApplyCorrections,
     });
     setOpen(true);
   };
@@ -224,7 +249,18 @@ export default function UsersPage() {
     {
       key: 'role',
       label: 'Role',
-      render: (u) => <RoleBadge role={u.role} />,
+      render: (u) => (
+        <Stack direction="row" spacing={0.75} alignItems="center">
+          <RoleBadge role={u.role} />
+          {u.canApplyCorrections && (
+            <Tooltip title="Their attendance corrections apply immediately, without approval">
+              <span>
+                <StatusBadge label="Applies corrections" tone="warning" />
+              </span>
+            </Tooltip>
+          )}
+        </Stack>
+      ),
     },
     {
       key: 'status',
@@ -395,6 +431,31 @@ export default function UsersPage() {
                     !v || (v.length >= 8 && v.length <= 128) || 'Must be 8–128 characters',
                 })}
               />
+
+              {/* Handing out the approval bypass is the Super Admin's call, and
+                  the API refuses the field from anyone else — so it is not shown
+                  to an Admin at all rather than shown and then rejected. */}
+              {isSuperAdmin && CORRECTION_ROLES.includes(selectedRole) && (
+                <Box
+                  sx={{
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    borderRadius: 1,
+                    px: 1.75,
+                    py: 1.25,
+                  }}
+                >
+                  <FormControlLabel
+                    control={<Checkbox {...register('canApplyCorrections')} defaultChecked={editing?.canApplyCorrections ?? false} />}
+                    label="Corrections apply without approval"
+                  />
+                  <Typography variant="caption" color="text.secondary" display="block">
+                    Attendance changes this person files take effect immediately — nobody reviews
+                    them first. They are listed under &quot;Applied directly&quot; on the
+                    Corrections page.
+                  </Typography>
+                </Box>
+              )}
             </Stack>
           </DialogContent>
           <DialogActions sx={{ px: 3, pb: 2 }}>
