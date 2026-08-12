@@ -1,14 +1,17 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
-import 'package:printing/printing.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../app/theme.dart';
 import '../../core/providers.dart';
 import '../../core/widgets/section_header.dart';
+import 'day_summary_image.dart';
 
 /// One row of a breakdown: a designation or a contractor, how many of them
 /// logged in, and how many of those are still on site.
@@ -55,6 +58,7 @@ class _DaySummaryScreenState extends ConsumerState<DaySummaryScreen> {
   bool _loading = true;
   bool _downloading = false;
   String? _error;
+  SummaryOrg? _orgHeader;
 
   /// Date-only, in the device's calendar — the API keys the day off this.
   String get _dateParam =>
@@ -129,26 +133,79 @@ class _DaySummaryScreenState extends ConsumerState<DaySummaryScreen> {
     await _load();
   }
 
-  /// Pull the rendered PDF and hand it to the OS share sheet, which is where
-  /// "save to the phone", "send on WhatsApp" and "print" all live on Android.
-  Future<void> _downloadPdf() async {
+  /// Company name and logo for the sheet header, fetched once per screen.
+  /// Best-effort: a sheet without the letterhead still carries the numbers.
+  Future<SummaryOrg> _org() async {
+    final cached = _orgHeader;
+    if (cached != null) return cached;
+    final dio = ref.read(apiClientProvider).dio;
+    try {
+      final res = await dio.get('/organizations/current');
+      final m = (res.data as Map).cast<String, dynamic>();
+      final logoUrl = m['logoUrl'] as String?;
+      Uint8List? logo;
+      if (logoUrl != null && logoUrl.isNotEmpty) {
+        final img = await dio.get<List<int>>(
+          logoUrl,
+          options: Options(responseType: ResponseType.bytes),
+        );
+        final b = Uint8List.fromList(img.data ?? const []);
+        if (b.isNotEmpty) logo = b;
+      }
+      return _orgHeader = SummaryOrg(
+        name: m['name'] as String?,
+        logoBytes: logo,
+        logoScale: (m['logoScale'] as num?)?.toDouble() ?? 1.0,
+      );
+    } catch (_) {
+      return _orgHeader = const SummaryOrg();
+    }
+  }
+
+  /// Render the day as a picture and hand it to the OS share sheet, which is
+  /// where WhatsApp, mail and "save to the phone" all live on Android.
+  ///
+  /// The image is drawn from the figures already on this screen, so what gets
+  /// sent cannot disagree with what the officer read before sending it.
+  Future<void> _shareImage(SummaryAudience audience) async {
     setState(() => _downloading = true);
     try {
-      final res = await ref.read(apiClientProvider).dio.get<List<int>>(
-            '/attendance/day-summary/pdf',
-            queryParameters: {
-              if (_siteId != null) 'siteId': _siteId,
-              'date': _dateParam,
-            },
-            options: Options(responseType: ResponseType.bytes),
-          );
-      final bytes = Uint8List.fromList(res.data ?? const []);
-      if (bytes.isEmpty) throw Exception('empty document');
-      await Printing.sharePdf(bytes: bytes, filename: 'attendance-summary-$_dateParam.pdf');
+      final org = await _org();
+      if (!mounted) return;
+      await precacheSummaryLogo(context, org.logoBytes);
+      if (!mounted) return;
+
+      final png = await renderSummaryPng(
+        context,
+        DaySummarySheet(
+          audience: audience,
+          org: org,
+          siteName: _siteName,
+          dateLabel: _dayLabel.format(_date),
+          byDesignation: [
+            for (final g in _byDesignation) SummaryLine(g.name, g.count),
+          ],
+          byVendor: [
+            for (final g in _byVendor) SummaryLine(g.name, g.count),
+          ],
+        ),
+      );
+
+      final suffix = audience == SummaryAudience.client ? 'client' : 'internal';
+      final file = File(
+        '${(await getTemporaryDirectory()).path}/manpower-$_dateParam-$suffix.png',
+      );
+      await file.writeAsBytes(png, flush: true);
+
+      final site = _siteName.isEmpty ? '' : '$_siteName · ';
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'image/png')],
+        text: 'Daily manpower — $site${_dayLabel.format(_date)}',
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not build the PDF. $e')),
+        SnackBar(content: Text('Could not build the image. $e')),
       );
     } finally {
       if (mounted) setState(() => _downloading = false);
@@ -169,20 +226,10 @@ class _DaySummaryScreenState extends ConsumerState<DaySummaryScreen> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: (_loading || _downloading || !hasRows) ? null : _downloadPdf,
-        backgroundColor: (_loading || _downloading || !hasRows)
-            ? ClamsColors.border
-            : ClamsColors.primary,
-        icon: _downloading
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-              )
-            : const Icon(Icons.picture_as_pdf_outlined),
-        label: Text(_downloading ? 'Preparing…' : 'Download PDF'),
-      ),
+      // Two buttons rather than one with a chooser: the difference between them
+      // is who may see the contractor split, and a label you read before tapping
+      // is a better guard against sending the wrong one than a menu you dismiss.
+      bottomNavigationBar: _shareBar(enabled: !_loading && !_downloading && hasRows),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
@@ -229,6 +276,49 @@ class _DaySummaryScreenState extends ConsumerState<DaySummaryScreen> {
                 ),
     );
   }
+
+  /// The two things this screen is for once the numbers have been read: send
+  /// the trades to the client, or the whole picture to the internal group.
+  Widget _shareBar({required bool enabled}) => SafeArea(
+        top: false,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(
+            ClamsSpacing.lg,
+            ClamsSpacing.md,
+            ClamsSpacing.lg,
+            ClamsSpacing.md,
+          ),
+          decoration: const BoxDecoration(
+            color: ClamsColors.surface,
+            border: Border(top: BorderSide(color: ClamsColors.border)),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: enabled ? () => _shareImage(SummaryAudience.client) : null,
+                  icon: _downloading
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.image_outlined, size: 20),
+                  label: const Text('For client'),
+                ),
+              ),
+              const SizedBox(width: ClamsSpacing.md),
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: enabled ? () => _shareImage(SummaryAudience.internal) : null,
+                  icon: const Icon(Icons.groups_outlined, size: 20),
+                  label: const Text('Internal'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
 
   Widget _dateBar() => Material(
         color: ClamsColors.surface,

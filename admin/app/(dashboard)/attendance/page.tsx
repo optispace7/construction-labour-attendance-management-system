@@ -21,16 +21,25 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import PrintIcon from '@mui/icons-material/Print';
+import ImageOutlinedIcon from '@mui/icons-material/ImageOutlined';
 import GroupsOutlinedIcon from '@mui/icons-material/GroupsOutlined';
 import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined';
 import ReportProblemOutlinedIcon from '@mui/icons-material/ReportProblemOutlined';
-import { api } from '@/lib/api/browser';
+import { api, apiErrorMessage } from '@/lib/api/browser';
 import { PageHeader } from '@/components/PageHeader';
 import { FilterBar } from '@/components/ui/FilterBar';
 import { DataTable, Column } from '@/components/ui/DataTable';
 import { StatusBadge } from '@/components/ui/StatusBadge';
-import { DaySummary, Site } from '@/lib/types';
+import { useToast } from '@/components/ui/Toast';
+import { photoSrc } from '@/components/PeopleDirectory';
+import {
+  downloadBlob,
+  loadLogo,
+  renderManpowerSheet,
+  SheetAudience,
+} from '@/lib/manpowerSheet';
+import { isoDay } from '@/lib/format';
+import { DaySummary, Organization, Site } from '@/lib/types';
 
 interface ActiveSession {
   id: string;
@@ -235,6 +244,57 @@ export default function AttendancePage() {
 
   const isLoading = active.isLoading || summary.isLoading;
 
+  // Company letterhead for the shareable sheet — the same profile the ID cards
+  // are printed from, so the two carry identical branding.
+  const org = useQuery({
+    queryKey: ['org-current'],
+    queryFn: () => api.get<Organization>('/organizations/current'),
+    staleTime: 5 * 60_000,
+  });
+
+  const toast = useToast();
+  const [rendering, setRendering] = React.useState<SheetAudience | null>(null);
+
+  /**
+   * Build the day as a picture and download it.
+   *
+   * Drawn from the figures already on this page rather than re-fetched, so the
+   * image cannot disagree with the screen it was produced from — the same rule
+   * the mobile sheet follows.
+   */
+  const shareSheet = async (audience: SheetAudience) => {
+    setRendering(audience);
+    try {
+      const logo = await loadLogo(photoSrc(org.data?.logoUrl));
+      const blob = await renderManpowerSheet({
+        audience,
+        companyName: org.data?.name,
+        logo,
+        logoScale: org.data?.logoScale ?? 1,
+        siteName: siteId === 'all' ? '' : siteLabel,
+        dateLabel: new Date().toLocaleDateString(undefined, {
+          weekday: 'short',
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+        }),
+        byDesignation: (summary.data?.byDesignation ?? []).map((d) => ({
+          name: d.designation,
+          count: d.count,
+        })),
+        byVendor: (summary.data?.byVendor ?? []).map((v) => ({
+          name: v.vendor,
+          count: v.count,
+        })),
+      });
+      downloadBlob(blob, `manpower-${isoDay(new Date())}-${audience}.png`);
+    } catch (e) {
+      toast.error(apiErrorMessage(e, 'Could not build the image'));
+    } finally {
+      setRendering(null);
+    }
+  };
+
   const missedColumns: Column<MissedRow>[] = [
     { key: 'name', label: 'Name', render: (p) => p.fullName },
     { key: 'code', label: 'Code', render: (p) => p.workerCode },
@@ -375,14 +435,27 @@ export default function AttendancePage() {
             </MenuItem>
           ))}
         </TextField>
-        <Button
-          variant="outlined"
-          startIcon={<PrintIcon />}
-          onClick={() => window.print()}
-          sx={{ ml: 'auto' }}
-        >
-          Print
-        </Button>
+        {/* Two labelled buttons rather than one with a chooser: what separates
+            them is whether the client sees which contractor supplied the
+            labour, and a label read before clicking beats a menu dismissed. */}
+        <Stack direction="row" spacing={1} sx={{ ml: 'auto' }}>
+          <Button
+            variant="outlined"
+            startIcon={<ImageOutlinedIcon />}
+            disabled={!!rendering || isLoading}
+            onClick={() => void shareSheet('client')}
+          >
+            {rendering === 'client' ? 'Building…' : 'For client'}
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={<GroupsOutlinedIcon />}
+            disabled={!!rendering || isLoading}
+            onClick={() => void shareSheet('internal')}
+          >
+            {rendering === 'internal' ? 'Building…' : 'Internal'}
+          </Button>
+        </Stack>
       </FilterBar>
 
       {isLoading && <LinearProgress sx={{ mb: 2 }} />}

@@ -57,6 +57,9 @@ dependencies:
   # Utils
   uuid: ^4.5.0
   intl: ^0.19.0
+  # Handing a PNG to the OS share sheet (WhatsApp, mail, save to gallery).
+  # `printing` shares PDFs only, and the day summary now goes out as an image.
+  share_plus: ^10.1.4
 
 dev_dependencies:
   flutter_test:
