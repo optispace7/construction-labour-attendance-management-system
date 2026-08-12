@@ -69,6 +69,17 @@ POST   /organizations
 GET    /organizations/{id}
 PATCH  /organizations/{id}
 
+# company documents — the company's own PDFs (settings.manage)
+GET    /company-documents                # metadata only, soonest expiry first
+POST   /company-documents                # { dataBase64, mimeType:'application/pdf', fileName, name?, validUntil?, remindDaysBefore? }
+PATCH  /company-documents/{id}           # { name?, validUntil?, remindDaysBefore? } — re-arms the reminder
+DELETE /company-documents/{id}
+GET    /company-documents/{id}/file      # streams the PDF (binary, not via the JSON proxy)
+# validUntil is a plain YYYY-MM-DD; the response adds daysUntilExpiry and
+# remindOn, both computed in the organization's timezone. remindDaysBefore
+# defaults to 10. DocumentExpiryMonitor mails the SUPER_ADMINs at that lead time
+# and again on the day the document lapses.
+
 # sites
 GET    /sites?organizationId=&active=
 POST   /sites
@@ -238,7 +249,7 @@ The client marks locally-stored events synced by `eventId` based on results;
 
 ```
 POST  /corrections                # supervisor/site-admin create request
-GET   /corrections?status=&siteId=&workerId=
+GET   /corrections?status=&siteId=&workerId=&autoApplied=true
 GET   /corrections/{id}
 POST  /corrections/{id}/approve   { reviewNotes }   # admin only → applies + audits
 POST  /corrections/{id}/reject    { reviewNotes }
@@ -252,9 +263,39 @@ Create request:
   "items":[ { "field":"logout_at", "proposedValue":"2026-06-08T12:00:00Z" } ]
 }
 ```
-**Invariant:** approval is the *only* path that mutates attendance from a
-correction; until then attendance is unchanged. Approval runs in a transaction:
-update session → recompute hours → write audit (old/new) → mark request APPROVED.
+`items` may carry **both ends of a session at once** — the mobile and web forms
+both offer the pair, so a day that was never scanned is fixed in one request:
+```json
+{
+  "workerId":"uuid", "siteId":"uuid", "workDate":"2026-08-08",
+  "type":"MISSING", "reason":"DEVICE_ISSUE", "notes":"gate tablet was dead all night",
+  "items":[
+    { "field":"login_at",  "proposedValue":"2026-08-08T16:00:00Z" },
+    { "field":"logout_at", "proposedValue":"2026-08-09T02:30:00Z" }
+  ]
+}
+```
+Note the second instant is the *following* morning: that is a night shift
+(21:30 → 08:00 IST). The clients date the logout a day on when the out time is
+at or before the in time. The session is filed under the day they came in —
+`workDate` is derived from `login_at`, never from the logout — and a pair whose
+logout is not after its login is refused rather than saved as a zero-hour day.
+**Invariant:** one apply path, always. `CorrectionsService.applyInTx` is the
+only code that mutates attendance from a correction, and it runs in a
+transaction: update session → recompute hours → write audit (old/new) → mark
+request APPROVED.
+
+**Direct apply.** A user carrying `canApplyCorrections` (granted per person by
+the SUPER_ADMIN on the Users page — see `UsersService.assertCanGrantDirectApply`)
+has their own corrections applied by `POST /corrections` in the same transaction
+that files them, instead of queueing. The response comes back `status:APPROVED`
+with `autoApplied:true`, which is how the web and mobile forms know to say
+"applied" rather than "sent for approval". The bypass is audited as
+`CORRECTION_AUTO_APPLY` rather than `CORRECTION_APPROVE`, and the flagged rows
+are listed for the Super Admin at `GET /corrections?autoApplied=true`. Everyone
+else is unchanged: the request lands PENDING and attendance moves only on
+approval. The grant is read from the user row per request, so revoking it takes
+effect immediately rather than at the next token refresh.
 
 ## 7a. Manual attendance approvals
 

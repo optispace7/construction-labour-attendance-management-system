@@ -1,0 +1,61 @@
+import { Body, Controller, Delete, Get, Param, Patch, Post, Res } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { Response } from 'express';
+import { CompanyDocumentsService } from './company-documents.service';
+import { UpdateCompanyDocumentDto, UploadCompanyDocumentDto } from './dto/company-document.dto';
+import { RequirePermissions } from '../../common/rbac/rbac.decorators';
+import { Permission } from '../../common/rbac/permissions';
+import { CurrentUser } from '../../common/auth/current-user.decorator';
+import { AuthUser } from '../../common/auth/auth-user.interface';
+
+/**
+ * The company's own paperwork — licences, insurance, registrations. Behind
+ * SETTINGS_MANAGE throughout, which is the same Super Admin + Admin pair that
+ * can reach the Company page these live on.
+ */
+@ApiTags('company-documents')
+@ApiBearerAuth()
+@Controller('company-documents')
+@RequirePermissions(Permission.SETTINGS_MANAGE)
+export class CompanyDocumentsController {
+  constructor(private readonly documents: CompanyDocumentsService) {}
+
+  @Get()
+  list(@CurrentUser() user: AuthUser) {
+    return this.documents.list(user);
+  }
+
+  @Post()
+  create(@CurrentUser() user: AuthUser, @Body() dto: UploadCompanyDocumentDto) {
+    return this.documents.create(user, dto);
+  }
+
+  @Patch(':id')
+  update(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateCompanyDocumentDto,
+  ) {
+    return this.documents.update(user, id, dto);
+  }
+
+  @Delete(':id')
+  remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.documents.remove(user, id);
+  }
+
+  /** Streams the PDF itself; the admin panel opens this in a new tab. */
+  @Get(':id/file')
+  async file(@CurrentUser() user: AuthUser, @Param('id') id: string, @Res() res: Response) {
+    const doc = await this.documents.file(user, id);
+    res.setHeader('Content-Type', doc.mimeType);
+    res.setHeader('Content-Disposition', `inline; filename="${sanitiseFilename(doc.fileName)}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(doc.data);
+  }
+}
+
+/** Keep quotes and control characters out of the Content-Disposition header. */
+function sanitiseFilename(name: string): string {
+  return name.replace(/[^\w.\-() ]+/g, '_').slice(0, 120) || 'document.pdf';
+}

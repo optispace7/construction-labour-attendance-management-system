@@ -27,6 +27,26 @@ export interface Organization {
   logoScale?: number | null;
 }
 
+/** A PDF on the Company page — a licence, an insurance policy, a registration. */
+export interface CompanyDocument {
+  id: string;
+  name: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  /** YYYY-MM-DD, or null when the document never expires. */
+  validUntil: string | null;
+  remindDaysBefore: number;
+  /** The day the reminder mail goes out (YYYY-MM-DD), null without a validity. */
+  remindOn: string | null;
+  /** Counted in the company's timezone by the server — negative once expired. */
+  daysUntilExpiry: number | null;
+  /** Validity the reminder has already been mailed for; null = still to come. */
+  reminderSentFor: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Site {
   id: string;
   name: string;
@@ -162,6 +182,8 @@ export interface CorrectionRequest {
   reviewedByName?: string | null;
   reviewedAt?: string | null;
   reviewNotes?: string | null;
+  /** Applied by its own author — nobody else reviewed it. */
+  autoApplied?: boolean;
   createdAt: string;
 }
 

@@ -6,9 +6,6 @@ import {
   Avatar,
   Box,
   Button,
-  Card,
-  CardContent,
-  Divider,
   Grid,
   Slider,
   Stack,
@@ -21,6 +18,8 @@ import ContactPhoneOutlinedIcon from '@mui/icons-material/ContactPhoneOutlined';
 import FileUploadOutlinedIcon from '@mui/icons-material/FileUploadOutlined';
 import { api, BrowserApiError } from '@/lib/api/browser';
 import { PageHeader } from '@/components/PageHeader';
+import { CompanyDocuments } from '@/components/CompanyDocuments';
+import { SectionCard } from '@/components/ui/SectionCard';
 import { useToast } from '@/components/ui/Toast';
 import { photoSrc } from '@/components/PeopleDirectory';
 import { Organization } from '@/lib/types';
@@ -80,39 +79,6 @@ async function uploadLogo(file: File): Promise<string> {
     mimeType: 'image/png',
   });
   return res.url;
-}
-
-/** Card with a titled section header — settings-page building block. */
-function SectionCard({
-  icon,
-  title,
-  subtitle,
-  children,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <Card>
-      <Box sx={{ px: 2.5, pt: 2, pb: 1.5, display: 'flex', alignItems: 'center', gap: 1.25 }}>
-        <Box sx={{ color: 'text.secondary', display: 'flex', '& svg': { fontSize: 20 } }}>
-          {icon}
-        </Box>
-        <Box>
-          <Typography variant="subtitle1">{title}</Typography>
-          {subtitle && (
-            <Typography variant="caption" color="text.secondary">
-              {subtitle}
-            </Typography>
-          )}
-        </Box>
-      </Box>
-      <Divider />
-      <CardContent sx={{ px: 2.5 }}>{children}</CardContent>
-    </Card>
-  );
 }
 
 export default function CompanyPage() {
@@ -196,7 +162,7 @@ export default function CompanyPage() {
     <>
       <PageHeader
         title="Company details"
-        subtitle="Name, address and logo — printed on every worker ID card."
+        subtitle="Name, address and logo for the ID cards, and the company's own documents."
         action={saveButton}
       />
 
@@ -378,6 +344,10 @@ export default function CompanyPage() {
         </SectionCard>
 
         <Stack direction="row" justifyContent="flex-end">{saveButton}</Stack>
+
+        {/* Documents save themselves as they are added — deliberately below the
+            profile's Save button, so nothing here looks like it is waiting on it. */}
+        <CompanyDocuments />
       </Stack>
     </>
   );

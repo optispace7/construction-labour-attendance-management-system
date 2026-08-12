@@ -17,6 +17,7 @@ import { PolicyGuard } from './common/rbac/policy.guard';
 import { HealthController } from './common/health/health.controller';
 import { AuthModule } from './modules/auth/auth.module';
 import { OrganizationsModule } from './modules/organizations/organizations.module';
+import { CompanyDocumentsModule } from './modules/company-documents/company-documents.module';
 import { SitesModule } from './modules/sites/sites.module';
 import { VendorsModule } from './modules/vendors/vendors.module';
 import { UsersModule } from './modules/users/users.module';
@@ -47,6 +48,7 @@ import { StorageModule } from './modules/storage/storage.module';
     PushModule,
     AuthModule,
     OrganizationsModule,
+    CompanyDocumentsModule,
     SitesModule,
     VendorsModule,
     UsersModule,

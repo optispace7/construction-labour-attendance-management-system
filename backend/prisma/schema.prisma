@@ -217,6 +217,11 @@ model User {
   phone          String?
   passwordHash   String    @map("password_hash")
   isActive       Boolean   @default(true) @map("is_active")
+  /// Attendance corrections this person files are applied on the spot instead
+  /// of waiting for an approver. Granted per person by the Super Admin, never
+  /// by role: the exemption belongs to the individual who was trusted with it,
+  /// so the next holder of the same job does not inherit it silently.
+  canApplyCorrections Boolean @default(false) @map("can_apply_corrections")
   lastLoginAt    DateTime? @map("last_login_at") @db.Timestamptz
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz
@@ -574,6 +579,11 @@ model CorrectionRequest {
   reviewedBy     String?          @map("reviewed_by") @db.Uuid
   reviewedAt     DateTime?        @map("reviewed_at") @db.Timestamptz
   reviewNotes    String?          @map("review_notes")
+  /// Applied by its own author under canApplyCorrections — nobody else looked
+  /// at it. Stored rather than derived from requestedBy = reviewedBy so the
+  /// Super Admin's review list is one indexed query, and so revoking the
+  /// permission later cannot change what the history says happened.
+  autoApplied    Boolean          @default(false) @map("auto_applied")
   createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz
   updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -582,6 +592,7 @@ model CorrectionRequest {
   items   CorrectionItem[]
 
   @@index([status, organizationId])
+  @@index([organizationId, autoApplied, createdAt(sort: Desc)])
   @@map("correction_requests")
 }
 
@@ -802,6 +813,42 @@ model DailySafetyEntry {
   @@unique([siteId, entryDate, metric])
   @@index([organizationId, entryDate])
   @@map("daily_safety_entries")
+}
+
+// ---------------- Company documents ----------------
+
+/// A PDF the company keeps on file — a licence, an insurance policy, a works
+/// contract. Stored in the database like a photo blob (same reason: one backup,
+/// no second storage account to keep in sync), and watched for expiry so the
+/// renewal is chased by email rather than remembered.
+model CompanyDocument {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  /// Display name. Seeded from the uploaded file's name; the client renames it.
+  name           String
+  /// The name of the file as uploaded — kept so a download reads as the
+  /// original document even after the display name is changed.
+  fileName       String @map("file_name")
+  mimeType       String @map("mime_type")
+  data           Bytes
+  sizeBytes      Int    @map("size_bytes")
+
+  /// The day the document stops being valid. Null = nothing to expire.
+  validUntil       DateTime? @map("valid_until") @db.Date
+  /// How many days before validUntil the reminder mail goes out.
+  remindDaysBefore Int       @default(10) @map("remind_days_before")
+  /// Which validity date each mail has already gone out for. Re-dating a
+  /// renewed document leaves these behind, which re-arms both reminders; the
+  /// monitor also claims a row by writing them, so two replicas can't both send.
+  reminderSentFor  DateTime? @map("reminder_sent_for") @db.Date
+  expirySentFor    DateTime? @map("expiry_sent_for") @db.Date
+
+  uploadedBy String?  @map("uploaded_by") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([organizationId, validUntil])
+  @@map("company_documents")
 }
 
 // ---------------- Reports ----------------
