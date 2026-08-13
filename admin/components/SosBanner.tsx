@@ -66,6 +66,9 @@ export function SosBanner() {
   const unread = (feed.data ?? []).filter((n) => !n.readAt);
   const sos = unread.filter((n) => n.type === 'SOS');
   const forgot = unread.filter((n) => n.type === 'FORGOT_LOGOUT');
+  // Only the newest matters: the mailer is either working or it is not, and a
+  // six-hourly alarm would otherwise stack up a column of identical banners.
+  const mailFailure = unread.filter((n) => n.type === 'EMAIL_FAILING').slice(0, 1);
 
   // Siren loop while an unacknowledged SOS is on screen; stops on Acknowledge.
   const sosActive = sos.length > 0;
@@ -105,7 +108,7 @@ export function SosBanner() {
     };
   }, [sosActive]);
 
-  if (sos.length === 0 && forgot.length === 0) return null;
+  if (sos.length === 0 && forgot.length === 0 && mailFailure.length === 0) return null;
 
   return (
     <Stack spacing={1} sx={{ mb: 2 }}>
@@ -133,6 +136,27 @@ export function SosBanner() {
           <div style={{ fontSize: 12, opacity: 0.85, marginTop: 4 }}>
             {new Date(n.createdAt).toLocaleString()}
           </div>
+        </Alert>
+      ))}
+      {/* Nothing on site is on fire, but every reminder and alert the system
+          sends is going nowhere — which is invisible by its nature, since the
+          symptom is mail that does not arrive. */}
+      {mailFailure.map((n) => (
+        <Alert
+          key={n.id}
+          severity="error"
+          action={
+            <Button color="inherit" size="small" onClick={() => ack.mutate(n.id)}>
+              Dismiss
+            </Button>
+          }
+        >
+          <AlertTitle>{n.title}</AlertTitle>
+          {n.body.split('\n\n').map((para, i) => (
+            <div key={i} style={{ marginTop: i ? 6 : 0 }}>
+              {para}
+            </div>
+          ))}
         </Alert>
       ))}
       {forgot.slice(0, 3).map((n) => (

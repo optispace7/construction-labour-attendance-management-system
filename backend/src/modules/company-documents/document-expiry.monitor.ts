@@ -144,7 +144,7 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
     const subject = hasExpired
       ? `CLAMS: ${count(docs.length)} expired`
       : `CLAMS: ${count(docs.length)} expiring soon`;
-    await this.mail.send(
+    const sent = await this.mail.send(
       recipients,
       subject,
       `${hasExpired ? 'These company documents are no longer valid' : 'These company documents are about to expire'}:\n\n` +
@@ -152,10 +152,44 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
         `\n\nUpload the renewed copy on the Company page in the CLAMS admin panel.`,
     );
 
+    // A reminder that never left the building has not been sent, whatever the
+    // row says. Hand the claim back so the next sweep tries again — otherwise a
+    // broken SMTP password silently costs the renewal notice for good, and the
+    // first anyone knows is a licence that has already lapsed.
+    //
+    // Only when the mailer is configured and refused: with no mailer at all the
+    // in-app notification is the whole channel, and re-arming would post it
+    // afresh every six hours for ever.
+    if (!sent && this.mail.enabled) {
+      await this.unclaim(docs, hasExpired);
+      this.logger.warn(
+        `Email refused for ${docs.length} document(s) in org ${organizationId} — ` +
+          're-armed for the next sweep',
+      );
+      return;
+    }
+
     this.logger.log(
       `${hasExpired ? 'Expiry' : 'Reminder'} sent for ${docs.length} document(s) ` +
         `in org ${organizationId} to ${recipients.length} recipient(s)`,
     );
+  }
+
+  /** Give back the claim taken in {@link claim}, so the mail is tried again. */
+  private async unclaim(docs: DueDocument[], hasExpired: boolean) {
+    const column = hasExpired ? 'expirySentFor' : 'reminderSentFor';
+    for (const doc of docs) {
+      try {
+        await this.prisma.companyDocument.updateMany({
+          // Only if it still holds the value we wrote: a renewal in the
+          // meantime has already re-armed it, and must not be undone.
+          where: { id: doc.id, [column]: doc.validUntil } as Prisma.CompanyDocumentWhereInput,
+          data: { [column]: null },
+        });
+      } catch (e) {
+        this.logger.error(`Could not re-arm ${doc.name}: ${(e as Error).message}`);
+      }
+    }
   }
 }
 
