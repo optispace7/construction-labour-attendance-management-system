@@ -48,6 +48,7 @@ const NAV_ICONS: Record<string, React.FC<I.IconProps>> = {
   '/staff': I.BadgeIcon,
   '/visitors': I.VisitorsIcon,
   '/sites': I.SitesIcon,
+  '/documents': I.DocumentsIcon,
   '/vendors': I.VendorsIcon,
   '/designations': I.DesignationsIcon,
   '/users': I.UsersIcon,

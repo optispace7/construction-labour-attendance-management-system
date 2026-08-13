@@ -27,9 +27,11 @@ export interface Organization {
   logoScale?: number | null;
 }
 
-/** A PDF on the Company page — a licence, an insurance policy, a registration. */
+/** A PDF held against a site — a licence, an insurance policy, a registration. */
 export interface CompanyDocument {
   id: string;
+  siteId: string;
+  siteName: string | null;
   name: string;
   fileName: string;
   mimeType: string;

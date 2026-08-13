@@ -21,6 +21,8 @@ const PDF_MAGIC = '%PDF-';
 /** Row shape for list/response — everything except the bytes. */
 const META_SELECT = {
   id: true,
+  siteId: true,
+  site: { select: { name: true } },
   name: true,
   fileName: true,
   mimeType: true,
@@ -72,10 +74,10 @@ export class CompanyDocumentsService {
   ) {}
 
   /** Soonest expiry first; undated documents sit at the bottom. */
-  async list(user: AuthUser) {
+  async list(user: AuthUser, siteId?: string) {
     const [rows, timezone] = await Promise.all([
       this.prisma.companyDocument.findMany({
-        where: { organizationId: user.organizationId },
+        where: { organizationId: user.organizationId, ...(siteId ? { siteId } : {}) },
         orderBy: [{ validUntil: { sort: 'asc', nulls: 'last' } }, { createdAt: 'desc' }],
         select: META_SELECT,
       }),
@@ -84,7 +86,17 @@ export class CompanyDocumentsService {
     return rows.map((r) => this.toResponse(r, timezone));
   }
 
+  /** The site must be one of this organization's — a UUID alone proves nothing. */
+  private async assertSite(user: AuthUser, siteId: string) {
+    const site = await this.prisma.site.findFirst({
+      where: { id: siteId, organizationId: user.organizationId },
+      select: { id: true },
+    });
+    if (!site) throw Errors.notFound('Site');
+  }
+
   async create(user: AuthUser, dto: UploadCompanyDocumentDto) {
+    await this.assertSite(user, dto.siteId);
     if (!ALLOWED_DOCUMENT_TYPES.includes(dto.mimeType)) {
       throw Errors.validation({ message: 'Only PDF documents can be uploaded' });
     }
@@ -110,6 +122,7 @@ export class CompanyDocumentsService {
     const doc = await this.prisma.companyDocument.create({
       data: {
         organizationId: user.organizationId,
+        siteId: dto.siteId,
         // The file's own name is the opening suggestion; the client renames it.
         name: (dto.name?.trim() || defaultName(dto.fileName)).slice(0, 160),
         fileName: dto.fileName,
@@ -139,6 +152,10 @@ export class CompanyDocumentsService {
     const before = await this.getMeta(user, id);
 
     const data: Prisma.CompanyDocumentUpdateInput = {};
+    if (dto.siteId !== undefined) {
+      await this.assertSite(user, dto.siteId);
+      data.site = { connect: { id: dto.siteId } };
+    }
     if (dto.name !== undefined) data.name = dto.name.trim();
     if (dto.validUntil !== undefined) {
       data.validUntil = dto.validUntil ? parseDay(dto.validUntil) : null;
@@ -219,8 +236,12 @@ export class CompanyDocumentsService {
    */
   private toResponse(doc: DocumentMeta, timezone: string) {
     const daysUntilExpiry = doc.validUntil ? daysUntil(doc.validUntil, timezone) : null;
+    const { site, ...rest } = doc;
     return {
-      ...doc,
+      ...rest,
+      // Flattened: every caller wants the name beside the row, none of them
+      // want to reach through a nested object for it.
+      siteName: site?.name ?? null,
       validUntil: formatDay(doc.validUntil),
       reminderSentFor: formatDay(doc.reminderSentFor),
       daysUntilExpiry,

@@ -34,7 +34,9 @@ describe('navForRole', () => {
     ]) {
       expect(labels).toContain(allowed);
     }
-    for (const denied of ['Users', 'Devices', 'Company', 'Storage', 'Audit']) {
+    // Documents sits in the Sites group but is gated on SETTINGS_MANAGE by the
+    // API, which a Safety Officer does not hold — so it stays off their nav.
+    for (const denied of ['Users', 'Devices', 'Company', 'Storage', 'Audit', 'Documents']) {
       expect(labels).not.toContain(denied);
     }
   });
@@ -48,7 +50,7 @@ describe('canAccessPath', () => {
   it('refuses the pages a role has no nav entry for', () => {
     // The bug this exists for: a page off the Safety Officer's sidebar could
     // still be opened by typing the URL.
-    for (const denied of ['/users', '/devices', '/company', '/storage', '/audit']) {
+    for (const denied of ['/users', '/devices', '/company', '/storage', '/audit', '/documents']) {
       expect(canAccessPath('SUPERVISOR', denied)).toBe(false);
       expect(canAccessPath('SITE_ADMIN', denied)).toBe(true);
     }

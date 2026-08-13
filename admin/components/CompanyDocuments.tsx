@@ -6,12 +6,14 @@ import {
   Alert,
   Box,
   Button,
+  Card,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   IconButton,
   InputAdornment,
+  MenuItem,
   Stack,
   Table,
   TableBody,
@@ -30,10 +32,9 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import { api, apiErrorMessage } from '@/lib/api/browser';
 import { StatusBadge, BadgeTone } from '@/components/ui/StatusBadge';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
-import { SectionCard } from '@/components/ui/SectionCard';
 import { useToast } from '@/components/ui/Toast';
 import { formatFullDate } from '@/lib/format';
-import { CompanyDocument } from '@/lib/types';
+import { CompanyDocument, Site } from '@/lib/types';
 
 /** Matches the server's cap; checked here so a big file fails before upload. */
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -45,6 +46,7 @@ const MAX_REMIND_DAYS = 365;
 
 /** The editable half of a document — the same fields whether new or stored. */
 interface DocumentForm {
+  siteId: string;
   name: string;
   validUntil: string; // YYYY-MM-DD, '' = never expires
   remindDaysBefore: string; // kept as text so the field can be cleared
@@ -112,8 +114,13 @@ function remindOn(validUntil: string, days: number): string | null {
 }
 
 /**
- * Company paperwork: upload a PDF, name it, give it a validity date, and say
- * how long before that date the reminder mail should arrive.
+ * Site paperwork: upload a PDF against a site, name it, give it a validity
+ * date, and say how long before that date the reminder mail should arrive.
+ *
+ * A licence is granted for a particular project, so each document is held
+ * against the site it covers rather than in one company-wide pile — which is
+ * also what makes the expiry alert useful, since it can name the site left
+ * uncovered rather than only the piece of paper.
  */
 export function CompanyDocuments() {
   const qc = useQueryClient();
@@ -125,10 +132,16 @@ export function CompanyDocuments() {
   const [form, setForm] = React.useState<DocumentForm | null>(null);
   const [formError, setFormError] = React.useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = React.useState<CompanyDocument | null>(null);
+  const [siteFilter, setSiteFilter] = React.useState('all');
+
+  const sites = useQuery({ queryKey: ['sites'], queryFn: () => api.get<Site[]>('/sites') });
 
   const documents = useQuery({
-    queryKey: ['company-documents'],
-    queryFn: () => api.get<CompanyDocument[]>('/company-documents'),
+    queryKey: ['company-documents', siteFilter],
+    queryFn: () =>
+      api.get<CompanyDocument[]>(
+        siteFilter === 'all' ? '/company-documents' : `/company-documents?siteId=${siteFilter}`,
+      ),
   });
 
   const refresh = () => qc.invalidateQueries({ queryKey: ['company-documents'] });
@@ -139,7 +152,14 @@ export function CompanyDocuments() {
     setFormError(null);
   };
 
+  /** The site to open the upload dialog on: whichever one is being viewed. */
+  const defaultSiteId = () => {
+    if (siteFilter !== 'all') return siteFilter;
+    return sites.data?.length === 1 ? sites.data[0].id : '';
+  };
+
   const body = (f: DocumentForm) => ({
+    siteId: f.siteId,
     name: f.name.trim(),
     validUntil: f.validUntil || null,
     remindDaysBefore: Number(f.remindDaysBefore || DEFAULT_REMIND_DAYS),
@@ -196,6 +216,7 @@ export function CompanyDocuments() {
       // The file's own name is the opening suggestion; the dialog lets them
       // change it before anything is stored.
       const seeded = {
+        siteId: defaultSiteId(),
         name: nameFromFile(file.name),
         validUntil: '',
         remindDaysBefore: String(DEFAULT_REMIND_DAYS),
@@ -213,6 +234,7 @@ export function CompanyDocuments() {
     setDraft(null);
     setEditing(doc);
     setForm({
+      siteId: doc.siteId,
       name: doc.name,
       validUntil: doc.validUntil ?? '',
       remindDaysBefore: String(doc.remindDaysBefore),
@@ -238,15 +260,47 @@ export function CompanyDocuments() {
     form.validUntil !== '' &&
     (!Number.isInteger(days) || days < 0 || days > MAX_REMIND_DAYS);
   const reminderDate = form ? remindOn(form.validUntil, days) : null;
+  // Showing one site's documents already answers "whose is this", so the column
+  // only earns its width when everything is on screen at once.
+  const showSiteColumn = siteFilter === 'all';
+
+  const siteFilterControl = (
+    <TextField
+      select
+      size="small"
+      label="Site"
+      value={siteFilter}
+      onChange={(e) => setSiteFilter(e.target.value)}
+      sx={{ minWidth: 200 }}
+    >
+      <MenuItem value="all">All sites</MenuItem>
+      {(sites.data ?? []).map((s) => (
+        <MenuItem key={s.id} value={s.id}>
+          {s.name}
+        </MenuItem>
+      ))}
+    </TextField>
+  );
 
   return (
-    <SectionCard
-      icon={<DescriptionOutlinedIcon />}
-      title="Documents"
-      subtitle="Licences, insurance and registrations — Super Admins are emailed before they expire"
-      action={uploadButton}
-      disableContentPadding
-    >
+    <Card>
+      {/* No title inside the card: the page above already says "Documents", and
+          a heading repeated twice reads as a mistake. The card carries only the
+          controls that act on the list. */}
+      <Stack
+        direction="row"
+        spacing={1.5}
+        alignItems="center"
+        sx={{ px: 2.5, py: 2, borderBottom: '1px solid', borderColor: 'divider' }}
+      >
+        <DescriptionOutlinedIcon sx={{ color: 'text.secondary', fontSize: 20 }} />
+        <Typography variant="body2" color="text.secondary">
+          Super Admins are emailed before a document expires
+        </Typography>
+        <Box sx={{ flex: 1 }} />
+        {siteFilterControl}
+        {uploadButton}
+      </Stack>
       <input
         ref={fileInput}
         hidden
@@ -258,17 +312,19 @@ export function CompanyDocuments() {
       {rows.length === 0 && !documents.isLoading ? (
         <Box sx={{ px: 2.5, py: 4, textAlign: 'center' }}>
           <Typography variant="body2" color="text.secondary">
-            No documents yet. Upload a PDF and give it a validity date — a reminder is emailed
-            to the Super Admins before it runs out.
+            {siteFilter === 'all'
+              ? 'No documents yet. Upload a PDF, choose the site it covers and give it a validity date — a reminder is emailed to the Super Admins before it runs out.'
+              : 'Nothing filed against this site yet.'}
           </Typography>
           <Box sx={{ mt: 2 }}>{uploadButton}</Box>
         </Box>
       ) : (
         <Box sx={{ overflowX: 'auto' }}>
-          <Table size="medium" sx={{ minWidth: 720 }}>
+          <Table size="medium" sx={{ minWidth: showSiteColumn ? 820 : 720 }}>
             <TableHead>
               <TableRow>
                 <TableCell>Document</TableCell>
+                {showSiteColumn && <TableCell>Site</TableCell>}
                 <TableCell>Valid until</TableCell>
                 <TableCell>Reminder</TableCell>
                 <TableCell align="right">Actions</TableCell>
@@ -287,6 +343,11 @@ export function CompanyDocuments() {
                         {doc.fileName} · {fmtBytes(doc.sizeBytes)}
                       </Typography>
                     </TableCell>
+                    {showSiteColumn && (
+                      <TableCell>
+                        <Typography variant="body2">{doc.siteName ?? '—'}</Typography>
+                      </TableCell>
+                    )}
                     <TableCell>
                       <Stack spacing={0.5} alignItems="flex-start">
                         <Typography variant="body2">
@@ -356,6 +417,23 @@ export function CompanyDocuments() {
                 {(draft ?? editing)!.fileName} · {fmtBytes((draft ?? editing)!.sizeBytes)}
               </Alert>
             )}
+            {/* Which site this covers, first: it decides who the expiry alert
+                names and where the document is filed. */}
+            <TextField
+              select
+              label="Site"
+              fullWidth
+              required
+              value={form?.siteId ?? ''}
+              onChange={(e) => setForm((f) => (f ? { ...f, siteId: e.target.value } : f))}
+              helperText="The site this document covers"
+            >
+              {(sites.data ?? []).map((s) => (
+                <MenuItem key={s.id} value={s.id}>
+                  {s.name}
+                </MenuItem>
+              ))}
+            </TextField>
             <TextField
               label="Document name"
               fullWidth
@@ -409,7 +487,7 @@ export function CompanyDocuments() {
           </Button>
           <Button
             variant="contained"
-            disabled={save.isPending || !form?.name.trim() || daysInvalid}
+            disabled={save.isPending || !form?.siteId || !form?.name.trim() || daysInvalid}
             onClick={() => save.mutate()}
           >
             {save.isPending ? 'Saving…' : editing ? 'Save' : 'Add document'}
@@ -427,6 +505,6 @@ export function CompanyDocuments() {
         onConfirm={() => pendingDelete && remove.mutate(pendingDelete)}
         onClose={() => setPendingDelete(null)}
       />
-    </SectionCard>
+    </Card>
   );
 }

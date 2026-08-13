@@ -189,6 +189,16 @@ export const StorageIcon = (p: IconProps) => (
   </Icon>
 );
 
+/** A sheet of paper with a folded corner — site licences and certificates. */
+export const DocumentsIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M14 3H7a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 7 21h10a1.5 1.5 0 0 0 1.5-1.5V7.5z" />
+    <path d="M14 3v4.5h4.5" />
+    <path d="M9 13h6" />
+    <path d="M9 16.5h4" />
+  </Icon>
+);
+
 export const AuditIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />

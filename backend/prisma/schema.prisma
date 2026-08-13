@@ -167,6 +167,7 @@ model Site {
   scopes        UserSiteScope[]
   manualTaps    ManualAttendanceRequest[]
   safetyEntries DailySafetyEntry[]
+  documents     CompanyDocument[]
 
   @@unique([organizationId, code])
   @@map("sites")
@@ -824,6 +825,9 @@ model DailySafetyEntry {
 model CompanyDocument {
   id             String @id @default(uuid()) @db.Uuid
   organizationId String @map("organization_id") @db.Uuid
+  /// The site this document belongs to. A licence is granted for a particular
+  /// project, so it expires against that project and is chased for it.
+  siteId         String @map("site_id") @db.Uuid
   /// Display name. Seeded from the uploaded file's name; the client renames it.
   name           String
   /// The name of the file as uploaded — kept so a download reads as the
@@ -847,7 +851,10 @@ model CompanyDocument {
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
   @@index([organizationId, validUntil])
+  @@index([siteId])
   @@map("company_documents")
 }
 

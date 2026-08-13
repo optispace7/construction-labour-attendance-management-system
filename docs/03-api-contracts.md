@@ -69,12 +69,16 @@ POST   /organizations
 GET    /organizations/{id}
 PATCH  /organizations/{id}
 
-# company documents — the company's own PDFs (settings.manage)
-GET    /company-documents                # metadata only, soonest expiry first
-POST   /company-documents                # { dataBase64, mimeType:'application/pdf', fileName, name?, validUntil?, remindDaysBefore? }
-PATCH  /company-documents/{id}           # { name?, validUntil?, remindDaysBefore? } — re-arms the reminder
+# documents — site paperwork as PDFs (settings.manage), admin "Documents" page
+GET    /company-documents?siteId=        # metadata only, soonest expiry first
+POST   /company-documents                # { siteId, dataBase64, mimeType:'application/pdf', fileName, name?, validUntil?, remindDaysBefore? }
+PATCH  /company-documents/{id}           # { siteId?, name?, validUntil?, remindDaysBefore? } — re-arms the reminder
 DELETE /company-documents/{id}
 GET    /company-documents/{id}/file      # streams the PDF (binary, not via the JSON proxy)
+# siteId is required on upload and must belong to the caller's organization: a
+# licence is granted for a particular project, so it expires against that
+# project and the alert can name the site left uncovered. PATCH accepts a new
+# siteId to move a document. Responses carry siteName alongside siteId.
 # validUntil is a plain YYYY-MM-DD; the response adds daysUntilExpiry and
 # remindOn, both computed in the organization's timezone. remindDaysBefore
 # defaults to 10. DocumentExpiryMonitor mails the SUPER_ADMINs at that lead time

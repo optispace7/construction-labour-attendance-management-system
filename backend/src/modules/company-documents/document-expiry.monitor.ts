@@ -14,6 +14,9 @@ const DOCUMENT_ROLES: UserRole[] = ['SUPER_ADMIN'];
 interface DueDocument {
   id: string;
   name: string;
+  /** Named in the alert: a licence lapsing exposes one project, not all of them. */
+  siteId: string;
+  siteName: string;
   validUntil: Date;
   daysLeft: number;
 }
@@ -66,7 +69,14 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
       // The already-sent columns are deliberately not read here: whether a mail
       // is still owed is decided by the conditional update in claim(), which is
       // what makes two replicas racing on the same row safe.
-      select: { id: true, name: true, validUntil: true, remindDaysBefore: true },
+      select: {
+        id: true,
+        name: true,
+        validUntil: true,
+        remindDaysBefore: true,
+        siteId: true,
+        site: { select: { name: true } },
+      },
     });
 
     const expiring: DueDocument[] = [];
@@ -75,7 +85,14 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
     for (const doc of docs) {
       if (!doc.validUntil) continue;
       const daysLeft = daysUntil(doc.validUntil, org.timezone);
-      const due = { id: doc.id, name: doc.name, validUntil: doc.validUntil, daysLeft };
+      const due = {
+        id: doc.id,
+        name: doc.name,
+        siteId: doc.siteId,
+        siteName: doc.site?.name?.trim() ?? '',
+        validUntil: doc.validUntil,
+        daysLeft,
+      };
 
       if (daysLeft < 0) {
         if (await this.claim(doc.id, 'expirySentFor', doc.validUntil)) expired.push(due);
@@ -118,16 +135,22 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
     hasExpired: boolean,
   ) {
     for (const doc of docs) {
+      // The site is in the title because that is the actionable half: which
+      // project is uncovered, not merely which piece of paper lapsed.
+      const at = doc.siteName ? ` at ${doc.siteName}` : '';
       await this.notifications.create({
         organizationId,
         type: hasExpired ? 'DOCUMENT_EXPIRED' : 'DOCUMENT_EXPIRING',
+        siteId: doc.siteId,
         title: hasExpired
-          ? `"${doc.name}" has expired`
-          : `"${doc.name}" expires ${inDays(doc.daysLeft)}`,
-        body: `Validity ends ${formatDay(doc.validUntil)}. Upload the renewed document on the Company page.`,
+          ? `"${doc.name}"${at} has expired`
+          : `"${doc.name}"${at} expires ${inDays(doc.daysLeft)}`,
+        body: `Validity ends ${formatDay(doc.validUntil)}. Upload the renewed document on the Documents page.`,
         data: {
           documentId: doc.id,
           name: doc.name,
+          siteId: doc.siteId,
+          siteName: doc.siteName,
           validUntil: formatDay(doc.validUntil),
           daysLeft: doc.daysLeft,
         },
@@ -136,7 +159,7 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
 
     const lines = docs.map(
       (d) =>
-        `• ${d.name} — valid until ${formatDay(d.validUntil)} ` +
+        `• ${d.name}${d.siteName ? ` (${d.siteName})` : ''} — valid until ${formatDay(d.validUntil)} ` +
         (d.daysLeft < 0
           ? `(expired ${Math.abs(d.daysLeft)} day(s) ago)`
           : `(${inDays(d.daysLeft)})`),
@@ -149,7 +172,7 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
       subject,
       `${hasExpired ? 'These company documents are no longer valid' : 'These company documents are about to expire'}:\n\n` +
         lines.join('\n') +
-        `\n\nUpload the renewed copy on the Company page in the CLAMS admin panel.`,
+        `\n\nUpload the renewed copy on the Documents page in the CLAMS admin panel.`,
     );
 
     // A reminder that never left the building has not been sent, whatever the

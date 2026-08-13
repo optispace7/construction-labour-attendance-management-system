@@ -4,6 +4,7 @@ import {
   IsISO8601,
   IsOptional,
   IsString,
+  IsUUID,
   Length,
   Max,
   MaxLength,
@@ -21,6 +22,10 @@ export const DEFAULT_REMIND_DAYS_BEFORE = 10;
 export const MAX_REMIND_DAYS_BEFORE = 365;
 
 export class UploadCompanyDocumentDto {
+  @ApiProperty({ description: 'The site this document belongs to' })
+  @IsUUID(undefined, { message: 'Pick the site this document belongs to' })
+  siteId!: string;
+
   @ApiProperty({ description: 'Base64-encoded PDF bytes (no data: prefix)' })
   @IsString()
   dataBase64!: string;
@@ -68,6 +73,11 @@ export class UploadCompanyDocumentDto {
 
 /** Everything about a stored document that can still be changed. */
 export class UpdateCompanyDocumentDto {
+  @ApiProperty({ required: false, description: 'Move the document to another site' })
+  @IsOptional()
+  @IsUUID(undefined, { message: 'Pick the site this document belongs to' })
+  siteId?: string;
+
   @ApiProperty({ required: false })
   @IsOptional()
   @IsString()

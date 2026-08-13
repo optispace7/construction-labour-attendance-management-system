@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
 import { CompanyDocumentsService } from './company-documents.service';
@@ -9,9 +9,9 @@ import { CurrentUser } from '../../common/auth/current-user.decorator';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 
 /**
- * The company's own paperwork — licences, insurance, registrations. Behind
- * SETTINGS_MANAGE throughout, which is the same Super Admin + Admin pair that
- * can reach the Company page these live on.
+ * Site paperwork — licences, insurance, registrations, each held against the
+ * site it covers. Behind SETTINGS_MANAGE throughout, which is the same Super
+ * Admin + Admin pair that can reach the Documents page these live on.
  */
 @ApiTags('company-documents')
 @ApiBearerAuth()
@@ -21,8 +21,8 @@ export class CompanyDocumentsController {
   constructor(private readonly documents: CompanyDocumentsService) {}
 
   @Get()
-  list(@CurrentUser() user: AuthUser) {
-    return this.documents.list(user);
+  list(@CurrentUser() user: AuthUser, @Query('siteId') siteId?: string) {
+    return this.documents.list(user, siteId);
   }
 
   @Post()

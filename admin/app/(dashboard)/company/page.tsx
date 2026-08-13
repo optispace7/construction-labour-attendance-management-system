@@ -18,7 +18,6 @@ import ContactPhoneOutlinedIcon from '@mui/icons-material/ContactPhoneOutlined';
 import FileUploadOutlinedIcon from '@mui/icons-material/FileUploadOutlined';
 import { api, BrowserApiError } from '@/lib/api/browser';
 import { PageHeader } from '@/components/PageHeader';
-import { CompanyDocuments } from '@/components/CompanyDocuments';
 import { SectionCard } from '@/components/ui/SectionCard';
 import { useToast } from '@/components/ui/Toast';
 import { photoSrc } from '@/components/PeopleDirectory';
@@ -162,7 +161,7 @@ export default function CompanyPage() {
     <>
       <PageHeader
         title="Company details"
-        subtitle="Name, address and logo for the ID cards, and the company's own documents."
+        subtitle="Name, address and logo — printed on every worker ID card."
         action={saveButton}
       />
 
@@ -344,10 +343,6 @@ export default function CompanyPage() {
         </SectionCard>
 
         <Stack direction="row" justifyContent="flex-end">{saveButton}</Stack>
-
-        {/* Documents save themselves as they are added — deliberately below the
-            profile's Save button, so nothing here looks like it is waiting on it. */}
-        <CompanyDocuments />
       </Stack>
     </>
   );
