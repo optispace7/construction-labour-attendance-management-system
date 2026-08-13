@@ -1,5 +1,5 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'crypto';
 import * as argon2 from 'argon2';
 
 /**
@@ -71,14 +71,48 @@ export class CryptoService {
     }
   }
 
-  /** Argon2id hash used for opaque tokens (refresh, device). */
+  /**
+   * Argon2id hash for a secret somebody could *guess* — a password, or the
+   * six-digit reset OTP. The cost is the whole point there: it is what makes
+   * running through the candidates expensive.
+   */
   async hashToken(token: string): Promise<string> {
     return argon2.hash(token, { type: argon2.argon2id });
   }
 
+  /**
+   * Hash for an opaque token the server itself generated — a device token, a
+   * refresh token. These carry 122 bits of randomness, so there is no candidate
+   * list to run through and nothing for a slow hash to slow down. What is
+   * wanted is only that a stolen database does not hand over usable tokens,
+   * which SHA-256 does perfectly well.
+   *
+   * Argon2 was being used here, and it was measurably the wrong tool: the
+   * device guard verifies a device token on *every authenticated request*, so
+   * each call to the API was paying a 64 MB, three-pass hash designed to take
+   * tens of milliseconds — on a half-core container, with the phone waiting.
+   */
+  hashOpaqueToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  /** True for a hash still stored in the old Argon2id format. */
+  isLegacyTokenHash(hash: string): boolean {
+    return hash.startsWith('$argon2');
+  }
+
+  /**
+   * Verify an opaque token against either format, so tokens issued before the
+   * change keep working. Callers should upgrade a legacy hash once it verifies
+   * — see DeviceAuthService.validateToken.
+   */
   async verifyToken(hash: string, token: string): Promise<boolean> {
     try {
-      return await argon2.verify(hash, token);
+      if (this.isLegacyTokenHash(hash)) return await argon2.verify(hash, token);
+      const expected = Buffer.from(hash, 'hex');
+      const actual = createHash('sha256').update(token).digest();
+      // Constant-time: timingSafeEqual throws on a length mismatch, so guard it.
+      return expected.length === actual.length && timingSafeEqual(expected, actual);
     } catch {
       return false;
     }

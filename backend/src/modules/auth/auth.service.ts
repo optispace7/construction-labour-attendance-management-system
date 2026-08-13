@@ -98,11 +98,14 @@ export class AuthService {
       expiresIn: this.accessTtl,
     });
 
-    // Opaque refresh token = jti.secret; only the hash is stored.
+    // Opaque refresh token = jti.secret; only the hash is stored. The secret is
+    // a random UUID, so the hash guards a stolen database, not a guessing
+    // attack — SHA-256, not Argon2id, which every client would otherwise pay
+    // for on each token rotation.
     const jti = randomUUID();
     const secret = randomUUID();
     const refreshToken = `${jti}.${secret}`;
-    const tokenHash = await this.crypto.hashToken(refreshToken);
+    const tokenHash = this.crypto.hashOpaqueToken(refreshToken);
 
     await this.prisma.refreshToken.create({
       data: {

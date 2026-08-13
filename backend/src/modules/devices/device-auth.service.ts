@@ -7,6 +7,9 @@ import { MailService } from '../../common/mail/mail.service';
 import { PushService } from '../../common/push/push.service';
 import { Errors } from '../../common/errors/app.exception';
 
+/** How stale "last seen" is allowed to get before it is worth a write. */
+const LAST_SEEN_EVERY_MS = 60_000;
+
 @Injectable()
 export class DeviceAuthService {
   private readonly logger = new Logger(DeviceAuthService.name);
@@ -121,22 +124,44 @@ export class DeviceAuthService {
     if (device.status !== 'AUTHORIZED') throw Errors.deviceNotAuthorized();
 
     const token = `${deviceId}.${randomUUID()}`;
-    const tokenHash = await this.crypto.hashToken(token);
+    const tokenHash = this.crypto.hashOpaqueToken(token);
     await this.prisma.device.update({ where: { id: deviceId }, data: { tokenHash } });
     return { deviceToken: token };
   }
 
-  /** Validate a presented device token (used by the device guard). */
+  /**
+   * Validate a presented device token (used by the device guard).
+   *
+   * This runs on **every authenticated request** from every non-Super-Admin, so
+   * what it costs is what every screen in both apps costs. It used to verify an
+   * Argon2id hash here — 64 MB and three passes, per request, on a half-core
+   * container — which is why the panel and the phone crawled. The token is a
+   * random UUID the server issued; SHA-256 is all that is called for.
+   *
+   * Hashes issued before that change still verify, and are rewritten in the new
+   * format the first time they do, so the old cost is paid once per device
+   * rather than once per request.
+   */
   async validateToken(deviceId: string, token: string): Promise<boolean> {
     const device = await this.prisma.device.findUnique({ where: { id: deviceId } });
     if (!device || device.status !== 'AUTHORIZED' || !device.tokenHash) return false;
+
     const ok = await this.crypto.verifyToken(device.tokenHash, token);
-    if (ok) {
-      await this.prisma.device.update({
-        where: { id: deviceId },
-        data: { lastSeenAt: new Date() },
-      });
+    if (!ok) return false;
+
+    const data: { tokenHash?: string; lastSeenAt?: Date } = {};
+    if (this.crypto.isLegacyTokenHash(device.tokenHash)) {
+      data.tokenHash = this.crypto.hashOpaqueToken(token);
     }
-    return ok;
+    // "Last seen" to the minute is as much as anything asks of it, and writing
+    // a row on every single API call is a cost the answer does not justify.
+    const now = new Date();
+    if (!device.lastSeenAt || now.getTime() - device.lastSeenAt.getTime() > LAST_SEEN_EVERY_MS) {
+      data.lastSeenAt = now;
+    }
+    if (Object.keys(data).length > 0) {
+      await this.prisma.device.update({ where: { id: deviceId }, data });
+    }
+    return true;
   }
 }
