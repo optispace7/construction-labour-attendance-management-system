@@ -588,6 +588,7 @@ export class AttendanceService {
         state: 'OPEN',
       },
     });
+    await this.ensureSiteAssignment(worker.id, site.id);
     await this.maybeAuditManual(organizationId, ctx, worker.id, dto);
     await this.auditScan('ATTENDANCE_LOGIN', {
       organizationId,
@@ -615,6 +616,46 @@ export class AttendanceService {
       requiresPhoto,
       loginAt: session.loginAt,
     };
+  }
+
+  /**
+   * Somebody scanned in at a site works at that site — put them on its list.
+   *
+   * Which site a person belongs to is meant to be set when they are registered,
+   * but the field is optional on the form, and somebody registered without one
+   * belongs to no site at all. They can still be scanned, because the gate
+   * resolves a badge against the whole organization — so they turn up in
+   * attendance while being missing from the Safety Officer's list, which is
+   * where the officer looks for them, and from the offline cache that list
+   * warms. That last one is the dangerous half: they scan fine while the tablet
+   * has signal and cannot be scanned at all once it drops.
+   *
+   * A scan is the one call that must never fail, so this is best-effort: a
+   * worker who cannot be enrolled is still logged in.
+   */
+  private async ensureSiteAssignment(workerId: string, siteId: string) {
+    try {
+      const open = await this.prisma.workerSiteAssignment.findMany({
+        where: { workerId, endDate: null },
+        select: { siteId: true },
+      });
+      if (open.some((a) => a.siteId === siteId)) return;
+      await this.prisma.workerSiteAssignment.create({
+        data: {
+          workerId,
+          siteId,
+          startDate: new Date(),
+          // Their first site is the primary one; a second is an addition, not a
+          // correction of the first.
+          isPrimary: open.length === 0,
+        },
+      });
+      this.logger.log(`Enrolled worker ${workerId} at site ${siteId} on scan`);
+    } catch (e) {
+      this.logger.warn(
+        `Could not enrol worker ${workerId} at site ${siteId}: ${(e as Error).message}`,
+      );
+    }
   }
 
   private async doLogout(
@@ -960,6 +1001,7 @@ export class AttendanceService {
         state: 'OPEN',
       },
     });
+    await this.ensureSiteAssignment(tap.workerId, tap.siteId);
     await this.auditScan('ATTENDANCE_LOGIN', {
       organizationId,
       workerId: tap.workerId,
