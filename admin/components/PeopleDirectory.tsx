@@ -713,22 +713,29 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
     name: keyof PersonForm,
     label: string,
     options: { value: string; label: string }[],
+    opts: { required?: string } = {},
   ) => (
     <Grid item xs={12} sm={6} md={4}>
       <Controller
         name={name}
         control={control}
+        rules={opts.required ? { required: opts.required } : undefined}
         render={({ field: f }) => (
           <TextField
             select
             label={label}
+            required={!!opts.required}
             fullWidth
             size="small"
             value={f.value ?? ''}
             onChange={f.onChange}
+            error={!!errors[name]}
+            helperText={errors[name]?.message}
             InputLabelProps={{ shrink: true }}
           >
-            <MenuItem value="">—</MenuItem>
+            {/* No blank option when the field is required — an empty choice is
+                how people ended up belonging to no site at all. */}
+            {!opts.required && <MenuItem value="">—</MenuItem>}
             {options.map((o) => (
               <MenuItem key={o.value} value={o.value}>
                 {o.label}
@@ -1362,10 +1369,16 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
                   (vendors.data ?? []).map((v) => ({ value: v.id, label: v.name })),
                 )}
               {category === 'WORKER' && field('natureOfContractor', 'Nature of contractor')}
+              {/* Required when creating: somebody saved without a site belongs
+                  to none, so they are missing from the Safety Officer's list
+                  and from the offline cache it fills — scannable only while the
+                  tablet has signal. Left optional when editing so an existing
+                  record is never blocked; moving site has its own call below. */}
               {selectField(
                 'siteId',
                 'Site',
                 (sites.data ?? []).map((s) => ({ value: s.id, label: s.name })),
+                editing ? {} : { required: 'Pick the site this person works at' },
               )}
               {!isStaff &&
                 field('joinDate', isVisitor ? 'Visit date' : 'Date of joining', {

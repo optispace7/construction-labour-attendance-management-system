@@ -432,6 +432,15 @@ class _WorkerEditScreenState extends ConsumerState<WorkerEditScreen> {
 
   Future<void> _save() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
+    // Registering somebody without a site leaves them belonging to none: absent
+    // from the Safety Officer's list, and absent from the offline cache that
+    // list fills, so they can be scanned while the tablet has signal and not at
+    // all once it drops. This normally defaults to the site picked at sign-in,
+    // so it can only be empty if that never happened.
+    if (!_isEdit && (_siteId == null || _siteId!.isEmpty)) {
+      setState(() => _error = 'Pick the site this person works at.');
+      return;
+    }
     setState(() {
       _saving = true;
       _error = null;
@@ -496,7 +505,9 @@ class _WorkerEditScreenState extends ConsumerState<WorkerEditScreen> {
       if (_isEdit && _status != null) 'status': _status,
       if (!_isEdit && !_isStaff && _joinDate != null)
         'joinDate': _joinDate!.toIso8601String().substring(0, 10),
-      if (!_isEdit && _siteId != null) 'siteId': _siteId,
+      // Guarded above, so this is always present on create — the API now
+      // refuses a person with no site rather than quietly making an orphan.
+      if (!_isEdit) 'siteId': _siteId,
       // No workerCode: IDs are always auto-generated server-side (W-/S-/V-####).
     };
 

@@ -156,10 +156,22 @@ export class CreateWorkerDto {
   @IsString()
   vendorId?: string;
 
-  @ApiProperty({ required: false, description: 'Initial site assignment' })
-  @IsOptional()
-  @IsString()
-  siteId?: string;
+  /**
+   * The site this person works at. Required, and required here rather than only
+   * in the forms: somebody registered without one belongs to no site, which
+   * means they are missing from the Safety Officer's list — and from the
+   * offline cache that list fills, so they cannot be scanned at all once the
+   * tablet loses signal. Two people were created that way before this was
+   * enforced, and neither was noticed until somebody went looking for them.
+   *
+   * UpdateWorkerDto makes every field optional again, so editing somebody is
+   * unaffected; moving them between sites has its own endpoint.
+   */
+  @ApiProperty({ description: 'Site this person works at' })
+  // A UUID rather than any string: it rejects blank and whitespace, and turns
+  // a junk id into a clear 400 instead of a foreign-key failure at insert time.
+  @IsUUID(undefined, { message: 'Pick the site this person works at' })
+  siteId!: string;
 
   @ApiProperty({ required: false })
   @IsOptional()
