@@ -57,10 +57,21 @@ interface SiteProfile {
   lostTimeInjuries: number;
 }
 
+/**
+ * Close rates are high on purpose, and they have to be.
+ *
+ * The score deducts a point for every finding raised in the month and not
+ * closed in it, which means the penalty scales with how busy the site is, not
+ * with how well it is run. Filling the board properly pushed a month past 160
+ * findings, and at the 88% these started on that is twenty-odd open — enough to
+ * drag a site with one injury down to 61% and paint the dial red on a month
+ * that, read any other way, went well. A site closing nineteen findings in
+ * twenty is both a realistic good month and one the score agrees is good.
+ */
 const PROFILES: SiteProfile[] = [
-  { seed: 20260801, closeRate: 0.88, medicalTreatmentCases: 1, lostTimeInjuries: 1 },
-  { seed: 20260802, closeRate: 0.72, medicalTreatmentCases: 1, lostTimeInjuries: 0 },
-  { seed: 20260803, closeRate: 0.95, medicalTreatmentCases: 0, lostTimeInjuries: 0 },
+  { seed: 20260801, closeRate: 0.96, medicalTreatmentCases: 1, lostTimeInjuries: 1 },
+  { seed: 20260802, closeRate: 0.92, medicalTreatmentCases: 1, lostTimeInjuries: 0 },
+  { seed: 20260803, closeRate: 0.98, medicalTreatmentCases: 0, lostTimeInjuries: 0 },
 ];
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
@@ -120,16 +131,19 @@ function dayValues(rand: () => number, ramp: number): Partial<Record<SafetyMetri
     TOOLBOX_TALK: scaled(2, 5),
     LABOUR_INDUCTION: scaled(3, 14),
     VISITOR_INDUCTION: scaled(1, 7),
-    TRAINING: rand() < 0.55 ? scaled(1, 4) : 0,
-    UNSAFE_ACTS: rand() < 0.8 ? scaled(1, 5) : 0,
-    UNSAFE_CONDITIONS: rand() < 0.7 ? scaled(1, 4) : 0,
-    SAFETY_OBSERVATION: rand() < 0.85 ? scaled(2, 7) : 0,
+    TRAINING: rand() < 0.7 ? scaled(1, 4) : 0,
+    UNSAFE_ACTS: rand() < 0.92 ? scaled(1, 5) : 0,
+    UNSAFE_CONDITIONS: rand() < 0.88 ? scaled(1, 4) : 0,
+    SAFETY_OBSERVATION: rand() < 0.95 ? scaled(2, 7) : 0,
+    // Incidents stay rare, and deliberately so. A daily sheet showing no lost
+    // time injury is not a hole in the data, it is the good news — padding
+    // these to fill the page would be inventing injuries.
     NEAR_MISS: rand() < 0.2 ? 1 : 0,
     FIRST_AID: rand() < 0.15 ? 1 : 0,
     WORK_PERMIT: scaled(2, 8),
-    SAFETY_INSPECTION: rand() < 0.7 ? scaled(1, 3) : 0,
+    SAFETY_INSPECTION: rand() < 0.82 ? scaled(1, 3) : 0,
     SAFETY_AUDIT: rand() < 0.15 ? 1 : 0,
-    WASTE_DISPOSAL: rand() < 0.6 ? scaled(1, 5) : 0,
+    WASTE_DISPOSAL: rand() < 0.75 ? scaled(1, 5) : 0,
     // Placed by hand below rather than rolled daily: an injury is an event.
     MEDICAL_TREATMENT_CASE: 0,
     LOST_TIME_INJURY: 0,
@@ -220,30 +234,43 @@ async function seed() {
       place('LOST_TIME_INJURY', window.current ? site.lostTimeInjuries : w === 0 ? 1 : 0);
 
       /**
-       * Closures, spread back across the month at the site's close rate.
+       * Closures, at the site's close rate — spread across every day, not
+       * banked at the front of the month.
        *
-       * Deliberately not same-day: a finding raised on the 9th and closed on
-       * the 11th is the normal case, and the month's totals are what the score
-       * reads anyway.
+       * The first version worked out the month's total and then walked the days
+       * in order paying it off, which emptied the budget within the first week
+       * or two and left the rest of the month raising findings and closing
+       * none. The month looked right and every window shorter than a month was
+       * a lie: the board's Daily and Weekly meters both read "0 closed of 3
+       * raised" on a site that closes seven findings in eight.
+       *
+       * Each day now closes its own share, so any window the board can select —
+       * a day, a week, a month — lands near the site's real rate. The
+       * fractional part is settled by a coin flip rather than rounded, or a
+       * site raising two a day at 88% would close exactly two every day and the
+       * rate would read 100%.
+       *
+       * A day that raised nothing can still close something: a closure is
+       * stamped on the day it happens, not the day the finding was opened.
        */
+      // Older months close a little worse, so the closure meters differ month
+      // to month and the site reads as having got on top of its backlog rather
+      // than holding one rate forever.
+      const rate = Math.min(1, site.closeRate - (periods.length - 1 - w) * 0.06);
       for (const [raisedMetric, closedMetric] of [
         ['UNSAFE_ACTS', 'UNSAFE_ACTS_CLOSED'],
         ['UNSAFE_CONDITIONS', 'UNSAFE_CONDITIONS_CLOSED'],
         ['SAFETY_OBSERVATION', 'SAFETY_OBSERVATION_CLOSED'],
       ] as [SafetyMetric, SafetyMetric][]) {
-        const raised = days.reduce((a, d) => a + (d.values[raisedMetric] ?? 0), 0);
-        // Older months close a little worse, so the closure meters differ month
-        // to month and the site reads as having got on top of its backlog
-        // rather than holding one rate forever.
-        const rate = Math.min(1, site.closeRate - (periods.length - 1 - w) * 0.06);
-        let toClose = Math.round(raised * rate);
-        // Walk the days in order, closing what each one can carry.
         for (const day of days) {
-          if (toClose <= 0) break;
-          const cap = Math.min(toClose, (day.values[raisedMetric] ?? 0) + 1);
-          if (cap <= 0) continue;
-          day.values[closedMetric] = (day.values[closedMetric] ?? 0) + cap;
-          toClose -= cap;
+          const raised = day.values[raisedMetric] ?? 0;
+          if (raised === 0) {
+            if (rand() < 0.3) day.values[closedMetric] = 1;
+            continue;
+          }
+          const exact = raised * rate;
+          const whole = Math.floor(exact);
+          day.values[closedMetric] = whole + (rand() < exact - whole ? 1 : 0);
         }
       }
 

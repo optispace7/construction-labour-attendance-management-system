@@ -1582,8 +1582,13 @@ export function renderSafetyPdf(
     // and the height it needs comes out of the statistics list below, which was
     // leaving its bottom quarter blank anyway.
     const midH = 196;
-    const trendW = contentW * 0.4;
-    const obsW = contentW * 0.28;
+    // The score panel takes the extra width. Its rows are a label, a sub-line
+    // and a points column, and at 32% the label had about eighty points to play
+    // with — "Safety observation left open" came out as "Safety observation
+    // lef…", which is the row that explains the number above it. The trend and
+    // the meters both read fine a little narrower.
+    const trendW = contentW * 0.38;
+    const obsW = contentW * 0.26;
     drawMultiLine(
       doc,
       panel(doc, M, y, trendW, midH, 'Trend overview', 'Inductions, toolbox talks and visitors'),
