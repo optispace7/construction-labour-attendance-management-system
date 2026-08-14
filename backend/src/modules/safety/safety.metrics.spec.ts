@@ -114,16 +114,16 @@ describe('safetyPerformance', () => {
   });
 
   it('costs nothing when everything raised was closed', () => {
-    expect(
-      safetyPerformance({ ...active, UNSAFE_ACTS: 10, UNSAFE_ACTS_CLOSED: 10 }).score,
-    ).toBe(100);
+    expect(safetyPerformance({ ...active, UNSAFE_ACTS: 10, UNSAFE_ACTS_CLOSED: 10 }).score).toBe(
+      100,
+    );
   });
 
   it('costs a point per finding left open', () => {
     // The client's own worked example: 12 raised against 10 closed is −2.
-    expect(
-      safetyPerformance({ ...active, UNSAFE_ACTS: 12, UNSAFE_ACTS_CLOSED: 10 }).score,
-    ).toBe(98);
+    expect(safetyPerformance({ ...active, UNSAFE_ACTS: 12, UNSAFE_ACTS_CLOSED: 10 }).score).toBe(
+      98,
+    );
   });
 
   it('scores each raised/closed pair on its own', () => {
