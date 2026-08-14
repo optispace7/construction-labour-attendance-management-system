@@ -435,20 +435,35 @@ export function SafetyScoreDial({
             strokeWidth={8}
             strokeLinecap="round"
           />
-          {/* pathLength normalises the arc to 100 units, so the dash array is
-              the percentage itself rather than a circumference calculation
-              that has to be redone every time the radius changes. */}
-          <motion.path
-            d={track}
-            fill="none"
-            style={{ stroke: tone }}
-            strokeWidth={8}
-            strokeLinecap="round"
-            pathLength={100}
-            initial={reduced ? false : { strokeDasharray: '0 100' }}
-            animate={{ strokeDasharray: `${pct} 100` }}
-            transition={{ duration: 0.9, ease: EASE }}
-          />
+          {/*
+            The colour sits on a plain <g> and the arc inherits it.
+
+            `stroke` is an inherited SVG property, and that is the whole trick:
+            it has to reach the element as CSS, because an SVG presentation
+            *attribute* will not resolve a `var()`. A `style` prop on a
+            motion.path is not a safe place to put it — framer-motion rebuilds
+            an SVG element's style and attributes from its own render state, so
+            the declaration is not guaranteed to survive as CSS, and when it
+            does not the arc falls back to no stroke at all and vanishes.
+
+            The sweep is framer's own `pathLength`, a 0–1 fraction. Passing
+            `pathLength={100}` alongside a hand-rolled strokeDasharray was two
+            mechanisms fighting over the same attributes: framer normalises the
+            path to one unit and writes the dash array itself, so a value of
+            100 asked it to draw the arc a hundred times over and the ring came
+            out full whatever the score was.
+          */}
+          <g style={{ stroke: tone }}>
+            <motion.path
+              d={track}
+              fill="none"
+              strokeWidth={8}
+              strokeLinecap="round"
+              initial={reduced ? false : { pathLength: 0 }}
+              animate={{ pathLength: pct / 100 }}
+              transition={{ duration: 0.9, ease: EASE }}
+            />
+          </g>
           <polygon
             points={`${tipX},${tipY} ${b1x},${b1y} ${b2x},${b2y}`}
             style={{ fill: cssToken('text-secondary') }}
