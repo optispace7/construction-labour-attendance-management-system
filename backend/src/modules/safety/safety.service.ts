@@ -522,6 +522,8 @@ export class SafetyService {
       n(t, 'UNSAFE_CONDITIONS_CLOSED') +
       n(t, 'SAFETY_OBSERVATION_CLOSED');
 
+    const monthScore = safetyPerformance(mTot);
+
     const breakup = [
       { key: 'UNSAFE_ACTS', label: 'Unsafe acts', value: n(totals, 'UNSAFE_ACTS') },
       {
@@ -549,7 +551,10 @@ export class SafetyService {
         dailyManpower: derived.DAILY_MANPOWER,
         totalManpower: derived.TOTAL_MANPOWER,
         totalSafeManHours: derived.TOTAL_SAFE_MAN_HOURS,
-        safetyPerformance: safetyPerformance(mTot),
+        // Always the calendar month, whatever period is selected: the score is
+        // defined as a month that opens at 100 and is worn down from there.
+        safetyPerformance: monthScore.score,
+        safetyPerformanceDeductions: monthScore.deductions,
         safetyPerformanceTarget: SAFETY_PERFORMANCE_TARGET,
       },
       trend,
@@ -665,6 +670,7 @@ export class SafetyService {
         to: s.to,
         siteName: s.siteName,
         kpis: s.kpis,
+        safetyPerformanceDeductions: s.kpis.safetyPerformanceDeductions,
         trend: {
           days: s.trend.days,
           series: s.trend.series.map((x) => ({ label: x.label, values: x.values })),

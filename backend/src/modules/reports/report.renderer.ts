@@ -1163,9 +1163,11 @@ export interface SafetyPdfReport {
     dailyManpower: number;
     totalManpower: number;
     totalSafeManHours: number;
-    safetyPerformance: number | null;
+    safetyPerformance: number;
     safetyPerformanceTarget: number;
   };
+  /** The score's working, so a printed sheet can be argued with. */
+  safetyPerformanceDeductions: { label: string; points: number; detail: string }[];
   trend: { days: string[]; series: { label: string; values: number[] }[] };
   observations: { bucket: string; raised: number; closed: number }[];
   statistics: { label: string; kind: string; value: number }[];
@@ -1396,21 +1398,25 @@ export function renderSafetyPdf(
     let y = headH + 16;
     const tileH = 58;
     const tileW = (contentW - gap * 3) / 4;
-    const perf = r.kpis.safetyPerformance == null ? '—' : `${r.kpis.safetyPerformance}%`;
     const tiles: [string, string, string][] = [
       ["Today's manpower", fmt(r.kpis.dailyManpower), SERIES[0]],
       ['Total manpower as of now', fmt(r.kpis.totalManpower), SERIES[4]],
       ['Total safe man-hours', fmt(r.kpis.totalSafeManHours), SERIES[5]],
-      [`Safety performance (target ${r.kpis.safetyPerformanceTarget}%)`, perf, SERIES[3]],
+      [
+        `Safety score, month (target ${r.kpis.safetyPerformanceTarget}%)`,
+        `${r.kpis.safetyPerformance}%`,
+        SERIES[3],
+      ],
     ];
     tiles.forEach(([label, value, accent], i) => {
       drawKpiTile(doc, M + (tileW + gap) * i, y, tileW, tileH, label, value, accent);
     });
     y += tileH + gap;
 
-    // ---- Trend + observations ----
+    // ---- Trend + observations + how the score was reached ----
     const midH = 168;
-    const trendW = contentW * 0.62;
+    const trendW = contentW * 0.4;
+    const obsW = contentW * 0.28;
     drawMultiLine(
       doc,
       panel(doc, M, y, trendW, midH, 'Trend overview', 'Inductions, toolbox talks and visitors'),
@@ -1419,16 +1425,21 @@ export function renderSafetyPdf(
     );
     drawGroupedBars(
       doc,
+      panel(doc, M + trendW + gap, y, obsW, midH, 'Safety observations', 'Raised against closed'),
+      r.observations,
+    );
+    drawScoreLines(
+      doc,
       panel(
         doc,
-        M + trendW + gap,
+        M + trendW + obsW + gap * 2,
         y,
-        contentW - trendW - gap,
+        contentW - trendW - obsW - gap * 2,
         midH,
-        'Safety observations',
-        'Raised against closed',
+        'Safety score',
+        'Every point taken off the month',
       ),
-      r.observations,
+      r.safetyPerformanceDeductions,
     );
     y += midH + gap;
 
@@ -1462,6 +1473,59 @@ export function renderSafetyPdf(
 
     doc.end();
   });
+}
+
+/**
+ * The score's working: one row per deduction, with what it cost.
+ *
+ * A weighted score nobody can recompute is a score nobody trusts, so the sheet
+ * carries the arithmetic beside the number rather than only the result.
+ */
+function drawScoreLines(
+  doc: Doc,
+  box: { x: number; y: number; w: number; h: number },
+  lines: { label: string; points: number; detail: string }[],
+) {
+  const { x, y, w, h } = box;
+  if (lines.length === 0) {
+    return emptyPanel(doc, box, 'Nothing deducted — a clean month at 100%');
+  }
+  const rowH = 17;
+  const shown = lines.slice(0, Math.max(1, Math.floor(h / rowH)));
+  const pointsW = 26;
+
+  shown.forEach((line, i) => {
+    const cy = y + i * rowH;
+    doc.font('Helvetica-Bold').fontSize(7).fillColor(INK);
+    doc.text(fitText(doc, line.label, w - pointsW - 8), x, cy, {
+      width: textW(w - pointsW - 8),
+      lineBreak: false,
+    });
+    doc.font('Helvetica').fontSize(6).fillColor(INK_3);
+    doc.text(fitText(doc, line.detail, w - pointsW - 8), x, cy + 8, {
+      width: textW(w - pointsW - 8),
+      lineBreak: false,
+    });
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(SERIES[1]);
+    // An ASCII hyphen, not U+2212: the standard Helvetica the rest of this
+    // sheet uses is WinAnsi-encoded, and a true minus sign comes out as a
+    // broken glyph rather than failing loudly.
+    doc.text(`-${line.points}`, x + w - pointsW, cy + 1, {
+      width: textW(pointsW),
+      align: 'right',
+      lineBreak: false,
+    });
+  });
+
+  // Say so rather than silently truncating: the total still counts every line.
+  const hidden = lines.length - shown.length;
+  if (hidden > 0) {
+    doc.font('Helvetica').fontSize(6).fillColor(INK_3);
+    doc.text(`+ ${hidden} more`, x, y + shown.length * rowH, {
+      width: textW(w),
+      lineBreak: false,
+    });
+  }
 }
 
 /** The tracked-item list, in as many columns as the panel affords. */

@@ -85,31 +85,82 @@ describe('safetyWindow', () => {
 });
 
 describe('safetyPerformance', () => {
-  it('is the share of raised findings that were closed', () => {
+  /** A month with all four routine activities done, so only the case under test bites. */
+  const active = {
+    TOOLBOX_TALK: 20,
+    TRAINING: 4,
+    WORK_PERMIT: 12,
+    LABOUR_INDUCTION: 6,
+  };
+
+  it('opens a month with nothing recorded at 100', () => {
+    // Not 96: on the first of the month no toolbox talk has been missed, it
+    // simply has not happened yet.
+    const { score, deductions } = safetyPerformance({});
+    expect(score).toBe(100);
+    expect(deductions).toEqual([]);
+  });
+
+  it('leaves a fully kept month with no findings at 100', () => {
+    expect(safetyPerformance(active).score).toBe(100);
+  });
+
+  it('takes 5 off per medical treatment case', () => {
+    expect(safetyPerformance({ ...active, MEDICAL_TREATMENT_CASE: 2 }).score).toBe(90);
+  });
+
+  it('takes 10 off per lost time injury', () => {
+    expect(safetyPerformance({ ...active, LOST_TIME_INJURY: 2 }).score).toBe(80);
+  });
+
+  it('costs nothing when everything raised was closed', () => {
     expect(
-      safetyPerformance({
-        UNSAFE_ACTS: 10,
-        UNSAFE_CONDITIONS: 6,
-        SAFETY_OBSERVATION: 4,
-        UNSAFE_ACTS_CLOSED: 9,
-        UNSAFE_CONDITIONS_CLOSED: 5,
-        SAFETY_OBSERVATION_CLOSED: 4,
-      }),
-    ).toBe(90);
+      safetyPerformance({ ...active, UNSAFE_ACTS: 10, UNSAFE_ACTS_CLOSED: 10 }).score,
+    ).toBe(100);
   });
 
-  it('is null when nothing was raised at all', () => {
-    // A site with no findings has no closure rate. Printing 100% would read as
-    // a score rather than an absence of data.
-    expect(safetyPerformance({})).toBeNull();
-    expect(safetyPerformance({ UNSAFE_ACTS_CLOSED: 3 })).toBeNull();
+  it('costs a point per finding left open', () => {
+    // The client's own worked example: 12 raised against 10 closed is −2.
+    expect(
+      safetyPerformance({ ...active, UNSAFE_ACTS: 12, UNSAFE_ACTS_CLOSED: 10 }).score,
+    ).toBe(98);
   });
 
-  it("caps at 100 when yesterday's findings close today", () => {
-    expect(safetyPerformance({ UNSAFE_ACTS: 2, UNSAFE_ACTS_CLOSED: 9 })).toBe(100);
+  it('scores each raised/closed pair on its own', () => {
+    // Over-closing unsafe acts must not cover the two observations nobody
+    // went back to.
+    const { score } = safetyPerformance({
+      ...active,
+      UNSAFE_ACTS: 2,
+      UNSAFE_ACTS_CLOSED: 9,
+      SAFETY_OBSERVATION: 5,
+      SAFETY_OBSERVATION_CLOSED: 3,
+    });
+    expect(score).toBe(98);
   });
 
-  it('is 0 when everything raised is still open', () => {
-    expect(safetyPerformance({ UNSAFE_ACTS: 5 })).toBe(0);
+  it('takes one point per routine activity the month never recorded', () => {
+    // Once for the month, not once per day: a per-day rule would reach −78 and
+    // leave a month with a lost time injury scoring better than a quiet one.
+    const { score } = safetyPerformance({ TOOLBOX_TALK: 20 });
+    expect(score).toBe(97);
+  });
+
+  it('floors at 0 rather than going negative', () => {
+    expect(safetyPerformance({ ...active, LOST_TIME_INJURY: 20 }).score).toBe(0);
+  });
+
+  it('shows its working, heaviest deduction first', () => {
+    const { score, deductions } = safetyPerformance({
+      ...active,
+      LOST_TIME_INJURY: 1,
+      MEDICAL_TREATMENT_CASE: 1,
+      UNSAFE_CONDITIONS: 4,
+      UNSAFE_CONDITIONS_CLOSED: 3,
+    });
+    expect(score).toBe(84);
+    expect(deductions.map((d) => d.points)).toEqual([10, 5, 1]);
+    expect(deductions[0].label).toBe('Lost time injury');
+    expect(deductions[2].detail).toBe('4 raised, 3 closed');
   });
 });

@@ -147,22 +147,129 @@ export function safetyWindow(period: SafetyPeriodName, date: Date): { start: Dat
 }
 
 /**
- * Safety performance: the share of everything raised that has been closed.
- *
- * Unsafe acts, unsafe conditions and safety observations all have a matching
- * "closed" count, so the three pair up into one closure rate. Returns null when
- * nothing was raised at all — a site with no findings has no closure rate, and
- * printing 100% there would read as a score rather than an absence.
- *
- * Capped at 100: closing more items than were raised in the same window is
- * normal (yesterday's findings close today) but a figure above 100% on a
- * performance dial reads as a bug.
+ * Points taken off the month for each thing that went wrong. Chosen by the
+ * client; kept in one object so the weights can be retuned without hunting
+ * through the scoring function.
  */
-export function safetyPerformance(totals: Partial<Record<SafetyMetric, number>>): number | null {
+export const SAFETY_SCORE_WEIGHTS = {
+  /** Per medical treatment case. */
+  medicalTreatmentCase: 5,
+  /** Per lost time injury. */
+  lostTimeInjury: 10,
+  /** Once for the whole month, per metric, when the month recorded none of it. */
+  inactiveMetric: 1,
+  /** Per finding raised in the month and not closed within it. */
+  openFinding: 1,
+} as const;
+
+/**
+ * The routine safety work a month is expected to show at least some of.
+ *
+ * Scored once for the month rather than once per day: a per-day penalty over a
+ * 26-day month reaches −78 across these four, which would leave a month with a
+ * lost time injury scoring better than one with thin paperwork.
+ */
+export const ACTIVITY_METRICS: SafetyMetric[] = [
+  'TOOLBOX_TALK',
+  'TRAINING',
+  'WORK_PERMIT',
+  'LABOUR_INDUCTION',
+];
+
+/**
+ * Findings and their matching closure counts.
+ *
+ * Scored pair by pair, so closing more unsafe acts than were raised cannot
+ * quietly cover for observations nobody went back to.
+ */
+export const FINDING_PAIRS: [raised: SafetyMetric, closed: SafetyMetric][] = [
+  ['UNSAFE_ACTS', 'UNSAFE_ACTS_CLOSED'],
+  ['UNSAFE_CONDITIONS', 'UNSAFE_CONDITIONS_CLOSED'],
+  ['SAFETY_OBSERVATION', 'SAFETY_OBSERVATION_CLOSED'],
+];
+
+/** One line of the score's working, for the card that explains the number. */
+export interface SafetyScoreLine {
+  label: string;
+  /** Always positive — the amount taken off. */
+  points: number;
+  /** How the deduction was arrived at, e.g. "12 raised, 10 closed". */
+  detail: string;
+}
+
+export interface SafetyScore {
+  /** 0–100. */
+  score: number;
+  /** Every deduction applied, largest first. Empty means a clean month. */
+  deductions: SafetyScoreLine[];
+}
+
+/**
+ * Safety performance: a month opens at 100 and loses points for what goes wrong.
+ *
+ * Incidents cost the most, routine work that never happened costs a point each,
+ * and every finding left open at the end of the month costs a point. Floored at
+ * 0 — a month bad enough to go negative is already telling the whole story at
+ * zero, and a negative percentage on a dial reads as a bug.
+ *
+ * A month with nothing recorded at all scores 100 rather than 96: on the first
+ * of the month no toolbox talk has been missed yet, it simply has not happened.
+ * Once anything is entered the month is being kept, and the inactivity
+ * deductions apply in full.
+ *
+ * Note the deliberate trade the client accepted: raising a finding and not
+ * closing it costs a point, so the score is not neutral to how much a site
+ * reports. Closing what you raise is what protects it.
+ */
+export function safetyPerformance(totals: Partial<Record<SafetyMetric, number>>): SafetyScore {
   const n = (m: SafetyMetric) => totals[m] ?? 0;
-  const raised = n('UNSAFE_ACTS') + n('UNSAFE_CONDITIONS') + n('SAFETY_OBSERVATION');
-  const closed =
-    n('UNSAFE_ACTS_CLOSED') + n('UNSAFE_CONDITIONS_CLOSED') + n('SAFETY_OBSERVATION_CLOSED');
-  if (raised === 0) return null;
-  return Math.min(100, Math.round((closed / raised) * 100));
+  const deductions: SafetyScoreLine[] = [];
+
+  const incidents: [SafetyMetric, number][] = [
+    ['LOST_TIME_INJURY', SAFETY_SCORE_WEIGHTS.lostTimeInjury],
+    ['MEDICAL_TREATMENT_CASE', SAFETY_SCORE_WEIGHTS.medicalTreatmentCase],
+  ];
+  for (const [metric, weight] of incidents) {
+    const count = n(metric);
+    if (count > 0) {
+      deductions.push({
+        label: specFor(metric)?.label ?? metric,
+        points: count * weight,
+        detail: `${count} × ${weight} points`,
+      });
+    }
+  }
+
+  for (const [raisedMetric, closedMetric] of FINDING_PAIRS) {
+    const raised = n(raisedMetric);
+    const closed = n(closedMetric);
+    // Closing more than was raised is normal — yesterday's findings close today
+    // — and earns nothing back rather than offsetting another category.
+    const open = Math.max(0, raised - closed);
+    if (open > 0) {
+      deductions.push({
+        label: `${specFor(raisedMetric)?.label ?? raisedMetric} left open`,
+        points: open * SAFETY_SCORE_WEIGHTS.openFinding,
+        detail: `${raised} raised, ${closed} closed`,
+      });
+    }
+  }
+
+  // Nothing entered at all is a month not yet started, not a month failed.
+  const recorded = Object.keys(totals).length > 0;
+  if (recorded) {
+    for (const metric of ACTIVITY_METRICS) {
+      if (n(metric) === 0) {
+        deductions.push({
+          label: `No ${(specFor(metric)?.label ?? metric).toLowerCase()}`,
+          points: SAFETY_SCORE_WEIGHTS.inactiveMetric,
+          detail: 'None recorded this month',
+        });
+      }
+    }
+  }
+
+  const total = deductions.reduce((a, d) => a + d.points, 0);
+  deductions.sort((a, b) => b.points - a.points);
+  return { score: Math.max(0, 100 - total), deductions };
 }
