@@ -401,6 +401,43 @@ function fitText(doc: Doc, s: string, maxW: number): string {
 }
 
 /**
+ * `fitText` for a run that will be drawn with letter tracking.
+ *
+ * `widthOfString` knows nothing about `characterSpacing`, so a label measured
+ * bare and then drawn tracked overruns the box it was fitted to. That is how
+ * the safety sheet's score tile wrapped "SAFETY SCORE, MONTH (TARGET 90%)" onto
+ * a second line and printed it through the 84% underneath.
+ */
+function fitTracked(doc: Doc, s: string, maxW: number, tracking: number): string {
+  const width = (t: string) => doc.widthOfString(t) + t.length * tracking;
+  if (maxW <= 0) return '';
+  if (width(s) <= maxW) return s;
+  let lo = 0;
+  let hi = s.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (width(`${s.slice(0, mid).trimEnd()}…`) <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? `${s.slice(0, lo).trimEnd()}…` : '';
+}
+
+/**
+ * An SVG arc command for pdfkit's `path()`, in PDF coordinates (y grows down),
+ * with angles in degrees measured clockwise from three o'clock.
+ */
+function arcPath(cx: number, cy: number, r: number, fromDeg: number, toDeg: number): string {
+  const at = (deg: number) => {
+    const a = (deg * Math.PI) / 180;
+    return [cx + r * Math.cos(a), cy + r * Math.sin(a)] as const;
+  };
+  const [x0, y0] = at(fromDeg);
+  const [x1, y1] = at(toDeg);
+  const large = Math.abs(toDeg - fromDeg) > 180 ? 1 : 0;
+  return `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`;
+}
+
+/**
  * A bar rounded on its data-end only and square at the baseline, so the mark
  * grows out of the axis instead of floating free of it. `side` names the end
  * the value grows towards.
@@ -1193,13 +1230,84 @@ function drawKpiTile(
     .fillColor(accent)
     .fill();
   doc.font('Helvetica').fontSize(7).fillColor(INK_3);
-  doc.text(fitText(doc, label.toUpperCase(), w - 40), x + 24, y + 15, {
+  doc.text(fitTracked(doc, label.toUpperCase(), w - 40, 0.6), x + 24, y + 15, {
     width: textW(w - 34),
     lineBreak: false,
     characterSpacing: 0.6,
   });
   doc.font('Helvetica-Bold').fontSize(19).fillColor(INK);
   doc.text(fitText(doc, value, w - 34), x + 24, y + 29, { width: textW(w - 34), lineBreak: false });
+}
+
+/**
+ * The month's safety score as a 270° arc, with the target marked on it.
+ *
+ * The number alone was already in a headline tile; what the tile could not show
+ * is how far off target the month is, and a client reads that off a dial in a
+ * glance they would otherwise spend subtracting. The arc is the sheet's only
+ * radial mark, which is what lets it carry the panel — the rest of the page is
+ * lines, bars and rows.
+ */
+function drawScoreDial(doc: Doc, cx: number, cy: number, r: number, value: number, target: number) {
+  const START = 135;
+  const SPAN = 270;
+  const pct = Math.max(0, Math.min(100, value));
+  // The same three bands the panel's dial uses, so screen and sheet agree on
+  // when a month has stopped being green.
+  const tone = pct >= target ? SERIES[5] : pct >= target - 15 ? '#E0A438' : SERIES[1];
+  const thickness = Math.max(6, r * 0.28);
+
+  doc.save();
+  doc.lineCap('round').lineWidth(thickness);
+  doc
+    .path(arcPath(cx, cy, r, START, START + SPAN))
+    .strokeColor(GRID)
+    .stroke();
+  if (pct > 0) {
+    doc
+      .path(arcPath(cx, cy, r, START, START + (SPAN * pct) / 100))
+      .strokeColor(tone)
+      .stroke();
+  }
+
+  // The target as a small pointer outside the ring, aimed at it.
+  //
+  // A radial tick drawn across the band was the first try and it reads as
+  // damage rather than as a marker: at any score near the target it lands
+  // between the two round arc caps, and three overlapping shapes in one arc
+  // second look like a rendering fault. Outside the ring the pointer has room
+  // to be a pointer. Filled as a triangle rather than stroked, because a stroke
+  // would inherit the round cap the arcs need.
+  const ta = ((START + (SPAN * Math.max(0, Math.min(100, target))) / 100) * Math.PI) / 180;
+  const at = (rad: number, a: number) => [cx + rad * Math.cos(a), cy + rad * Math.sin(a)] as const;
+  const tip = r + thickness / 2 + 1;
+  const back = tip + 4.5;
+  const spread = 3.2 / r;
+  const [ax, ay] = at(tip, ta);
+  const [bx, by] = at(back, ta - spread);
+  const [ccx, ccy] = at(back, ta + spread);
+  doc.moveTo(ax, ay).lineTo(bx, by).lineTo(ccx, ccy).closePath().fillColor(INK_2).fill();
+  doc.restore();
+
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(r * 0.58)
+    .fillColor(INK);
+  doc.text(`${Math.round(value)}%`, cx - r, cy - r * 0.42, {
+    width: textW(r * 2),
+    align: 'center',
+    lineBreak: false,
+  });
+  // Under the dial rather than inside it. In the ring's open foot the caption
+  // cleared the arc by a hair and read as though it were touching it; below the
+  // whole mark it is unambiguously a caption.
+  doc.font('Helvetica').fontSize(6).fillColor(INK_3);
+  doc.text(`TARGET ${target}%`, cx - r, cy + r + 7, {
+    width: textW(r * 2),
+    align: 'center',
+    lineBreak: false,
+    characterSpacing: 0.4,
+  });
 }
 
 /** Multi-series line chart for the safety trend. */
@@ -1251,9 +1359,33 @@ function drawMultiLine(
     doc.text(fmt(v), x, gy - 3, { width: textW(gutter - 6), align: 'right', lineBreak: false });
   }
 
+  // Each series gets a wash under its line as well as the line itself. Three
+  // hairlines on a dark card is what made this panel read as a diagram of
+  // nothing; the fill gives each series a body, and at this opacity three of
+  // them can overlap without any one becoming unreadable.
+  //
+  // A flat low-opacity fill, deliberately not a gradient: pdfkit expresses
+  // gradient-stop alpha as a soft mask, which not every PDF viewer honours, and
+  // one that ignores it paints a solid saturated block over the chart.
+  const base = plot.y + plot.h;
+  series.forEach((s, i) => {
+    if (s.values.length === 0) return;
+    doc.save();
+    doc.moveTo(px(0), base);
+    s.values.forEach((v, k) => doc.lineTo(px(k), scaleY(v)));
+    doc
+      .lineTo(px(s.values.length - 1), base)
+      .closePath()
+      .fillColor(SERIES[i % SERIES.length])
+      .fillOpacity(0.1)
+      .fill();
+    doc.restore();
+    doc.fillOpacity(1);
+  });
+
   series.forEach((s, i) => {
     doc
-      .lineWidth(1.6)
+      .lineWidth(1.9)
       .strokeColor(SERIES[i % SERIES.length])
       .lineJoin('round')
       .lineCap('round');
@@ -1263,11 +1395,20 @@ function drawMultiLine(
     doc.stroke();
   });
 
+  // Build the tick list before drawing any of it. Forcing the last day on top
+  // of a regular run is what printed "29 Jul" and "30 Jul" through each other
+  // at the right edge; if the final tick would crowd the one before it, that
+  // one gives way rather than both being drawn.
   const every = Math.max(1, Math.ceil(n / 8));
-  days.forEach((day, i) => {
-    if (i % every !== 0 && i !== n - 1) return;
-    const d = new Date(`${day}T00:00:00.000Z`);
-    doc.font('Helvetica').fontSize(6).fillColor(INK_3);
+  const ticks: number[] = [];
+  for (let i = 0; i < n; i += every) ticks.push(i);
+  if (ticks[ticks.length - 1] !== n - 1) {
+    if (n - 1 - ticks[ticks.length - 1] < every * 0.6) ticks.pop();
+    ticks.push(n - 1);
+  }
+  doc.font('Helvetica').fontSize(6).fillColor(INK_3);
+  ticks.forEach((i) => {
+    const d = new Date(`${days[i]}T00:00:00.000Z`);
     doc.text(
       d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }),
       px(i) - 16,
@@ -1277,26 +1418,35 @@ function drawMultiLine(
   });
 }
 
-/** Raised against closed, grouped by window. */
-function drawGroupedBars(
+/**
+ * Raised against closed: one meter per window, not columns on a shared axis.
+ *
+ * The three windows are nested — today sits inside this week, which sits inside
+ * this month — so a common scale was never comparing like with like. The
+ * monthly column is tall by construction, and beside it the daily pair
+ * collapsed to two nubs a couple of points high that no client could read a
+ * closure rate off. Each window gets its own full-length track instead, and the
+ * length of the fill becomes the one figure that *is* comparable across them.
+ *
+ * The fill is clamped at the track but the percentage is not: closures land in
+ * the window they happen in, not the one the finding was raised in, so a quiet
+ * week tidying up a busy one legitimately closes more than it raised.
+ */
+function drawClosureMeters(
   doc: Doc,
   box: { x: number; y: number; w: number; h: number },
   rows: { bucket: string; raised: number; closed: number }[],
 ) {
   const { x, y, w, h } = box;
-  const max = Math.max(...rows.flatMap((r) => [r.raised, r.closed]), 0);
-  if (rows.length === 0 || max === 0) {
+  if (rows.length === 0 || rows.every((r) => r.raised === 0 && r.closed === 0)) {
     return emptyPanel(doc, box, 'Nothing raised in this period');
   }
   const RAISED = '#E0A438';
   const CLOSED = '#16AD52';
 
-  const legendH = 14;
-  const xBand = 14;
-  const plot = { x, y: y + legendH, w, h: h - legendH - xBand };
-  const { ceiling } = niceScale(max);
-  const scaleY = (v: number) => plot.y + plot.h - (v / ceiling) * plot.h;
-
+  // The key sits above the meters rather than beside them: it explains what the
+  // track and the fill *are*, which a reader needs once, not per row.
+  const legendH = 16;
   let lx = x;
   for (const [label, colour] of [
     ['Raised', RAISED],
@@ -1311,34 +1461,50 @@ function drawGroupedBars(
     lx += 11 + doc.widthOfString(label) + 12;
   }
 
-  const slot = plot.w / rows.length;
-  const barW = Math.min(16, slot * 0.28);
+  const rowH = (h - legendH) / rows.length;
+  const trackH = Math.min(11, Math.max(7, rowH * 0.24));
+  const pctW = 34;
+  // A meter is a label line plus its track; centre that block in the slot the
+  // row gets, or three of them bunch at the top of a tall panel and leave a
+  // dead band underneath.
+  const blockH = 14 + trackH;
+
   rows.forEach((r, i) => {
-    const centre = plot.x + slot * i + slot / 2;
-    (
-      [
-        [r.raised, RAISED, -1],
-        [r.closed, CLOSED, 1],
-      ] as const
-    ).forEach(([v, colour, side]) => {
-      const bh = Math.max(1.5, plot.y + plot.h - scaleY(v));
-      // A 2px gap between the pair: surface does the separating, not a stroke.
-      const bx = centre + side * 1 + (side < 0 ? -barW : 0);
-      barPath(doc, bx, plot.y + plot.h - bh, barW, bh, 3, 'top');
-      doc.fillColor(colour).fill();
-      doc.font('Helvetica-Bold').fontSize(6.5).fillColor(INK_2);
-      doc.text(fmt(v), bx - 4, plot.y + plot.h - bh - 9, {
-        width: barW + 8,
-        align: 'center',
-        lineBreak: false,
-      });
-    });
+    const top = y + legendH + i * rowH + (rowH - blockH) / 2;
+    const rate = r.raised > 0 ? (r.closed / r.raised) * 100 : null;
+
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(INK);
+    doc.text(r.bucket, x, top, { width: textW(w - pctW), lineBreak: false });
+    const bucketW = doc.widthOfString(r.bucket);
     doc.font('Helvetica').fontSize(6.5).fillColor(INK_3);
-    doc.text(r.bucket, centre - slot / 2, plot.y + plot.h + 5, {
-      width: textW(slot),
-      align: 'center',
+    doc.text(
+      fitText(doc, `${fmt(r.closed)} closed of ${fmt(r.raised)} raised`, w - pctW - bucketW - 12),
+      x + bucketW + 8,
+      top + 1.5,
+      { width: textW(w - pctW - bucketW - 8), lineBreak: false },
+    );
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor(rate === null ? INK_3 : rate >= 85 ? CLOSED : rate >= 60 ? RAISED : SERIES[1]);
+    doc.text(rate === null ? '–' : `${Math.round(rate)}%`, x + w - pctW, top - 1.5, {
+      width: textW(pctW),
+      align: 'right',
       lineBreak: false,
     });
+
+    const by = top + 14;
+    doc.save();
+    barPath(doc, x, by, w, trackH, trackH / 2, 'right');
+    doc.fillColor(RAISED).fillOpacity(0.22).fill();
+    doc.restore();
+    doc.fillOpacity(1);
+    if (rate !== null && rate > 0) {
+      const bw = Math.max(trackH, (Math.min(100, rate) / 100) * w);
+      barPath(doc, x, by, bw, trackH, trackH / 2, 'right');
+      doc.fillColor(CLOSED).fill();
+    }
   });
 }
 
@@ -1402,11 +1568,9 @@ export function renderSafetyPdf(
       ["Today's manpower", fmt(r.kpis.dailyManpower), SERIES[0]],
       ['Total manpower as of now', fmt(r.kpis.totalManpower), SERIES[4]],
       ['Total safe man-hours', fmt(r.kpis.totalSafeManHours), SERIES[5]],
-      [
-        `Safety score, month (target ${r.kpis.safetyPerformanceTarget}%)`,
-        `${r.kpis.safetyPerformance}%`,
-        SERIES[3],
-      ],
+      // Short on purpose: the dial in the score panel carries the target, and
+      // this tile only has room for a label that stays on one line.
+      ['Safety score this month', `${r.kpis.safetyPerformance}%`, SERIES[3]],
     ];
     tiles.forEach(([label, value, accent], i) => {
       drawKpiTile(doc, M + (tileW + gap) * i, y, tileW, tileH, label, value, accent);
@@ -1414,7 +1578,10 @@ export function renderSafetyPdf(
     y += tileH + gap;
 
     // ---- Trend + observations + how the score was reached ----
-    const midH = 168;
+    // Taller than the row it replaced: the score panel now leads with a dial,
+    // and the height it needs comes out of the statistics list below, which was
+    // leaving its bottom quarter blank anyway.
+    const midH = 196;
     const trendW = contentW * 0.4;
     const obsW = contentW * 0.28;
     drawMultiLine(
@@ -1423,22 +1590,41 @@ export function renderSafetyPdf(
       r.trend.days,
       r.trend.series,
     );
-    drawGroupedBars(
+    drawClosureMeters(
       doc,
       panel(doc, M + trendW + gap, y, obsW, midH, 'Safety observations', 'Raised against closed'),
       r.observations,
     );
+    const scoreBox = panel(
+      doc,
+      M + trendW + obsW + gap * 2,
+      y,
+      contentW - trendW - obsW - gap * 2,
+      midH,
+      'Safety score',
+      'The month, and every point off it',
+    );
+    // Dial beside the working, not above it. Stacked, the dial ate half the
+    // panel and the deductions were cut to three of four with a "+ 1 more" —
+    // and the whole point of printing the working is that it is complete.
+    const dialR = 29;
+    const dialCol = dialR * 2 + 6;
+    drawScoreDial(
+      doc,
+      scoreBox.x + dialCol / 2,
+      scoreBox.y + dialR + 4,
+      dialR,
+      r.kpis.safetyPerformance,
+      r.kpis.safetyPerformanceTarget,
+    );
     drawScoreLines(
       doc,
-      panel(
-        doc,
-        M + trendW + obsW + gap * 2,
-        y,
-        contentW - trendW - obsW - gap * 2,
-        midH,
-        'Safety score',
-        'Every point taken off the month',
-      ),
+      {
+        x: scoreBox.x + dialCol + 12,
+        y: scoreBox.y,
+        w: scoreBox.w - dialCol - 12,
+        h: scoreBox.h,
+      },
       r.safetyPerformanceDeductions,
     );
     y += midH + gap;
@@ -1448,7 +1634,7 @@ export function renderSafetyPdf(
     const listW = contentW * 0.62;
     const listBox = panel(doc, M, y, listW, lowH, 'Safety statistics', 'Every tracked item');
     drawStatList(doc, listBox, r.statistics);
-    drawBars(
+    drawCategoryBars(
       doc,
       panel(
         doc,
@@ -1459,7 +1645,7 @@ export function renderSafetyPdf(
         'Category-wise breakup',
         'Findings and incidents',
       ),
-      r.categoryBreakup.rows.map((b) => ({ name: b.label, count: b.value })),
+      r.categoryBreakup.rows,
     );
 
     doc.font('Helvetica').fontSize(6.5).fillColor(INK_3);
@@ -1528,6 +1714,71 @@ function drawScoreLines(
   }
 }
 
+/**
+ * Findings and incidents by category.
+ *
+ * Its own function rather than `drawBars`, because it breaks that chart's rule
+ * on purpose: there, one measure means one colour, since hue by rank would
+ * double-encode the length. Here the rows are genuinely different *kinds* of
+ * event — an unsafe act is not a smaller lost-time injury — so hue is carrying
+ * identity rather than repeating the bar. It comes from this sheet's own
+ * `SERIES`, which is stepped for the dark panel; the admin donut uses the
+ * two-mode palette, so a category is not guaranteed the same hue in both
+ * places. The share rides beside the count because "132" means nothing to a
+ * client until they know it is two findings in five.
+ */
+function drawCategoryBars(
+  doc: Doc,
+  box: { x: number; y: number; w: number; h: number },
+  rows: { label: string; value: number; percent: number }[],
+) {
+  const { x, y, w, h } = box;
+  if (rows.length === 0) return emptyPanel(doc, box, 'Nothing recorded in this period');
+
+  const count = Math.max(1, Math.min(rows.length, Math.floor(h / 18)));
+  const rowH = Math.max(18, Math.min(34, h / count));
+  const shown = rows.slice(0, count);
+  const max = Math.max(...shown.map((r) => r.value), 1);
+  const labelW = Math.min(104, w * 0.42);
+  // Wide enough for the count and the share to sit in their own columns. They
+  // shared one before and "132" printed through "43%".
+  const countW = 30;
+  const shareW = 24;
+  const valueW = countW + shareW;
+  const trackX = x + labelW + 8;
+  const trackW = Math.max(10, w - labelW - valueW - 20);
+  const barH = Math.min(11, rowH - 9);
+
+  shown.forEach((r, i) => {
+    const colour = SERIES[i % SERIES.length];
+    const cy = y + i * rowH;
+    const by = cy + (rowH - barH) / 2 - 2;
+    doc.font('Helvetica').fontSize(7.5).fillColor(INK_2);
+    doc.text(fitText(doc, r.label, labelW), x, by + 1, {
+      width: textW(labelW),
+      lineBreak: false,
+    });
+    barPath(doc, trackX, by, trackW, barH, 4, 'right');
+    doc.fillColor(GRID).fill();
+    const bw = Math.max(2, (r.value / max) * trackW);
+    barPath(doc, trackX, by, bw, barH, 4, 'right');
+    doc.fillColor(colour).fill();
+
+    doc.font('Helvetica-Bold').fontSize(7.5).fillColor(INK);
+    doc.text(fmt(r.value), trackX + trackW + 8, by + 1, {
+      width: textW(countW),
+      align: 'right',
+      lineBreak: false,
+    });
+    doc.font('Helvetica').fontSize(6.5).fillColor(INK_3);
+    doc.text(`${r.percent}%`, trackX + trackW + 8 + countW, by + 1.5, {
+      width: textW(shareW),
+      align: 'right',
+      lineBreak: false,
+    });
+  });
+}
+
 /** The tracked-item list, in as many columns as the panel affords. */
 function drawStatList(
   doc: Doc,
@@ -1536,9 +1787,16 @@ function drawStatList(
 ) {
   const { x, y, w, h } = box;
   if (rows.length === 0) return emptyPanel(doc, box, 'Nothing tracked yet');
-  const rowH = 13.5;
-  const perCol = Math.max(1, Math.floor(h / rowH));
-  const cols = Math.max(1, Math.ceil(rows.length / perCol));
+  const minRowH = 13.5;
+  // How many columns the panel needs at the tightest row height it allows...
+  const cols = Math.max(1, Math.ceil(rows.length / Math.max(1, Math.floor(h / minRowH))));
+  // ...then even them out and let the rows breathe into whatever is left. Both
+  // steps matter: pinned at the minimum, twenty-one items left the bottom
+  // quarter of a half-page panel blank, which reads as a chart that failed to
+  // load — and stretching the height without also re-deriving how many rows a
+  // column holds simply ran the last of them out through the panel floor.
+  const perCol = Math.ceil(rows.length / cols);
+  const rowH = Math.max(minRowH, Math.min(20, h / perCol));
   const colW = (w - 10 * (cols - 1)) / cols;
   const valueW = 30;
 

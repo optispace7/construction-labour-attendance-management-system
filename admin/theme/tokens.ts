@@ -265,6 +265,18 @@ export function cssVariables(mode: ColorMode): Record<string, string> {
     const rgb = channels(value);
     if (rgb) vars[`${name}-rgb`] = rgb;
   }
+  // The categorical hues too, as `--clams-series-1` … `-8`.
+  //
+  // Recharts needs a concrete value for an SVG *attribute* — `stroke="var(…)"`
+  // does not resolve — so charts keep reading the palette through `useTokens`.
+  // Plain DOM in those panels (legend dots, share bars, a hand-drawn dial) must
+  // not: the server renders in dark mode, and React 18 reports a hydration
+  // mismatch on a colour prop without ever patching the attribute, so a light
+  // page keeps whatever hue the server picked. A `var()` is the same string in
+  // both renders and lets CSS choose the value.
+  categoricalPalette(mode).forEach((hex, i) => {
+    vars[`--clams-series-${i + 1}`] = hex;
+  });
   return vars;
 }
 

@@ -91,6 +91,25 @@ export function useTokens() {
 }
 
 /**
+ * A token as a CSS `var()` rather than a resolved value.
+ *
+ * For plain DOM — a legend swatch, a meter, a hand-drawn SVG — always prefer
+ * this to `useTokens`. The server renders in dark mode, so a resolved hex is
+ * part of the server's HTML; when the client renders light, React 18 logs a
+ * prop mismatch and leaves the attribute exactly as the server wrote it, and
+ * the element keeps its dark-mode colour on a white page for the life of the
+ * document. A `var()` is byte-identical in both renders, so there is nothing to
+ * mismatch, and it repaints on the theme toggle without React at all.
+ *
+ * Recharts still needs `useTokens`: SVG presentation *attributes* do not
+ * resolve `var()`, and that is what it writes its colours into.
+ */
+export const cssToken = (name: string) => `var(--clams-${name})`;
+
+/** The categorical hue at `i`, as a `var()`. Wraps like the palette itself. */
+export const cssSeries = (i: number) => `var(--clams-series-${(i % 8) + 1})`;
+
+/**
  * True only for the chart's first second on screen.
  *
  * Recharts replays its entrance whenever the container is re-measured, so a
@@ -98,7 +117,7 @@ export function useTokens() {
  * redraw. That reads as a glitch, not as polish. Switching animation off once
  * the entrance has played keeps the introduction and drops the flicker.
  */
-function useAnimateOnce(enabled = true) {
+export function useAnimateOnce(enabled = true) {
   const [animate, setAnimate] = React.useState(enabled);
   React.useEffect(() => {
     if (!enabled) return;

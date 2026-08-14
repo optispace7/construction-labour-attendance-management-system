@@ -6,11 +6,11 @@ import { Alert, Box, Button, MenuItem, Stack, TextField, Typography } from '@mui
 import { PageHeader } from '@/components/PageHeader';
 import { FilterBar } from '@/components/ui/FilterBar';
 import { MetricCard } from '@/components/dash/MetricCard';
-import { AttendanceRing } from '@/components/dash/charts';
 import { ChartPanel, Item, Panel, PanelHead, Stagger } from '@/components/dash/ui';
 import {
   ObservationBars,
   SafetyDonut,
+  SafetyScoreDial,
   SafetyTrend,
   type ObservationRow,
   type SliceRow,
@@ -249,11 +249,10 @@ function SafetyStatisticsBoard() {
                   defined as a month that opens at 100 and is worn down. */}
               <PanelHead title="Safety performance" subtitle="Score this month" />
               <div className="flex flex-1 flex-col items-center justify-center gap-2 pb-4">
-                <AttendanceRing
+                <SafetyScoreDial
                   value={d?.kpis.safetyPerformance ?? null}
-                  label="score"
-                  caption={`Target ≥ ${d?.kpis.safetyPerformanceTarget ?? 90}%`}
-                  size={112}
+                  target={d?.kpis.safetyPerformanceTarget ?? 90}
+                  size={124}
                 />
                 <ScoreWorking lines={d?.kpis.safetyPerformanceDeductions ?? []} loading={loading} />
               </div>
@@ -291,7 +290,7 @@ function SafetyStatisticsBoard() {
               bodyHeight={260}
               skeleton="donut"
             >
-              <SafetyDonut rows={d?.summary ?? []} centreLabel="total" height={150} />
+              <SafetyDonut rows={d?.summary ?? []} centreLabel="total" height={164} />
             </ChartPanel>
           </Item>
           <Item>
@@ -306,7 +305,7 @@ function SafetyStatisticsBoard() {
               bodyHeight={260}
               skeleton="bars"
             >
-              <ObservationBars rows={d?.observations ?? []} height={240} />
+              <ObservationBars rows={d?.observations ?? []} height={266} />
             </ChartPanel>
           </Item>
         </div>
@@ -338,7 +337,7 @@ function SafetyStatisticsBoard() {
               bodyHeight={240}
               skeleton="donut"
             >
-              <SafetyDonut rows={d?.categoryBreakup.rows ?? []} centreLabel="total" height={150} />
+              <SafetyDonut rows={d?.categoryBreakup.rows ?? []} centreLabel="total" height={164} />
             </ChartPanel>
           </Item>
           <Item>
