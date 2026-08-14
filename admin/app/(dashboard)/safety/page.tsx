@@ -33,6 +33,13 @@ interface StatRow {
   value: number;
 }
 
+/** One point taken off the month's safety score, with how it was arrived at. */
+interface ScoreDeduction {
+  label: string;
+  points: number;
+  detail: string;
+}
+
 interface SafetyStats {
   period: Period;
   date: string;
@@ -44,7 +51,8 @@ interface SafetyStats {
     dailyManpower: number;
     totalManpower: number;
     totalSafeManHours: number;
-    safetyPerformance: number | null;
+    safetyPerformance: number;
+    safetyPerformanceDeductions: ScoreDeduction[];
     safetyPerformanceTarget: number;
   };
   trend: { days: string[]; series: TrendSeries[] };
@@ -93,13 +101,18 @@ function SafetyStatisticsBoard() {
   const err = stats.isError ? apiErrorMessage(stats.error, 'Could not load the statistics.') : null;
   const loading = stats.isLoading && !d;
 
-  /** Pull the PDF through the proxy and hand it to the browser as a download. */
+  /**
+   * Pull the PDF and hand it to the browser as a download.
+   *
+   * Through /api/safety-report rather than the JSON proxy: that proxy parses
+   * every backend reply as JSON, so PDF bytes came back as a 500.
+   */
   async function exportReport() {
     setExporting(true);
     setExportError(null);
     try {
       const res = await fetch(
-        `/api/proxy/safety/stats/pdf?period=${period}&date=${date}&siteId=${siteId}`,
+        `/api/safety-report?period=${period}&date=${date}&siteId=${siteId}`,
       );
       if (!res.ok) throw new Error(`Export failed (${res.status})`);
       const blob = await res.blob();
@@ -232,17 +245,17 @@ function SafetyStatisticsBoard() {
           </Item>
           <Item>
             <Panel className="flex h-full flex-col">
-              <PanelHead
-                title="Safety performance"
-                subtitle={`Closure rate ${periodLabel === 'today' ? 'this month' : periodLabel}`}
-              />
-              <div className="grid flex-1 place-items-center pb-4">
+              {/* Always the month, whatever period is selected — the score is
+                  defined as a month that opens at 100 and is worn down. */}
+              <PanelHead title="Safety performance" subtitle="Score this month" />
+              <div className="flex flex-1 flex-col items-center justify-center gap-2 pb-4">
                 <AttendanceRing
                   value={d?.kpis.safetyPerformance ?? null}
-                  label="closed"
+                  label="score"
                   caption={`Target ≥ ${d?.kpis.safetyPerformanceTarget ?? 90}%`}
-                  size={124}
+                  size={112}
                 />
+                <ScoreWorking lines={d?.kpis.safetyPerformanceDeductions ?? []} loading={loading} />
               </div>
             </Panel>
           </Item>
@@ -398,6 +411,41 @@ function SafetyStatisticsBoard() {
         man-days at ten hours each and do not reset after an incident.
       </Typography>
     </Box>
+  );
+}
+
+/**
+ * The score's working, under the dial.
+ *
+ * A weighted score is only as trusted as its arithmetic is visible: without
+ * this the card says "84%" and the first question in the review meeting is
+ * "why 84?". Scrolls rather than growing, so a bad month cannot stretch the
+ * card past the three KPI tiles beside it.
+ */
+function ScoreWorking({ lines, loading }: { lines: ScoreDeduction[]; loading: boolean }) {
+  if (loading) return null;
+  if (lines.length === 0) {
+    return (
+      <p className="px-5 text-center text-[12px] text-ink-faint">
+        Nothing deducted — a clean month.
+      </p>
+    );
+  }
+  return (
+    <div className="max-h-[104px] w-full overflow-y-auto px-5">
+      {lines.map((line) => (
+        <div
+          key={`${line.label}-${line.detail}`}
+          className="flex items-baseline gap-2 border-b border-line py-1.5 last:border-0"
+        >
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[12px] text-ink-muted">{line.label}</span>
+            <span className="block truncate text-[10px] text-ink-faint">{line.detail}</span>
+          </span>
+          <span className="text-[12px] font-bold tabular-nums text-critical">−{line.points}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
