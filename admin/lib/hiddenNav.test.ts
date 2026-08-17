@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { isRevealChord, isTypingTarget } from './hiddenNav';
-import { navForRole, NAV_ITEMS } from './rbac';
+import { isHiddenFor, isPathHiddenFor, navForRole, NAV_ITEMS } from './rbac';
 
 /** A KeyboardEvent-shaped object; the real class needs a DOM. */
 const chord = (over: Partial<KeyboardEvent>) =>
@@ -56,24 +56,50 @@ describe('isTypingTarget', () => {
   });
 });
 
+const visibleFor = (role: Parameters<typeof navForRole>[0]) =>
+  navForRole(role)
+    .filter((i) => !isHiddenFor(i, role))
+    .map((i) => i.href);
+
 describe('hidden nav items', () => {
-  it('keeps the safety pages out of every role\'s visible nav', () => {
-    // navForRole still returns them — the shell filters on `hidden` — so the
-    // guarantee being checked is that they are flagged, for all three roles.
-    for (const role of ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'] as const) {
-      const visible = navForRole(role).filter((i) => !i.hidden).map((i) => i.href);
+  it('keeps the safety pages out of the two admin roles’ visible nav', () => {
+    // navForRole still returns them — the shell filters on `hiddenFor` — so the
+    // guarantee being checked is that they are flagged for those roles.
+    for (const role of ['SUPER_ADMIN', 'SITE_ADMIN'] as const) {
+      const visible = visibleFor(role);
       expect(visible).not.toContain('/safety');
       expect(visible).not.toContain('/safety/daily');
     }
   });
 
-  it('flags exactly the two safety pages as hidden', () => {
-    const hidden = NAV_ITEMS.filter((i) => i.hidden).map((i) => i.href).sort();
+  it('gives the safety officer the board without the chord — it is their record', () => {
+    const visible = visibleFor('SUPERVISOR');
+    expect(visible).toContain('/safety');
+    expect(visible).toContain('/safety/daily');
+    expect(isPathHiddenFor('SUPERVISOR', '/safety')).toBe(false);
+    expect(isPathHiddenFor('SUPERVISOR', '/safety/daily')).toBe(false);
+  });
+
+  it('flags exactly the two safety pages, and only against the admin roles', () => {
+    const hidden = NAV_ITEMS.filter((i) => i.hiddenFor?.length).map((i) => i.href).sort();
     expect(hidden).toEqual(['/safety', '/safety/daily']);
+    for (const role of ['SUPER_ADMIN', 'SITE_ADMIN'] as const) {
+      expect(isPathHiddenFor(role, '/safety')).toBe(true);
+      // Resolved by the most specific rule, not by '/safety' swallowing it.
+      expect(isPathHiddenFor(role, '/safety/daily')).toBe(true);
+    }
+  });
+
+  it('conceals nothing else', () => {
+    for (const role of ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'] as const) {
+      for (const path of ['/', '/attendance', '/reports', '/workers']) {
+        expect(isPathHiddenFor(role, path)).toBe(false);
+      }
+    }
   });
 
   it('leaves the everyday pages visible', () => {
-    const visible = navForRole('SUPERVISOR').filter((i) => !i.hidden).map((i) => i.href);
+    const visible = visibleFor('SUPERVISOR');
     expect(visible).toContain('/');
     expect(visible).toContain('/attendance');
     expect(visible).toContain('/reports');

@@ -14,10 +14,11 @@ export interface NavItem {
   roles: UserRole[];
   group: NavGroup;
   /**
-   * Kept out of the sidebar until the reveal chord is pressed. Concealment for
-   * work in progress, never a permission — see `lib/hiddenNav.ts`.
+   * Roles the item is kept from until the reveal chord is pressed. Concealment
+   * for work in progress, never a permission — see `lib/hiddenNav.ts`. A role
+   * that is not listed gets an ordinary sidebar entry it can simply click.
    */
-  hidden?: boolean;
+  hiddenFor?: UserRole[];
 }
 
 export const NAV_ITEMS: NavItem[] = [
@@ -47,24 +48,25 @@ export const NAV_ITEMS: NavItem[] = [
   { label: 'Reports', href: '/reports', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'Operations' },
   // The safety board is the Safety Officer's own record: they enter the daily
   // figures and read the statistics off them, so both pages are theirs as much
-  // as an admin's.
+  // as an admin's — and they get them in the sidebar, no chord needed.
   //
-  // Hidden for now. A client with a login to this panel was asking about a board
-  // that is still being shaped, so it stays out of the sidebar until someone
-  // presses the reveal chord. Drop the `hidden` flags to ship it for real.
+  // Still concealed from the two admin roles. A client holds an admin login to
+  // this panel and was asking about a board that is still being shaped, so it
+  // stays out of *their* rail until someone presses the reveal chord. Drop the
+  // `hiddenFor` lists to ship it to everyone.
   {
     label: 'Safety statistics',
     href: '/safety',
     roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
     group: 'Safety',
-    hidden: true,
+    hiddenFor: ['SUPER_ADMIN', 'SITE_ADMIN'],
   },
   {
     label: 'Daily task',
     href: '/safety/daily',
     roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
     group: 'Safety',
-    hidden: true,
+    hiddenFor: ['SUPER_ADMIN', 'SITE_ADMIN'],
   },
   { label: 'Workers', href: '/workers', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
   { label: 'Staff', href: '/staff', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
@@ -84,6 +86,30 @@ export const NAV_ITEMS: NavItem[] = [
 
 export function navForRole(role: UserRole): NavItem[] {
   return NAV_ITEMS.filter((i) => i.roles.includes(role));
+}
+
+/** Whether this role only sees the item after the reveal chord. */
+export function isHiddenFor(item: NavItem, role: UserRole): boolean {
+  return item.hiddenFor?.includes(role) ?? false;
+}
+
+/**
+ * The same question asked of a URL rather than a nav item, for the page gate
+ * and the shell's bounce-on-hide. Resolved against the same list, by the same
+ * most-specific-wins rule as `rolesForPath`, so a page cannot be concealed in
+ * the sidebar and open on its own URL — or the other way round.
+ */
+export function isPathHiddenFor(role: UserRole, pathname: string): boolean {
+  let best: NavItem | null = null;
+  let bestScore = -1;
+  for (const item of NAV_ITEMS) {
+    const score = matchScore(item.href, pathname);
+    if (score !== null && score > bestScore) {
+      best = item;
+      bestScore = score;
+    }
+  }
+  return best !== null && isHiddenFor(best, role);
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +206,7 @@ export function canAccessPath(role: UserRole, pathname: string): boolean {
  * items are skipped — a landing nobody can see in the nav is a dead end.
  */
 export function landingPathForRole(role: UserRole): string | null {
-  return navForRole(role).find((i) => !i.hidden)?.href ?? null;
+  return navForRole(role).find((i) => !isHiddenFor(i, role))?.href ?? null;
 }
 
 /**

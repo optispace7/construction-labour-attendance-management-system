@@ -7,7 +7,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 
 import { cn } from '@/lib/cn';
 import { Me } from '@/lib/types';
-import { navForRole, roleLabel, NavGroup, NavItem } from '@/lib/rbac';
+import { isHiddenFor, isPathHiddenFor, navForRole, roleLabel, NavGroup, NavItem } from '@/lib/rbac';
 import { MeProvider } from '@/lib/me';
 import { isRevealChord, isTypingTarget, toggleRevealed, useRevealed } from '@/lib/hiddenNav';
 import { SosBanner } from '@/components/SosBanner';
@@ -57,9 +57,6 @@ const NAV_ICONS: Record<string, React.FC<I.IconProps>> = {
   '/storage': I.StorageIcon,
   '/audit': I.AuditIcon,
 };
-
-/** Route prefixes that belong to hidden nav items. */
-const HIDDEN_PREFIXES = ['/safety'];
 
 const GROUP_ORDER: NavGroup[] = [
   'Overview',
@@ -313,10 +310,11 @@ export function AppShell({ me, children }: { me: Me; children: React.ReactNode }
   const isDark = mode === 'dark';
 
   // Work-in-progress pages stay out of the rail until the reveal chord is
-  // pressed. Concealment only — the routes and the API are unchanged.
+  // pressed — for the roles they are concealed from. Concealment only; the
+  // routes and the API are unchanged.
   const revealed = useRevealed();
   const items = React.useMemo(
-    () => navForRole(me.role).filter((i) => !i.hidden || revealed),
+    () => navForRole(me.role).filter((i) => !isHiddenFor(i, me.role) || revealed),
     [me.role, revealed],
   );
   const mobile = useMediaQuery('(max-width: 767px)');
@@ -340,8 +338,9 @@ export function AppShell({ me, children }: { me: Me; children: React.ReactNode }
   /**
    * The reveal chord. Bound on the whole document so it works from any page,
    * and skipped while a field has focus so a comment box never loses a
-   * keystroke to it. Hiding again while standing on a hidden page walks back to
-   * the dashboard, so the client is never left looking at one.
+   * keystroke to it. Hiding again while standing on a page concealed from this
+   * role walks back to the dashboard, so the client is never left looking at
+   * one — a Safety Officer, who is not concealed from it, stays put.
    */
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -349,11 +348,11 @@ export function AppShell({ me, children }: { me: Me; children: React.ReactNode }
       // Ctrl+H is the browser's History shortcut; ask it not to.
       e.preventDefault();
       const next = toggleRevealed();
-      if (!next && HIDDEN_PREFIXES.some((p) => pathname.startsWith(p))) router.replace('/');
+      if (!next && isPathHiddenFor(me.role, pathname)) router.replace('/');
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [pathname, router]);
+  }, [me.role, pathname, router]);
 
   React.useEffect(() => {
     if (!drawerOpen) return;

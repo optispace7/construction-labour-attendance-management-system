@@ -1,9 +1,11 @@
 'use client';
 
 import * as React from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { Box, CircularProgress } from '@mui/material';
 import { useRevealedState } from '@/lib/hiddenNav';
+import { isPathHiddenFor } from '@/lib/rbac';
+import { useMe } from '@/lib/me';
 
 /**
  * Wraps a page that is hidden from the sidebar, so its URL is hidden too.
@@ -11,6 +13,10 @@ import { useRevealedState } from '@/lib/hiddenNav';
  * Without this, hiding the nav item only moves the link — anyone who had the
  * page open, bookmarked it, or hit browser-back would still be looking at it,
  * which is exactly the complaint this was meant to answer.
+ *
+ * Only for the roles the page is concealed from. A role that has the item in
+ * its own sidebar — the Safety Officer, on the safety board — walks straight
+ * through, chord or no chord.
  *
  * Renders nothing until the flag has actually been read: the hook starts false
  * on both server and client to keep hydration honest, so deciding on the first
@@ -21,11 +27,16 @@ import { useRevealedState } from '@/lib/hiddenNav';
  */
 export function HiddenPageGate({ children }: { children: React.ReactNode }) {
   const { revealed, ready } = useRevealedState();
+  const me = useMe();
+  const pathname = usePathname();
   const router = useRouter();
+  const concealed = isPathHiddenFor(me.role, pathname);
 
   React.useEffect(() => {
-    if (ready && !revealed) router.replace('/');
-  }, [ready, revealed, router]);
+    if (concealed && ready && !revealed) router.replace('/');
+  }, [concealed, ready, revealed, router]);
+
+  if (!concealed) return <>{children}</>;
 
   if (!ready || !revealed) {
     return (
