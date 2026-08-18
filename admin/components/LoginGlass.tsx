@@ -62,21 +62,30 @@ export function LoginGlass({ children }: { children: React.ReactNode }) {
   }, [attach]);
 
   return (
-    <div className="relative min-h-screen w-full overflow-hidden">
+    // The page's own ground is the artwork's navy, so whatever the image does
+    // not cover reads as part of it rather than as a gap.
+    <div className="relative min-h-screen w-full overflow-hidden bg-[#012144]">
       <Script
         src="/vendor/liquid-glass/liquid-glass.js"
         strategy="afterInteractive"
         onReady={attach}
       />
 
-      {/* Backdrop */}
+      {/* Backdrop.
+          `contain`, not `cover`. The image is a composed piece of artwork with
+          a logo, a headline and a row of services running close to its edges —
+          cover crops whatever does not match the window's shape, and a browser
+          window is never the image's 16:9 (the chrome takes a strip off the
+          top), so cover meant a permanently zoomed-in, clipped poster. Contain
+          always shows the whole thing; the navy behind takes up the slack, and
+          three of the image's four corners are that same navy. */}
       <Image
         src="/login-bg.png"
         alt=""
         fill
         priority
         sizes="100vw"
-        className="object-cover"
+        className="object-contain"
       />
       {/* A light wash only. The previous one ran to 78% black at the edges,
           which flattened the photograph and left the card looking like a tinted
