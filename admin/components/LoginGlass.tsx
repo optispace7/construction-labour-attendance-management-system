@@ -84,6 +84,18 @@ export function LoginGlass({ children }: { children: React.ReactNode }) {
           render is already dim; it does not need help. */}
       <div className="absolute inset-0 bg-[radial-gradient(130%_100%_at_50%_45%,rgba(6,12,18,0.06),rgba(6,12,18,0.42))]" />
 
+      {/* A pool of shade under the card, and nowhere else.
+          The form is white-on-glass whatever the operator's colour mode, so it
+          needs something dark beneath it — and the backdrop is a brand image
+          whose brightest region, windows and daylight, is dead centre where the
+          card sits. Dimming the whole picture to fix that would flatten the
+          artwork; this dims only the disc the card covers and fades out well
+          before the copy on the left or the logo wall on the right. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute left-1/2 top-1/2 h-[820px] w-[960px] -translate-x-1/2 -translate-y-1/2 bg-[radial-gradient(closest-side,rgba(4,10,16,0.66),rgba(4,10,16,0.34)_58%,rgba(4,10,16,0))]"
+      />
+
       <div className="relative flex min-h-screen items-center justify-center p-5">
         <div
           ref={cardRef}
