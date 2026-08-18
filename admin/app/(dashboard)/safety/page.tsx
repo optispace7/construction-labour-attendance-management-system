@@ -23,7 +23,7 @@ import type { Site } from '@/lib/types';
 import { HiddenPageGate } from '@/components/HiddenPageGate';
 import { MetricDetailDrawer, type DrawerMetric } from '@/components/safety/MetricDetailDrawer';
 
-type Period = 'daily' | 'weekly' | 'monthly';
+type Period = 'daily' | 'weekly' | 'monthly' | 'custom';
 
 interface StatRow {
   metric: string;
@@ -65,12 +65,26 @@ interface SafetyStats {
   reportingSummary: { daily: number; weekly: number; monthly: number };
 }
 
+const DAY_MS = 86_400_000;
 const today = () => new Date().toISOString().slice(0, 10);
+const shift = (iso: string, days: number) =>
+  new Date(new Date(`${iso}T00:00:00.000Z`).getTime() + days * DAY_MS).toISOString().slice(0, 10);
+/** Both ends inclusive, matching the window the API reports. */
+const spanDays = (from: string, to: string) =>
+  (new Date(`${to}T00:00:00.000Z`).getTime() - new Date(`${from}T00:00:00.000Z`).getTime()) /
+    DAY_MS +
+  1;
+
+/** Mirrors MAX_CUSTOM_RANGE_DAYS on the API, so the refusal arrives before the request. */
+const MAX_RANGE_DAYS = 366;
+/** What a fresh custom range opens on. */
+const DEFAULT_RANGE_DAYS = 30;
 
 const PERIODS: { value: Period; label: string }[] = [
   { value: 'daily', label: 'Daily report' },
   { value: 'weekly', label: 'Weekly report' },
   { value: 'monthly', label: 'Monthly report' },
+  { value: 'custom', label: 'Custom range' },
 ];
 
 export default function SafetyStatisticsPage() {
@@ -85,21 +99,64 @@ function SafetyStatisticsBoard() {
   const [siteId, setSiteId] = React.useState('all');
   const [date, setDate] = React.useState(today);
   const [period, setPeriod] = React.useState<Period>('daily');
+  const [from, setFrom] = React.useState(() => shift(today(), -(DEFAULT_RANGE_DAYS - 1)));
+  const [to, setTo] = React.useState(today);
   const [exporting, setExporting] = React.useState(false);
   const [exportError, setExportError] = React.useState<string | null>(null);
   const [detail, setDetail] = React.useState<DrawerMetric | null>(null);
 
+  const custom = period === 'custom';
+  /** The day the board is anchored on, whichever way the window was chosen. */
+  const anchor = custom ? to : date;
+
+  // Refused here as well as on the API: a range nobody could mean is not worth
+  // a round trip, and the message reads better beside the fields than in a
+  // red banner where the chart should be.
+  const rangeError = !custom
+    ? null
+    : // A cleared field, which is what a half-typed date looks like on the way
+      // through, is not a backwards range and should not be told it is one.
+      !from || !to
+      ? 'Pick both a from and a to date.'
+      : from > to
+        ? 'The from date is after the to date.'
+        : spanDays(from, to) > MAX_RANGE_DAYS
+          ? `A range covers at most ${MAX_RANGE_DAYS} days.`
+          : null;
+
+  /**
+   * Keep the two ways of choosing a window in step, so switching between them
+   * lands on the same stretch of time rather than jumping back to today.
+   */
+  function changePeriod(next: Period) {
+    if (next === 'custom' && !custom) {
+      setTo(date);
+      setFrom(shift(date, -(DEFAULT_RANGE_DAYS - 1)));
+    } else if (next !== 'custom' && custom) {
+      setDate(to);
+    }
+    setPeriod(next);
+  }
+
+  const query = custom
+    ? `period=custom&from=${from}&to=${to}&siteId=${siteId}`
+    : `period=${period}&date=${date}&siteId=${siteId}`;
+
   const sites = useQuery({ queryKey: ['sites'], queryFn: () => api.get<Site[]>('/sites') });
 
   const stats = useQuery({
-    queryKey: ['safety-stats', period, date, siteId],
-    queryFn: () =>
-      api.get<SafetyStats>(`/safety/stats?period=${period}&date=${date}&siteId=${siteId}`),
+    queryKey: ['safety-stats', query],
+    queryFn: () => api.get<SafetyStats>(`/safety/stats?${query}`),
+    enabled: !rangeError,
+    // Editing a range walks through half-typed dates. Holding the last good
+    // board means the page keeps its shape instead of blinking through empty
+    // states on the way to the one the reader wanted.
+    placeholderData: (prev) => prev,
   });
 
   const d = stats.data;
   const err = stats.isError ? apiErrorMessage(stats.error, 'Could not load the statistics.') : null;
-  const loading = stats.isLoading && !d;
+  const loading = stats.isLoading && !d && !rangeError;
 
   /**
    * Pull the PDF and hand it to the browser as a download.
@@ -111,15 +168,13 @@ function SafetyStatisticsBoard() {
     setExporting(true);
     setExportError(null);
     try {
-      const res = await fetch(
-        `/api/safety-report?period=${period}&date=${date}&siteId=${siteId}`,
-      );
+      const res = await fetch(`/api/safety-report?${query}`);
       if (!res.ok) throw new Error(`Export failed (${res.status})`);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `safety-${period}-${date}.pdf`;
+      a.download = custom ? `safety-custom-${from}_to_${to}.pdf` : `safety-${period}-${date}.pdf`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
@@ -130,7 +185,13 @@ function SafetyStatisticsBoard() {
   }
 
   const periodLabel =
-    period === 'daily' ? 'today' : period === 'weekly' ? 'this week' : 'this month';
+    period === 'daily'
+      ? 'today'
+      : period === 'weekly'
+        ? 'this week'
+        : period === 'monthly'
+          ? 'this month'
+          : 'over the range';
 
   return (
     <Box>
@@ -145,7 +206,9 @@ function SafetyStatisticsBoard() {
           <Button
             variant="contained"
             startIcon={<I.ReportsIcon />}
-            disabled={exporting || !d}
+            // A bad range keeps the last good board on screen, so the export
+            // has to be stopped on the range rather than on having data.
+            disabled={exporting || !d || Boolean(rangeError)}
             onClick={exportReport}
           >
             {exporting ? 'Exporting…' : 'Export report'}
@@ -169,21 +232,44 @@ function SafetyStatisticsBoard() {
             </MenuItem>
           ))}
         </TextField>
-        <TextField
-          type="date"
-          size="small"
-          label="Date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          InputLabelProps={{ shrink: true }}
-          inputProps={{ max: today() }}
-        />
+        {custom ? (
+          <>
+            <TextField
+              type="date"
+              size="small"
+              label="From"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              inputProps={{ max: to || today() }}
+            />
+            <TextField
+              type="date"
+              size="small"
+              label="To"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              inputProps={{ min: from, max: today() }}
+            />
+          </>
+        ) : (
+          <TextField
+            type="date"
+            size="small"
+            label="Date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+            inputProps={{ max: today() }}
+          />
+        )}
         <TextField
           select
           size="small"
           label="Period"
           value={period}
-          onChange={(e) => setPeriod(e.target.value as Period)}
+          onChange={(e) => changePeriod(e.target.value as Period)}
           sx={{ minWidth: 170 }}
         >
           {PERIODS.map((p) => (
@@ -193,6 +279,12 @@ function SafetyStatisticsBoard() {
           ))}
         </TextField>
       </FilterBar>
+
+      {rangeError && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          {rangeError}
+        </Alert>
+      )}
 
       {exportError && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setExportError(null)}>
@@ -401,7 +493,7 @@ function SafetyStatisticsBoard() {
       <MetricDetailDrawer
         metric={detail}
         siteId={siteId}
-        anchorDate={date}
+        anchorDate={anchor}
         onClose={() => setDetail(null)}
       />
 

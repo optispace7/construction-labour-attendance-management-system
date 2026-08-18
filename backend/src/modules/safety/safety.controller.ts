@@ -83,15 +83,28 @@ export class SafetyController {
     @Query('period') period?: SafetyPeriod,
     @Query('date') date?: string,
     @Query('siteId') siteId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
-    const { buffer, filename } = await this.safety.statsPdf(user, { period, date, siteId });
+    const { buffer, filename } = await this.safety.statsPdf(user, {
+      period,
+      date,
+      siteId,
+      from,
+      to,
+    });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length);
     res.end(buffer);
   }
 
-  /** Everything the statistics board draws. */
+  /**
+   * Everything the statistics board draws.
+   *
+   * `period=custom` reads `from`/`to` and ignores `date`; the other three derive
+   * their window from `date`.
+   */
   @Get('stats')
   @RequirePermissions(Permission.SAFETY_VIEW)
   stats(
@@ -99,7 +112,9 @@ export class SafetyController {
     @Query('period') period?: SafetyPeriod,
     @Query('date') date?: string,
     @Query('siteId') siteId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
-    return this.safety.stats(user, { period, date, siteId });
+    return this.safety.stats(user, { period, date, siteId, from, to });
   }
 }

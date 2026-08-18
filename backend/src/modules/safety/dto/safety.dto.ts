@@ -13,7 +13,12 @@ import {
   ValidateNested,
 } from 'class-validator';
 
-export type SafetyPeriod = 'daily' | 'weekly' | 'monthly';
+/**
+ * `custom` is the only one that does not derive its window from the anchor
+ * date: it reads `from` and `to` off the query instead. See
+ * `SafetyService.customWindow`.
+ */
+export type SafetyPeriod = 'daily' | 'weekly' | 'monthly' | 'custom';
 
 const METRICS = Object.values(SafetyMetric);
 

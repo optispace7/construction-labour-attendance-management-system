@@ -18,6 +18,8 @@ import { SafetyPeriod, SaveDailyDto, UpsertMetricDto } from './dto/safety.dto';
 import { renderSafetyPdf } from '../reports/report.renderer';
 
 const DAY_MS = 86_400_000;
+/** The longest `period=custom` window; see `SafetyService.customWindow`. */
+const MAX_CUSTOM_RANGE_DAYS = 366;
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const midnight = (v: string) => new Date(`${v.slice(0, 10)}T00:00:00.000Z`);
 
@@ -462,17 +464,77 @@ export class SafetyService {
   }
 
   /**
+   * A YYYY-MM-DD query parameter as a UTC midnight.
+   *
+   * Checked rather than trusted: `new Date('rubbish')` is an Invalid Date, which
+   * Prisma turns into an unreadable driver error somewhere much further down.
+   */
+  private day(value: string, field: string): Date {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      throw Errors.validation({ message: `${field} must be a date, as YYYY-MM-DD` });
+    }
+    const d = midnight(value);
+    // V8 rolls a nonexistent day forward rather than refusing it, so
+    // '2026-02-30' parses happily as 2 March. Round-tripping is what catches it.
+    if (Number.isNaN(d.getTime()) || iso(d) !== value) {
+      throw Errors.validation({ message: `${field} is not a real date` });
+    }
+    return d;
+  }
+
+  /**
+   * The window a `period=custom` request means: the two dates it names, both
+   * ends inclusive.
+   *
+   * Capped at a year because the trend chart and the exported PDF draw one
+   * point per day — a five-year range is not a chart, it is a smear, and it asks
+   * the database for a table nobody can read.
+   */
+  private customWindow(from?: string, to?: string): { start: Date; end: Date } {
+    if (!from || !to) {
+      throw Errors.validation({ message: 'A custom range needs both a from and a to date' });
+    }
+    const start = this.day(from, 'from');
+    const end = this.day(to, 'to');
+    if (end.getTime() < start.getTime()) {
+      throw Errors.validation({ message: 'The from date must not be after the to date' });
+    }
+    if ((end.getTime() - start.getTime()) / DAY_MS + 1 > MAX_CUSTOM_RANGE_DAYS) {
+      throw Errors.validation({
+        message: `A custom range covers at most ${MAX_CUSTOM_RANGE_DAYS} days`,
+      });
+    }
+    return { start, end };
+  }
+
+  /**
    * Everything the statistics board shows, for one period and one site filter.
    *
    * The headline figures are always "as of" the anchor date rather than summed
    * over the period: a cumulative man-hour total has no meaning added up across
    * a month, and today's manpower is a snapshot by definition.
    */
-  async stats(user: AuthUser, opts: { period?: SafetyPeriod; date?: string; siteId?: string }) {
+  async stats(
+    user: AuthUser,
+    opts: { period?: SafetyPeriod; date?: string; siteId?: string; from?: string; to?: string },
+  ) {
     const period = opts.period ?? 'daily';
     const sites = this.readScope(user, opts.siteId);
-    const anchor = opts.date ? midnight(opts.date) : await this.today(user);
-    const { start, end } = safetyWindow(period, anchor);
+
+    let start: Date;
+    let end: Date;
+    let anchor: Date;
+    if (period === 'custom') {
+      ({ start, end } = this.customWindow(opts.from, opts.to));
+      // The three headline cards and the month score read the anchor, and they
+      // are "as of" figures. The last day of the range is the day the reader
+      // means by "as of now", so a range ending in June does not quietly report
+      // today's cumulative manpower.
+      anchor = end;
+    } else {
+      anchor = opts.date ? this.day(opts.date, 'date') : await this.today(user);
+      ({ start, end } = safetyWindow(period, anchor));
+    }
 
     /**
      * A daily report still gets a week of trend behind it.
@@ -505,8 +567,8 @@ export class SafetyService {
 
     // The observations bars compare the three windows against each other, so all
     // three are needed whichever period is selected.
-    const [dailyW, weeklyW, monthlyW] = (['daily', 'weekly', 'monthly'] as SafetyPeriod[]).map(
-      (p) => safetyWindow(p, anchor),
+    const [dailyW, weeklyW, monthlyW] = (['daily', 'weekly', 'monthly'] as const).map((p) =>
+      safetyWindow(p, anchor),
     );
     const [dTot, wTot, mTot] = await Promise.all([
       this.totalsOver(user, sites, dailyW.start, dailyW.end),
@@ -648,13 +710,17 @@ export class SafetyService {
    * Renders from exactly the `stats` payload the screen draws, so an exported
    * sheet cannot disagree with the page it was exported from.
    */
-  async statsPdf(user: AuthUser, opts: { period?: SafetyPeriod; date?: string; siteId?: string }) {
+  async statsPdf(
+    user: AuthUser,
+    opts: { period?: SafetyPeriod; date?: string; siteId?: string; from?: string; to?: string },
+  ) {
     const s = await this.stats(user, opts);
     const org = await this.prisma.organization.findUnique({
       where: { id: user.organizationId },
       select: { name: true },
     });
-    const periodName = s.period[0].toUpperCase() + s.period.slice(1);
+    const periodName =
+      s.period === 'custom' ? 'Custom range' : s.period[0].toUpperCase() + s.period.slice(1);
     const fmtDay = (v: string) =>
       new Date(`${v}T00:00:00.000Z`).toLocaleDateString('en-GB', {
         day: '2-digit',
@@ -683,7 +749,10 @@ export class SafetyService {
       periodName,
     );
 
-    return { buffer, filename: `safety-${s.period}-${s.date}.pdf` };
+    // A custom export is named by the range it covers; one anchor date would
+    // give every range that ends on the same day the same filename.
+    const stamp = s.period === 'custom' ? `${s.from}_to_${s.to}` : s.date;
+    return { buffer, filename: `safety-${s.period}-${stamp}.pdf` };
   }
 
   /** The metric catalogue, so a client never hardcodes twenty-one labels. */
