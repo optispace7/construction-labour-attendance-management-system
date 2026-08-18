@@ -47,6 +47,24 @@ describe('RBAC permissions', () => {
     expect(roleHasPermission('WATCHMAN', Permission.MANUAL_ATTENDANCE_REVIEW)).toBe(false);
   });
 
+  // The Documents page is read-only for the Safety Officer: they need the
+  // site's licence to hand to an inspector, not the ability to withdraw it.
+  it('supervisor reads site paperwork but cannot file or delete it', () => {
+    expect(roleHasPermission('SUPERVISOR', Permission.DOCUMENT_VIEW)).toBe(true);
+    expect(roleHasPermission('SUPERVISOR', Permission.SETTINGS_MANAGE)).toBe(false);
+  });
+
+  it('the roles that manage settings can read documents too', () => {
+    for (const role of ['SUPER_ADMIN', 'SITE_ADMIN'] as const) {
+      expect(roleHasPermission(role, Permission.DOCUMENT_VIEW)).toBe(true);
+      expect(roleHasPermission(role, Permission.SETTINGS_MANAGE)).toBe(true);
+    }
+  });
+
+  it('keeps the watchman out of site paperwork', () => {
+    expect(roleHasPermission('WATCHMAN', Permission.DOCUMENT_VIEW)).toBe(false);
+  });
+
   it('site admin manages vendors', () => {
     expect(roleHasPermission('SITE_ADMIN', Permission.VENDOR_MANAGE)).toBe(true);
   });

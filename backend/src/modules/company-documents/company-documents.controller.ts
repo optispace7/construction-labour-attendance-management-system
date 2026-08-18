@@ -10,8 +10,13 @@ import { AuthUser } from '../../common/auth/auth-user.interface';
 
 /**
  * Site paperwork — licences, insurance, registrations, each held against the
- * site it covers. Behind SETTINGS_MANAGE throughout, which is the same Super
- * Admin + Admin pair that can reach the Documents page these live on.
+ * site it covers.
+ *
+ * Split down the middle: reading is DOCUMENT_VIEW, which the Safety Officer
+ * holds, and every change is SETTINGS_MANAGE, which they do not. The class
+ * carries the stricter of the two so a route added here without a decorator of
+ * its own is closed rather than open — the guard reads the handler first and
+ * falls back to the class.
  */
 @ApiTags('company-documents')
 @ApiBearerAuth()
@@ -21,6 +26,7 @@ export class CompanyDocumentsController {
   constructor(private readonly documents: CompanyDocumentsService) {}
 
   @Get()
+  @RequirePermissions(Permission.DOCUMENT_VIEW)
   list(@CurrentUser() user: AuthUser, @Query('siteId') siteId?: string) {
     return this.documents.list(user, siteId);
   }
@@ -46,6 +52,7 @@ export class CompanyDocumentsController {
 
   /** Streams the PDF itself; the admin panel opens this in a new tab. */
   @Get(':id/file')
+  @RequirePermissions(Permission.DOCUMENT_VIEW)
   async file(@CurrentUser() user: AuthUser, @Param('id') id: string, @Res() res: Response) {
     const doc = await this.documents.file(user, id);
     res.setHeader('Content-Type', doc.mimeType);

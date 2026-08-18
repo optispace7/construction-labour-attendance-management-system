@@ -31,12 +31,13 @@ describe('navForRole', () => {
       // Theirs to file on — deciding one is still an admin's, which the page
       // and the API enforce; the sidebar entry only gets them to the form.
       'Corrections',
+      // Read-only: the API gates the list on DOCUMENT_VIEW and every change on
+      // SETTINGS_MANAGE, and the page hides upload/edit/delete from them.
+      'Documents',
     ]) {
       expect(labels).toContain(allowed);
     }
-    // Documents sits in the Sites group but is gated on SETTINGS_MANAGE by the
-    // API, which a Safety Officer does not hold — so it stays off their nav.
-    for (const denied of ['Users', 'Devices', 'Company', 'Storage', 'Audit', 'Documents']) {
+    for (const denied of ['Users', 'Devices', 'Company', 'Storage', 'Audit']) {
       expect(labels).not.toContain(denied);
     }
   });
@@ -50,7 +51,7 @@ describe('canAccessPath', () => {
   it('refuses the pages a role has no nav entry for', () => {
     // The bug this exists for: a page off the Safety Officer's sidebar could
     // still be opened by typing the URL.
-    for (const denied of ['/users', '/devices', '/company', '/storage', '/audit', '/documents']) {
+    for (const denied of ['/users', '/devices', '/company', '/storage', '/audit']) {
       expect(canAccessPath('SUPERVISOR', denied)).toBe(false);
       expect(canAccessPath('SITE_ADMIN', denied)).toBe(true);
     }
@@ -66,6 +67,9 @@ describe('canAccessPath', () => {
       '/sites',
       '/safety',
       '/safety/daily',
+      // Theirs to read, not to change — the write controls are hidden on the
+      // page and refused by the API.
+      '/documents',
       // Theirs to file on, not to decide — the page hides approve/reject from
       // a role without CORRECTION_APPROVE, and the API refuses it regardless.
       '/corrections',

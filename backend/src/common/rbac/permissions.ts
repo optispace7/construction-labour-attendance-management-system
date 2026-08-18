@@ -19,6 +19,13 @@ export enum Permission {
   MANUAL_ATTENDANCE_REVIEW = 'manual.attendance.review',
   REPORTS_ALL = 'reports.all',
   REPORTS_SUMMARY = 'reports.summary',
+  /**
+   * Read site paperwork — licences, insurance, registrations — and open the
+   * files themselves. Filing, renaming and deleting them stays on
+   * SETTINGS_MANAGE: the Safety Officer needs the certificate on site, not the
+   * ability to withdraw it.
+   */
+  DOCUMENT_VIEW = 'document.view',
   /** Read the safety statistics board. */
   SAFETY_VIEW = 'safety.view',
   /** Fill in, correct or remove a day's safety figures. */
@@ -49,6 +56,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.CORRECTION_APPROVE,
     Permission.MANUAL_ATTENDANCE_REVIEW,
     Permission.REPORTS_ALL,
+    Permission.DOCUMENT_VIEW,
     Permission.SAFETY_VIEW,
     Permission.SAFETY_MANAGE,
     Permission.DEVICE_MANAGE,
@@ -81,6 +89,10 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.MANUAL_ATTENDANCE_REVIEW,
     Permission.REPORTS_ALL,
     Permission.REPORTS_SUMMARY,
+    // Read-only, and deliberately not SETTINGS_MANAGE: an inspector asks for
+    // the site's licence at the gate and the Safety Officer is who is standing
+    // there. Filing and deleting remain an admin's.
+    Permission.DOCUMENT_VIEW,
     // The safety board is the Safety Officer's own record — they are the one
     // who counts the toolbox talks and closes the unsafe acts, so they own both
     // the reading and the writing of it.

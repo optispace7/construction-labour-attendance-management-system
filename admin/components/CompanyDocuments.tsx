@@ -34,6 +34,7 @@ import { StatusBadge, BadgeTone } from '@/components/ui/StatusBadge';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { useToast } from '@/components/ui/Toast';
 import { formatFullDate } from '@/lib/format';
+import { useMe } from '@/lib/me';
 import { CompanyDocument, Site } from '@/lib/types';
 
 /** Matches the server's cap; checked here so a big file fails before upload. */
@@ -125,7 +126,13 @@ function remindOn(validUntil: string, days: number): string | null {
 export function CompanyDocuments() {
   const qc = useQueryClient();
   const toast = useToast();
+  const me = useMe();
   const fileInput = React.useRef<HTMLInputElement>(null);
+
+  // Filing, renaming and deleting are SETTINGS_MANAGE, which the Safety Officer
+  // does not hold — they read these and open them. Hidden rather than
+  // shown-and-refused; the API is what actually enforces it.
+  const canManage = me.role === 'SUPER_ADMIN' || me.role === 'SITE_ADMIN';
 
   const [draft, setDraft] = React.useState<Draft | null>(null);
   const [editing, setEditing] = React.useState<CompanyDocument | null>(null);
@@ -242,7 +249,7 @@ export function CompanyDocuments() {
     setFormError(null);
   };
 
-  const uploadButton = (
+  const uploadButton = canManage ? (
     <Button
       variant="outlined"
       size="small"
@@ -251,7 +258,7 @@ export function CompanyDocuments() {
     >
       Upload PDF
     </Button>
-  );
+  ) : null;
 
   const rows = documents.data ?? [];
   const days = Number(form?.remindDaysBefore ?? '');
@@ -295,28 +302,34 @@ export function CompanyDocuments() {
       >
         <DescriptionOutlinedIcon sx={{ color: 'text.secondary', fontSize: 20 }} />
         <Typography variant="body2" color="text.secondary">
-          Super Admins are emailed before a document expires
+          {canManage
+            ? 'Super Admins are emailed before a document expires'
+            : 'Read-only — an Admin files and renews these'}
         </Typography>
         <Box sx={{ flex: 1 }} />
         {siteFilterControl}
         {uploadButton}
       </Stack>
-      <input
-        ref={fileInput}
-        hidden
-        type="file"
-        accept="application/pdf,.pdf"
-        onChange={(e) => void onFile(e)}
-      />
+      {canManage && (
+        <input
+          ref={fileInput}
+          hidden
+          type="file"
+          accept="application/pdf,.pdf"
+          onChange={(e) => void onFile(e)}
+        />
+      )}
 
       {rows.length === 0 && !documents.isLoading ? (
         <Box sx={{ px: 2.5, py: 4, textAlign: 'center' }}>
           <Typography variant="body2" color="text.secondary">
-            {siteFilter === 'all'
-              ? 'No documents yet. Upload a PDF, choose the site it covers and give it a validity date — a reminder is emailed to the Super Admins before it runs out.'
-              : 'Nothing filed against this site yet.'}
+            {siteFilter !== 'all'
+              ? 'Nothing filed against this site yet.'
+              : canManage
+                ? 'No documents yet. Upload a PDF, choose the site it covers and give it a validity date — a reminder is emailed to the Super Admins before it runs out.'
+                : 'No documents have been filed yet.'}
           </Typography>
-          <Box sx={{ mt: 2 }}>{uploadButton}</Box>
+          {uploadButton && <Box sx={{ mt: 2 }}>{uploadButton}</Box>}
         </Box>
       ) : (
         <Box sx={{ overflowX: 'auto' }}>
@@ -387,16 +400,20 @@ export function CompanyDocuments() {
                             <OpenInNewIcon fontSize="small" />
                           </IconButton>
                         </Tooltip>
-                        <Tooltip title="Edit name, validity or reminder">
-                          <IconButton size="small" onClick={() => openEdit(doc)}>
-                            <EditIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
-                        <Tooltip title="Delete document">
-                          <IconButton size="small" onClick={() => setPendingDelete(doc)}>
-                            <DeleteIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
+                        {canManage && (
+                          <>
+                            <Tooltip title="Edit name, validity or reminder">
+                              <IconButton size="small" onClick={() => openEdit(doc)}>
+                                <EditIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                            <Tooltip title="Delete document">
+                              <IconButton size="small" onClick={() => setPendingDelete(doc)}>
+                                <DeleteIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                          </>
+                        )}
                       </Stack>
                     </TableCell>
                   </TableRow>

@@ -73,11 +73,30 @@ export class CompanyDocumentsService {
     private readonly audit: AuditService,
   ) {}
 
+  /**
+   * The sites this caller may read paperwork for, as a `where` fragment.
+   *
+   * Same rule as `assertSiteInScope`: scopes are an opt-in restriction, so a
+   * user with none sees the whole organization. It only started to matter when
+   * the Safety Officer — a role that is routinely pinned to one site — was let
+   * in to read these.
+   */
+  private scopeWhere(user: AuthUser): Prisma.CompanyDocumentWhereInput {
+    if (user.role === 'SUPER_ADMIN' || user.siteScopes.length === 0) return {};
+    return { siteId: { in: user.siteScopes } };
+  }
+
   /** Soonest expiry first; undated documents sit at the bottom. */
   async list(user: AuthUser, siteId?: string) {
     const [rows, timezone] = await Promise.all([
       this.prisma.companyDocument.findMany({
-        where: { organizationId: user.organizationId, ...(siteId ? { siteId } : {}) },
+        // AND rather than one flat object: both fragments key on `siteId`, and
+        // spreading them would let the requested site quietly overwrite — and
+        // so escape — the caller's scope.
+        where: {
+          organizationId: user.organizationId,
+          AND: [this.scopeWhere(user), siteId ? { siteId } : {}],
+        },
         orderBy: [{ validUntil: { sort: 'asc', nulls: 'last' } }, { createdAt: 'desc' }],
         select: META_SELECT,
       }),
@@ -205,7 +224,9 @@ export class CompanyDocumentsService {
   /** The file itself, for streaming back to the browser. */
   async file(user: AuthUser, id: string) {
     const doc = await this.prisma.companyDocument.findFirst({
-      where: { id, organizationId: user.organizationId },
+      // Scoped like the list: a document the caller cannot see listed is not
+      // one they can open by pasting its id either.
+      where: { id, organizationId: user.organizationId, ...this.scopeWhere(user) },
       select: { fileName: true, mimeType: true, data: true },
     });
     if (!doc) throw Errors.notFound('Document');

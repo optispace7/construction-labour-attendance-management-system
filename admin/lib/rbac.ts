@@ -72,9 +72,16 @@ export const NAV_ITEMS: NavItem[] = [
   { label: 'Staff', href: '/staff', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
   { label: 'Visitors', href: '/visitors', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
   { label: 'Sites', href: '/sites', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'Sites & partners' },
-  // Licences and insurance held against a site. Same pair as the Company page
-  // these moved off, because the API gates them on SETTINGS_MANAGE.
-  { label: 'Documents', href: '/documents', roles: ['SUPER_ADMIN', 'SITE_ADMIN'], group: 'Sites & partners' },
+  // Licences and insurance held against a site. The Safety Officer reads these
+  // — an inspector at the gate asks for the site's licence and they are the one
+  // standing there — but the page hides upload, edit and delete from them, and
+  // the API refuses those on SETTINGS_MANAGE regardless.
+  {
+    label: 'Documents',
+    href: '/documents',
+    roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
+    group: 'Sites & partners',
+  },
   { label: 'Vendors', href: '/vendors', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'Sites & partners' },
   { label: 'Designations', href: '/designations', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'Sites & partners' },
   { label: 'Users', href: '/users', roles: ['SUPER_ADMIN', 'SITE_ADMIN'], group: 'Administration' },
