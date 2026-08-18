@@ -65,12 +65,23 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
   String _siteName = '';
   List<SafetyItem> _items = const [];
 
-  /// Pending edits keyed by metric. Absent means untouched.
-  final Map<String, String> _values = {};
-  final Map<String, String> _comments = {};
+  /// A controller per field, keyed by metric.
+  ///
+  /// These used to be `initialValue` on the field plus a map of typed strings.
+  /// That loses every keystroke: the first one flips `_dirty`, which inserts the
+  /// "nothing is recorded until you press Save" banner into the same unkeyed
+  /// ListView the fields sit in, so every child below it shifts position, is
+  /// matched against the wrong widget, and is rebuilt from the server value.
+  /// Holding the text out here — and keying the cards by metric — means the
+  /// text belongs to the metric rather than to a position in a list.
+  final Map<String, TextEditingController> _valueCtrls = {};
+  final Map<String, TextEditingController> _commentCtrls = {};
 
   bool _loading = true;
   bool _saving = false;
+  bool _dirty = false;
+  /// True while a load is filling the controllers in; see [_syncDirty].
+  bool _resetting = false;
   String? _error;
 
   String get _dateParam =>
@@ -81,12 +92,70 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     return _date.year == now.year && _date.month == now.month && _date.day == now.day;
   }
 
-  bool get _dirty => _values.isNotEmpty || _comments.isNotEmpty;
+  /// The sheet belongs to a site, so with no site chosen there is nothing to
+  /// write to and the fields say so rather than failing at Save.
+  bool get _canEdit => _siteId != null;
+
+  /// The count as it stands on the server, as the field would show it.
+  String _serverValue(SafetyItem i) => i.value?.toString() ?? '';
+
+  String _serverComment(SafetyItem i) => i.comment ?? '';
+
+  /// Compared against what was loaded rather than "has been typed in", so
+  /// typing a digit and taking it back leaves nothing to save.
+  bool _changed(SafetyItem i) =>
+      (_valueCtrls[i.metric]?.text.trim() ?? '') != _serverValue(i) ||
+      (_commentCtrls[i.metric]?.text.trim() ?? '') != _serverComment(i);
+
+  /// Rebuild only when the answer actually flips, so an ordinary keystroke
+  /// costs no rebuild at all.
+  void _syncDirty() {
+    // A reload writes every controller in turn and settles the flag itself;
+    // reacting to each write would flip it on and off down the list.
+    if (_resetting) return;
+    final now = _items.any(_changed);
+    if (now != _dirty) setState(() => _dirty = now);
+  }
 
   @override
   void initState() {
     super.initState();
     Future.microtask(_load);
+  }
+
+  @override
+  void dispose() {
+    for (final c in _valueCtrls.values) {
+      c.dispose();
+    }
+    for (final c in _commentCtrls.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  TextEditingController _controller() => TextEditingController()..addListener(_syncDirty);
+
+  /// Point the controllers at what the server just returned, dropping any that
+  /// no longer have a metric behind them.
+  void _resetControllers(List<SafetyItem> items) {
+    _resetting = true;
+    final keep = items.map((i) => i.metric).toSet();
+    for (final map in [_valueCtrls, _commentCtrls]) {
+      for (final metric in map.keys.toList()) {
+        if (!keep.contains(metric)) map.remove(metric)!.dispose();
+      }
+    }
+    for (final i in items) {
+      final value = _valueCtrls[i.metric] ??= _controller();
+      final comment = _commentCtrls[i.metric] ??= _controller();
+      // A fresh load is the server's word on the day, so it wins over whatever
+      // is in the box — otherwise changing the date keeps yesterday's figures.
+      value.text = _serverValue(i);
+      comment.text = _serverComment(i);
+    }
+    _dirty = false;
+    _resetting = false;
   }
 
   Future<void> _load() async {
@@ -114,8 +183,7 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
             .map(SafetyItem.fromMap)
             .where((i) => !i.isAutomated)
             .toList();
-        _values.clear();
-        _comments.clear();
+        _resetControllers(_items);
         _loading = false;
       });
     } on DioException catch (e) {
@@ -130,6 +198,10 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
   }
 
   Future<void> _pickDate() async {
+    // Another day is another sheet, so the reload overwrites every field. Worth
+    // asking first now that what is in them survives long enough to be lost.
+    if (_dirty && !await _confirmDiscard()) return;
+    if (!mounted) return;
     final now = DateTime.now();
     final picked = await showDatePicker(
       context: context,
@@ -142,6 +214,28 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     await _load();
   }
 
+  Future<bool> _confirmDiscard() async {
+    final keep = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Leave this day?'),
+        content: const Text('The figures you have typed in have not been saved.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Keep editing'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    // Dismissed by tapping outside: the safe reading is "carry on editing".
+    return keep == false;
+  }
+
   Future<void> _save() async {
     if (_siteId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -151,15 +245,14 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     }
     setState(() => _saving = true);
     try {
-      final touched = <String>{..._values.keys, ..._comments.keys};
-      final payload = _items.where((i) => touched.contains(i.metric)).map((i) {
-        final raw = _values[i.metric] ?? (i.value?.toString() ?? '');
-        final comment = _comments[i.metric] ?? i.comment ?? '';
+      final payload = _items.where(_changed).map((i) {
+        final raw = _valueCtrls[i.metric]?.text.trim() ?? '';
+        final comment = _commentCtrls[i.metric]?.text.trim() ?? '';
         return {
           'metric': i.metric,
           // Blank clears back to "not filled in", which is not the same as zero.
-          'value': raw.trim().isEmpty ? null : int.tryParse(raw.trim()),
-          'comment': comment.trim().isEmpty ? null : comment.trim(),
+          'value': raw.isEmpty ? null : int.tryParse(raw),
+          'comment': comment.isEmpty ? null : comment,
         };
       }).toList();
 
@@ -190,6 +283,7 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     for (final i in _items) {
       groups.putIfAbsent(i.group, () => []).add(i);
     }
+    final canSave = !_loading && !_saving && _dirty && _canEdit;
 
     return Scaffold(
       appBar: AppBar(
@@ -203,9 +297,8 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: (_loading || _saving || !_dirty) ? null : _save,
-        backgroundColor:
-            (_loading || _saving || !_dirty) ? ClamsColors.border : ClamsColors.primary,
+        onPressed: canSave ? _save : null,
+        backgroundColor: canSave ? ClamsColors.primary : ClamsColors.border,
         icon: _saving
             ? const SizedBox(
                 width: 18,
@@ -244,27 +337,16 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
                   ),
                   children: [
                     _dateBar(),
-                    if (_dirty) ...[
+                    if (!_canEdit) ...[
                       ClamsSpacing.gapMd,
-                      Container(
-                        padding: const EdgeInsets.all(ClamsSpacing.md),
-                        decoration: BoxDecoration(
-                          color: ClamsColors.infoTint,
-                          borderRadius: BorderRadius.circular(ClamsRadius.card),
-                        ),
-                        child: const Row(
-                          children: [
-                            Icon(Icons.info_outline, size: 18, color: ClamsColors.info),
-                            SizedBox(width: ClamsSpacing.sm),
-                            Expanded(
-                              child: Text(
-                                'Nothing is recorded until you press Save.',
-                                style: TextStyle(fontSize: 13, color: ClamsColors.textSecondary),
-                              ),
-                            ),
-                          ],
-                        ),
+                      _notice(
+                        Icons.warning_amber_outlined,
+                        'Pick a site from Change site before filling this in — the '
+                        'figures are recorded against one site.',
                       ),
+                    ] else if (_dirty) ...[
+                      ClamsSpacing.gapMd,
+                      _notice(Icons.info_outline, 'Nothing is recorded until you press Save.'),
                     ],
                     for (final entry in groups.entries) ...[
                       ClamsSpacing.gapXl,
@@ -284,6 +366,26 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
                 ),
     );
   }
+
+  Widget _notice(IconData icon, String text) => Container(
+        padding: const EdgeInsets.all(ClamsSpacing.md),
+        decoration: BoxDecoration(
+          color: ClamsColors.infoTint,
+          borderRadius: BorderRadius.circular(ClamsRadius.card),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: ClamsColors.info),
+            const SizedBox(width: ClamsSpacing.sm),
+            Expanded(
+              child: Text(
+                text,
+                style: const TextStyle(fontSize: 13, color: ClamsColors.textSecondary),
+              ),
+            ),
+          ],
+        ),
+      );
 
   Widget _dateBar() => Material(
         color: ClamsColors.surface,
@@ -329,6 +431,9 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
 
   Widget _itemCard(SafetyItem it) {
     return Padding(
+      // Keyed by metric so a card keeps its fields — text, cursor and focus —
+      // when the list around it changes length.
+      key: ValueKey(it.metric),
       padding: const EdgeInsets.only(bottom: ClamsSpacing.sm),
       child: Container(
         padding: const EdgeInsets.all(ClamsSpacing.md),
@@ -351,21 +456,24 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
                 SizedBox(
                   width: 110,
                   child: TextFormField(
-                    initialValue: it.value?.toString() ?? '',
+                    controller: _valueCtrls[it.metric],
+                    enabled: _canEdit,
                     keyboardType: TextInputType.number,
                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     decoration: const InputDecoration(labelText: 'Count'),
-                    onChanged: (v) => setState(() => _values[it.metric] = v),
                   ),
                 ),
                 const SizedBox(width: ClamsSpacing.md),
                 Expanded(
                   child: TextFormField(
-                    initialValue: it.comment ?? '',
+                    controller: _commentCtrls[it.metric],
+                    enabled: _canEdit,
                     minLines: 1,
                     maxLines: 3,
                     decoration: const InputDecoration(labelText: 'Comment (optional)'),
-                    onChanged: (v) => setState(() => _comments[it.metric] = v),
+                    // Sent as typed, so the next reader gets the capitals and
+                    // full stops the officer put in.
+                    textCapitalization: TextCapitalization.sentences,
                   ),
                 ),
               ],
