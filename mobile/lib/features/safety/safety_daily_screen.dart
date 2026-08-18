@@ -300,6 +300,10 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
   /// What the server last said the breakdown was, for the dirty check.
   Map<String, String> _serverWaste = const {};
 
+  /// The picker above the list: a type and a count waiting to be added.
+  String? _pickedType;
+  final TextEditingController _pickedCount = TextEditingController();
+
   bool _loading = true;
   bool _saving = false;
   bool _dirty = false;
@@ -384,6 +388,7 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     for (final l in _wasteLines) {
       l.count.dispose();
     }
+    _pickedCount.dispose();
     super.dispose();
   }
 
@@ -430,6 +435,8 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
               count: TextEditingController(text: e.value)..addListener(_syncDirty),
             ))
         .toList();
+    _pickedType = null;
+    _pickedCount.clear();
   }
 
   Future<void> _load() async {
@@ -576,10 +583,6 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     // Preserve the catalogue's order within each group.
     final groups = <String, List<SafetyItem>>{};
     for (final i in _items) {
-      // Waste has a section of its own below: its figure is the total of a
-      // breakdown, so a card with a Count box would be a second answer to the
-      // same question. Its comment lives down there with it.
-      if (i.metric == _wasteMetric) continue;
       groups.putIfAbsent(i.group, () => []).add(i);
     }
     final canSave = !_loading && !_saving && _dirty && _canEdit;
@@ -659,10 +662,12 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
                         ),
                       ),
                       ClamsSpacing.gapSm,
-                      ...entry.value.map(_itemCard),
+                      // Waste sits in its own group position, as one card with
+                      // a dropdown rather than a Count box: its figure is the
+                      // total of the lines inside it.
+                      ...entry.value
+                          .map((i) => i.metric == _wasteMetric ? _wasteCard() : _itemCard(i)),
                     ],
-                    ClamsSpacing.gapXl,
-                    _wasteSection(),
                   ],
                 ),
     );
@@ -741,14 +746,16 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     return _wasteTypes.where((t) => t.isActive && !used.contains(t.id)).toList();
   }
 
+  /// Move what the picker is holding onto the day's list.
   void _addWasteLine() {
-    final spare = _spareWasteTypes;
-    if (spare.isEmpty) return;
+    if (_pickedType == null || _pickedCount.text.trim().isEmpty) return;
     setState(() {
       _wasteLines.add(_WasteLine(
-        typeId: spare.first.id,
-        count: TextEditingController()..addListener(_syncDirty),
+        typeId: _pickedType!,
+        count: TextEditingController(text: _pickedCount.text.trim())..addListener(_syncDirty),
       ));
+      _pickedType = null;
+      _pickedCount.clear();
     });
     _syncDirty();
   }
@@ -758,84 +765,17 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     _syncDirty();
   }
 
-  Widget _wasteSection() {
+  /// Waste disposal as one card: a dropdown, a count and an add button, with
+  /// what has already been recorded listed underneath.
+  ///
+  /// Its figure is never typed — it is the total of those lines, which is why
+  /// there is no Count box on the card itself.
+  Widget _wasteCard() {
+    final spare = _spareWasteTypes;
     final total = _wasteTotal;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            const Expanded(
-              child: Text(
-                'WASTE DISPOSAL',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.8,
-                  color: ClamsColors.textSecondary,
-                ),
-              ),
-            ),
-            Text(
-              'Total ${total ?? '—'}',
-              style: const TextStyle(fontSize: 12, color: ClamsColors.textSecondary),
-            ),
-            if (_canEdit)
-              TextButton(
-                onPressed: _manageWasteTypes,
-                child: const Text('Manage types'),
-              ),
-          ],
-        ),
-        ClamsSpacing.gapSm,
-        if (_wasteLines.isEmpty)
-          const Padding(
-            padding: EdgeInsets.only(bottom: ClamsSpacing.sm),
-            child: Text(
-              'Nothing recorded today. Add a line for each kind of waste that went out.',
-              style: TextStyle(fontSize: 13, color: ClamsColors.textSecondary),
-            ),
-          ),
-        for (var i = 0; i < _wasteLines.length; i++) _wasteLineCard(i),
-        if (_canEdit)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              onPressed: _spareWasteTypes.isEmpty ? null : _addWasteLine,
-              icon: const Icon(Icons.add, size: 18),
-              label: Text(
-                _spareWasteTypes.isEmpty ? 'Every type is on the sheet' : 'Add waste type',
-              ),
-            ),
-          ),
-        // The waste row's comment, which stays the sheet's to write even though
-        // its figure is now derived.
-        if (_commentCtrls[_wasteMetric] != null)
-          Padding(
-            padding: const EdgeInsets.only(top: ClamsSpacing.sm),
-            child: TextFormField(
-              controller: _commentCtrls[_wasteMetric],
-              enabled: _canEdit,
-              minLines: 1,
-              maxLines: 3,
-              textCapitalization: TextCapitalization.sentences,
-              decoration: const InputDecoration(labelText: 'Waste comment (optional)'),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _wasteLineCard(int i) {
-    final line = _wasteLines[i];
-    // A retired type stays selectable on the line already holding it, so its
-    // figure remains readable and editable; it just cannot be chosen anew.
-    final used = _wasteLines.map((l) => l.typeId).toSet()..remove(line.typeId);
-    final choices =
-        _wasteTypes.where((t) => t.id == line.typeId || (t.isActive && !used.contains(t.id)));
+    final byId = {for (final t in _wasteTypes) t.id: t};
 
     return Padding(
-      key: ValueKey('waste-${line.typeId}-$i'),
       padding: const EdgeInsets.only(bottom: ClamsSpacing.sm),
       child: Container(
         padding: const EdgeInsets.all(ClamsSpacing.md),
@@ -844,55 +784,121 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
           border: Border.all(color: ClamsColors.border),
           borderRadius: BorderRadius.circular(ClamsRadius.card),
         ),
-        child: Row(
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: DropdownButtonFormField<String>(
-                initialValue: line.typeId.isEmpty ? null : line.typeId,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: 'Waste type'),
-                items: [
-                  for (final t in choices)
-                    DropdownMenuItem(
-                      value: t.id,
-                      child: Text(
-                        t.isActive ? t.name : '${t.name} (retired)',
-                        overflow: TextOverflow.ellipsis,
-                      ),
+            Row(
+              children: [
+                const Text('Waste disposal', style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(width: ClamsSpacing.sm),
+                Text(
+                  'total ${total ?? '—'}',
+                  style: const TextStyle(fontSize: 12, color: ClamsColors.textSecondary),
+                ),
+                const Spacer(),
+                if (_canEdit)
+                  TextButton(onPressed: _manageWasteTypes, child: const Text('Manage types')),
+              ],
+            ),
+            ClamsSpacing.gapSm,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    initialValue: _pickedType,
+                    isExpanded: true,
+                    decoration: InputDecoration(
+                      labelText: 'Waste type',
+                      helperText: spare.isEmpty ? 'All types recorded today' : null,
+                    ),
+                    items: [
+                      for (final t in spare)
+                        DropdownMenuItem(
+                          value: t.id,
+                          child: Text(t.name, overflow: TextOverflow.ellipsis),
+                        ),
+                    ],
+                    onChanged: _canEdit && spare.isNotEmpty
+                        ? (v) => setState(() => _pickedType = v)
+                        : null,
+                  ),
+                ),
+                const SizedBox(width: ClamsSpacing.sm),
+                SizedBox(
+                  width: 84,
+                  child: TextFormField(
+                    controller: _pickedCount,
+                    enabled: _canEdit,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: const InputDecoration(labelText: 'Count'),
+                    onChanged: (_) => setState(() {}),
+                    onFieldSubmitted: (_) => _addWasteLine(),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Add',
+                  onPressed:
+                      _canEdit && _pickedType != null && _pickedCount.text.trim().isNotEmpty
+                          ? _addWasteLine
+                          : null,
+                  icon: const Icon(Icons.add_circle_outline),
+                ),
+              ],
+            ),
+            for (var i = 0; i < _wasteLines.length; i++) ...[
+              const Divider(height: 1),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      byId[_wasteLines[i].typeId]?.isActive == false
+                          ? '${byId[_wasteLines[i].typeId]?.name} · retired'
+                          : byId[_wasteLines[i].typeId]?.name ?? 'Unknown type',
+                      style: const TextStyle(fontSize: 13),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  SizedBox(
+                    width: 72,
+                    child: TextFormField(
+                      controller: _wasteLines[i].count,
+                      enabled: _canEdit,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      decoration: const InputDecoration(isDense: true),
+                    ),
+                  ),
+                  if (_canEdit)
+                    IconButton(
+                      tooltip: 'Remove',
+                      onPressed: () => _removeWasteLine(i),
+                      icon: const Icon(Icons.delete_outline, size: 20),
                     ),
                 ],
-                onChanged: _canEdit
-                    ? (v) {
-                        if (v == null) return;
-                        setState(() => line.typeId = v);
-                        _syncDirty();
-                      }
-                    : null,
               ),
-            ),
-            const SizedBox(width: ClamsSpacing.md),
-            SizedBox(
-              width: 96,
-              child: TextFormField(
-                controller: line.count,
-                enabled: _canEdit,
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: const InputDecoration(labelText: 'Count'),
-              ),
-            ),
-            if (_canEdit)
-              IconButton(
-                tooltip: 'Remove this line',
-                onPressed: () => _removeWasteLine(i),
-                icon: const Icon(Icons.delete_outline, size: 20),
+            ],
+            // The waste row's comment, which stays the sheet's to write even
+            // though its figure is now derived.
+            if (_commentCtrls[_wasteMetric] != null)
+              Padding(
+                padding: const EdgeInsets.only(top: ClamsSpacing.sm),
+                child: TextFormField(
+                  controller: _commentCtrls[_wasteMetric],
+                  enabled: _canEdit,
+                  minLines: 1,
+                  maxLines: 3,
+                  textCapitalization: TextCapitalization.sentences,
+                  decoration: const InputDecoration(labelText: 'Comment (optional)'),
+                ),
               ),
           ],
         ),
       ),
     );
   }
+
 
   /// Add, rename and remove the types the dropdown offers.
   Future<void> _manageWasteTypes() async {

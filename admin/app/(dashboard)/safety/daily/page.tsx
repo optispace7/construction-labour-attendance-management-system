@@ -312,7 +312,20 @@ function DailyTaskForm() {
                 </Typography>
                 <Divider sx={{ mb: 1 }} />
                 <Stack divider={<Divider flexItem />} spacing={0}>
-                  {items.map((it) => (
+                  {items.map((it) =>
+                    it.metric === WASTE_METRIC ? (
+                      <WasteRow
+                        key={it.metric}
+                        types={wasteTypes}
+                        lines={wasteLines}
+                        total={wasteTotal}
+                        comment={commentValue(it)}
+                        onComment={(v) => setField(it.metric, { comment: v })}
+                        onChange={setWasteDraft}
+                        onManage={() => setManagingTypes(true)}
+                        onHistory={() => setHistoryOf(it)}
+                      />
+                    ) : (
                     <Stack
                       key={it.metric}
                       direction={{ xs: 'column', md: 'row' }}
@@ -326,23 +339,12 @@ function DailyTaskForm() {
                         </Typography>
                       </Box>
 
-                      {/* Waste is the total of the breakdown below, so it is
-                          shown rather than typed — a second place to enter it
-                          is a second answer to the same question. */}
                       <TextField
                         size="small"
-                        type={it.metric === WASTE_METRIC ? 'text' : 'number'}
-                        label={it.metric === WASTE_METRIC ? 'Total' : 'Count'}
-                        value={
-                          it.metric === WASTE_METRIC
-                            ? wasteTotal == null
-                              ? '—'
-                              : String(wasteTotal)
-                            : fieldValue(it)
-                        }
+                        type="number"
+                        label="Count"
+                        value={fieldValue(it)}
                         onChange={(e) => setField(it.metric, { value: e.target.value })}
-                        disabled={it.metric === WASTE_METRIC}
-                        helperText={it.metric === WASTE_METRIC ? 'From the breakdown' : undefined}
                         inputProps={{ min: 0 }}
                         sx={{ width: 150 }}
                       />
@@ -378,19 +380,12 @@ function DailyTaskForm() {
                         </Tooltip>
                       </Stack>
                     </Stack>
-                  ))}
+                    ),
+                  )}
                 </Stack>
               </CardContent>
             </Card>
           ))}
-
-          <WasteCard
-            types={wasteTypes}
-            lines={wasteLines}
-            total={wasteTotal}
-            onChange={setWasteDraft}
-            onManage={() => setManagingTypes(true)}
-          />
         </Stack>
       )}
 
@@ -420,131 +415,178 @@ function DailyTaskForm() {
   );
 }
 
+
 /**
- * The waste breakdown: what went out today, split by type.
+ * Waste disposal, in the sheet's own row rather than a table of its own.
  *
- * A card of its own rather than a row in Compliance, because it is a small
- * table and the sheet's other items are single figures. The metric above shows
- * the total; this is where the number actually comes from.
+ * One dropdown and one count: pick a type, type how much, press add. What has
+ * already been recorded for the day sits underneath, still editable, so the
+ * row reads as one question with a running answer rather than a spreadsheet
+ * bolted to the bottom of the page.
+ *
+ * The figure itself is never typed here — it is the total of these lines, and
+ * the API works it out from them.
  */
-function WasteCard({
+function WasteRow({
   types,
   lines,
   total,
+  comment,
+  onComment,
   onChange,
   onManage,
+  onHistory,
 }: {
   types: WasteType[];
   lines: WasteLine[];
   total: number | null;
+  comment: string;
+  onComment: (value: string) => void;
   onChange: (next: WasteLine[]) => void;
   onManage: () => void;
+  onHistory: () => void;
 }) {
+  const [pickedType, setPickedType] = React.useState('');
+  const [pickedCount, setPickedCount] = React.useState('');
+
   const byId = React.useMemo(() => new Map(types.map((t) => [t.id, t])), [types]);
-  const used = new Set(lines.map((l) => l.wasteTypeId).filter(Boolean));
+  const used = new Set(lines.map((l) => l.wasteTypeId));
 
   /**
-   * A type already on the form is off the dropdown, so the same stream cannot
-   * be entered twice and end up as two figures nobody can add up. A retired
-   * type still appears on the line already holding it, so its figure stays
-   * readable and editable — it just cannot be chosen for a new line.
+   * A type already recorded today drops off the dropdown, so one stream cannot
+   * become two figures nobody can add up. Retired types never appear here —
+   * they keep the lines they already hold, below.
    */
-  const choicesFor = (line: WasteLine) =>
-    types.filter((t) => t.id === line.wasteTypeId || (t.isActive && !used.has(t.id)));
+  const choices = types.filter((t) => t.isActive && !used.has(t.id));
 
-  const setLine = (i: number, patch: Partial<WasteLine>) =>
-    onChange(lines.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+  // The dropdown follows the list: once the type it was showing is used up, it
+  // moves to the next one rather than sitting on a stale name.
+  React.useEffect(() => {
+    if (pickedType && !choices.some((t) => t.id === pickedType)) setPickedType('');
+  }, [choices, pickedType]);
 
-  const spare = types.filter((t) => t.isActive && !used.has(t.id));
+  const canAdd = Boolean(pickedType) && pickedCount.trim() !== '';
+  const add = () => {
+    if (!canAdd) return;
+    onChange([...lines, { wasteTypeId: pickedType, value: pickedCount.trim() }]);
+    setPickedType('');
+    setPickedCount('');
+  };
 
   return (
-    <Card>
-      <CardContent>
-        <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 1.5 }}>
-          <Typography variant="subtitle1">Waste disposal</Typography>
-          <Box sx={{ flex: 1 }} />
-          <Typography variant="body2" color="text.secondary">
-            Total {total ?? '—'}
-          </Typography>
-          <Button size="small" onClick={onManage}>
-            Manage types
-          </Button>
-        </Stack>
-        <Divider sx={{ mb: 1 }} />
+    <Box sx={{ py: 1.25 }}>
+      <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1 }}>
+        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+          Waste disposal
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          total {total ?? '—'}
+        </Typography>
+        <Box sx={{ flex: 1 }} />
+        <Button size="small" onClick={onManage}>
+          Manage types
+        </Button>
+        <Tooltip title="View all dates">
+          <IconButton size="small" onClick={onHistory}>
+            <HistoryOutlinedIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Stack>
 
-        {lines.length === 0 ? (
-          <Typography variant="body2" color="text.secondary" sx={{ py: 1.5 }}>
-            Nothing recorded for today. Add a line for each kind of waste that went out.
-          </Typography>
-        ) : (
-          <Stack divider={<Divider flexItem />} spacing={0}>
-            {lines.map((line, i) => (
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
+        <TextField
+          select
+          size="small"
+          label="Waste type"
+          value={pickedType}
+          onChange={(e) => setPickedType(e.target.value)}
+          disabled={choices.length === 0}
+          helperText={choices.length === 0 ? 'Every type is already recorded today' : undefined}
+          sx={{ flex: '1 1 240px' }}
+        >
+          {choices.map((t) => (
+            <MenuItem key={t.id} value={t.id}>
+              {t.name}
+            </MenuItem>
+          ))}
+        </TextField>
+        <TextField
+          size="small"
+          type="number"
+          label="Count"
+          value={pickedCount}
+          onChange={(e) => setPickedCount(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              add();
+            }
+          }}
+          inputProps={{ min: 0 }}
+          sx={{ width: 150 }}
+        />
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={<AddIcon />}
+          disabled={!canAdd}
+          onClick={add}
+        >
+          Add
+        </Button>
+        <TextField
+          size="small"
+          label="Comment (optional)"
+          value={comment}
+          onChange={(e) => onComment(e.target.value)}
+          sx={{ flex: '2 1 220px' }}
+        />
+      </Stack>
+
+      {lines.length > 0 && (
+        <Stack divider={<Divider flexItem />} spacing={0} sx={{ mt: 1.5, pl: { md: 1 } }}>
+          {lines.map((line, i) => {
+            const type = byId.get(line.wasteTypeId);
+            return (
               <Stack
-                key={`${line.wasteTypeId}-${i}`}
-                direction={{ xs: 'column', md: 'row' }}
+                key={line.wasteTypeId}
+                direction="row"
                 spacing={1.5}
-                alignItems={{ md: 'center' }}
-                sx={{ py: 1.25 }}
+                alignItems="center"
+                sx={{ py: 0.75 }}
               >
-                <TextField
-                  select
-                  size="small"
-                  label="Waste type"
-                  value={line.wasteTypeId}
-                  onChange={(e) => setLine(i, { wasteTypeId: e.target.value })}
-                  sx={{ flex: '1 1 260px' }}
-                >
-                  {choicesFor(line).map((t) => (
-                    <MenuItem key={t.id} value={t.id}>
-                      {t.name}
-                      {t.isActive ? '' : ' (retired)'}
-                    </MenuItem>
-                  ))}
-                </TextField>
+                <Typography variant="body2" sx={{ flex: 1, minWidth: 0 }} noWrap>
+                  {type?.name ?? 'Unknown type'}
+                  {type && !type.isActive && (
+                    <Typography component="span" variant="caption" color="text.secondary">
+                      {' '}
+                      · retired
+                    </Typography>
+                  )}
+                </Typography>
+                {/* Editable in place: correcting a typo should not mean
+                    deleting the line and picking the type again. */}
                 <TextField
                   size="small"
                   type="number"
-                  label="Count"
                   value={line.value}
-                  onChange={(e) => setLine(i, { value: e.target.value })}
-                  inputProps={{ min: 0 }}
-                  sx={{ width: 150 }}
+                  onChange={(e) =>
+                    onChange(lines.map((l, j) => (j === i ? { ...l, value: e.target.value } : l)))
+                  }
+                  inputProps={{ min: 0, 'aria-label': `${type?.name ?? 'Waste'} count` }}
+                  sx={{ width: 110 }}
                 />
-                <Tooltip title="Remove this line">
-                  <IconButton
-                    size="small"
-                    onClick={() => onChange(lines.filter((_, j) => j !== i))}
-                  >
+                <Tooltip title="Remove">
+                  <IconButton size="small" onClick={() => onChange(lines.filter((_, j) => j !== i))}>
                     <DeleteOutlineIcon fontSize="small" />
                   </IconButton>
                 </Tooltip>
-                {!byId.get(line.wasteTypeId)?.isActive && line.wasteTypeId && (
-                  <Typography variant="caption" color="text.secondary">
-                    Retired type
-                  </Typography>
-                )}
               </Stack>
-            ))}
-          </Stack>
-        )}
-
-        <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
-          <Button
-            size="small"
-            startIcon={<AddIcon />}
-            disabled={spare.length === 0}
-            onClick={() => onChange([...lines, { wasteTypeId: spare[0]?.id ?? '', value: '' }])}
-          >
-            Add waste type
-          </Button>
-          {spare.length === 0 && types.length > 0 && (
-            <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
-              Every type is already on the sheet.
-            </Typography>
-          )}
+            );
+          })}
         </Stack>
-      </CardContent>
-    </Card>
+      )}
+    </Box>
   );
 }
 
