@@ -6,15 +6,23 @@ import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
 import { businessDate } from '../../common/time/time.util';
 import {
+  DEFAULT_WASTE_TYPES,
   METRIC_CATALOG,
   SAFETY_PERFORMANCE_TARGET,
   SAFE_MAN_HOURS_PER_DAY,
+  WASTE_METRIC,
   isAutomated,
   safetyPerformance,
   safetyWindow,
   specFor,
 } from './safety.metrics';
-import { SafetyPeriod, SaveDailyDto, UpsertMetricDto } from './dto/safety.dto';
+import {
+  SafetyPeriod,
+  SaveDailyDto,
+  UpsertMetricDto,
+  WasteItemDto,
+  WasteTypeDto,
+} from './dto/safety.dto';
 import { renderSafetyPdf } from '../reports/report.renderer';
 
 const DAY_MS = 86_400_000;
@@ -126,7 +134,7 @@ export class SafetyService {
     const date = opts.date ? midnight(opts.date) : await this.today(user);
     const single = opts.siteId && opts.siteId !== 'all' ? opts.siteId : null;
 
-    const [rows, derived] = await Promise.all([
+    const [rows, derived, wasteTypes, waste] = await Promise.all([
       this.prisma.dailySafetyEntry.findMany({
         where: {
           organizationId: user.organizationId,
@@ -135,6 +143,8 @@ export class SafetyService {
         },
       }),
       this.automated(user, sites, date),
+      this.wasteTypes(user),
+      this.wasteFor(user, sites, date),
     ]);
 
     // Across several sites a typed metric is the sum of them, and a comment can
@@ -167,7 +177,277 @@ export class SafetyService {
       /** Comments and per-item editing need one site; the aggregate is read-only. */
       editable: Boolean(single),
       items,
+      /**
+       * The detail behind WASTE_DISPOSAL: the dropdown to choose from, and what
+       * has been recorded against it today. The metric's own figure above is the
+       * total of these, so a client reading only `items` still gets a number.
+       */
+      waste: { types: wasteTypes, rows: waste },
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Waste types
+  // -------------------------------------------------------------------------
+
+  /**
+   * The organization's waste dropdown, retired types last.
+   *
+   * Seeds the defaults for an organization that has none. Writing on a read is
+   * not free, but the alternative is a client whose dropdown is empty until
+   * somebody remembers to run something — and the migration only reaches the
+   * organizations that existed when it ran.
+   */
+  async wasteTypes(user: AuthUser) {
+    const existing = await this.prisma.wasteType.count({
+      where: { organizationId: user.organizationId },
+    });
+    if (existing === 0) {
+      await this.prisma.wasteType.createMany({
+        data: DEFAULT_WASTE_TYPES.map((name, i) => ({
+          organizationId: user.organizationId,
+          name,
+          sortOrder: i + 1,
+        })),
+        skipDuplicates: true,
+      });
+    }
+    return this.prisma.wasteType.findMany({
+      where: { organizationId: user.organizationId },
+      orderBy: [{ isActive: 'desc' }, { sortOrder: 'asc' }, { name: 'asc' }],
+      select: { id: true, name: true, sortOrder: true, isActive: true },
+    });
+  }
+
+  private cleanName(name: string): string {
+    const trimmed = name.trim().replace(/\s+/g, ' ');
+    if (!trimmed) throw Errors.validation({ message: 'Give the waste type a name' });
+    return trimmed;
+  }
+
+  /** A name already in use, whether or not that type is still active. */
+  private async assertNameFree(user: AuthUser, name: string, exceptId?: string) {
+    const clash = await this.prisma.wasteType.findFirst({
+      where: {
+        organizationId: user.organizationId,
+        name,
+        ...(exceptId ? { id: { not: exceptId } } : {}),
+      },
+      select: { isActive: true },
+    });
+    if (clash) {
+      throw Errors.validation({
+        message: clash.isActive
+          ? `"${name}" is already in the list`
+          : `"${name}" is a retired type — bring it back rather than adding a second one`,
+      });
+    }
+  }
+
+  async createWasteType(user: AuthUser, dto: WasteTypeDto) {
+    const name = this.cleanName(dto.name);
+    await this.assertNameFree(user, name);
+    // Last in the dropdown, so an addition never reshuffles the list somebody
+    // has learned the shape of.
+    const last = await this.prisma.wasteType.aggregate({
+      where: { organizationId: user.organizationId },
+      _max: { sortOrder: true },
+    });
+    const created = await this.prisma.wasteType.create({
+      data: {
+        organizationId: user.organizationId,
+        name,
+        sortOrder: (last._max.sortOrder ?? 0) + 1,
+      },
+      select: { id: true, name: true, sortOrder: true, isActive: true },
+    });
+    await this.audit.record({
+      organizationId: user.organizationId,
+      actorUserId: user.userId,
+      actorRole: user.role,
+      action: 'WASTE_TYPE_CREATE',
+      entityType: 'WasteType',
+      entityId: created.id,
+      newValue: { name },
+      reason: 'Waste type added',
+    });
+    return created;
+  }
+
+  private async ownWasteType(user: AuthUser, id: string) {
+    const type = await this.prisma.wasteType.findFirst({
+      where: { id, organizationId: user.organizationId },
+    });
+    if (!type) throw Errors.notFound('Waste type');
+    return type;
+  }
+
+  /**
+   * Rename, or bring a retired type back.
+   *
+   * A rename carries its history with it — the entries point at the row, not at
+   * the text — which is the point of holding these as rows in the first place.
+   */
+  async updateWasteType(user: AuthUser, id: string, dto: WasteTypeDto) {
+    const before = await this.ownWasteType(user, id);
+    const name = this.cleanName(dto.name);
+    if (name !== before.name) await this.assertNameFree(user, name, id);
+    const updated = await this.prisma.wasteType.update({
+      where: { id },
+      data: { name, isActive: true },
+      select: { id: true, name: true, sortOrder: true, isActive: true },
+    });
+    await this.audit.record({
+      organizationId: user.organizationId,
+      actorUserId: user.userId,
+      actorRole: user.role,
+      action: 'WASTE_TYPE_UPDATE',
+      entityType: 'WasteType',
+      entityId: id,
+      oldValue: { name: before.name, isActive: before.isActive },
+      newValue: { name, isActive: true },
+      reason: 'Waste type edited',
+    });
+    return updated;
+  }
+
+  /**
+   * Remove a waste type — properly if nothing has been filed against it, by
+   * retiring it if something has.
+   *
+   * Deleting a used type would take a month of recorded figures with it and
+   * silently change every total that included them. Retiring drops it out of
+   * the dropdown, which is what "delete" means to the person asking, and leaves
+   * the past intact.
+   */
+  async deleteWasteType(user: AuthUser, id: string) {
+    const type = await this.ownWasteType(user, id);
+    const used = await this.prisma.dailyWasteEntry.count({ where: { wasteTypeId: id } });
+
+    if (used === 0) {
+      await this.prisma.wasteType.delete({ where: { id } });
+    } else {
+      await this.prisma.wasteType.update({ where: { id }, data: { isActive: false } });
+    }
+
+    await this.audit.record({
+      organizationId: user.organizationId,
+      actorUserId: user.userId,
+      actorRole: user.role,
+      action: used === 0 ? 'WASTE_TYPE_DELETE' : 'WASTE_TYPE_RETIRE',
+      entityType: 'WasteType',
+      entityId: id,
+      oldValue: { name: type.name },
+      reason: used === 0 ? 'Waste type removed' : `Waste type retired (${used} entries kept)`,
+    });
+
+    return { deleted: used === 0, retired: used > 0, entriesKept: used };
+  }
+
+  // -------------------------------------------------------------------------
+  // The waste breakdown behind WASTE_DISPOSAL
+  // -------------------------------------------------------------------------
+
+  /** The day's breakdown, summed across sites when several are in view. */
+  private async wasteFor(user: AuthUser, sites: string[] | null, date: Date) {
+    const rows = await this.prisma.dailyWasteEntry.groupBy({
+      by: ['wasteTypeId'],
+      where: {
+        organizationId: user.organizationId,
+        entryDate: date,
+        ...(sites ? { siteId: { in: sites } } : {}),
+      },
+      _sum: { value: true },
+    });
+    return rows.map((r) => ({ wasteTypeId: r.wasteTypeId, value: r._sum.value ?? 0 }));
+  }
+
+  /**
+   * Write the day's breakdown and fold it back into the WASTE_DISPOSAL figure.
+   *
+   * The total is never typed. It is the sum of the rows, written to the same
+   * DailySafetyEntry every chart and export already reads, so the headline and
+   * its detail cannot drift apart.
+   */
+  private async saveWaste(
+    user: AuthUser,
+    siteId: string,
+    date: Date,
+    items: WasteItemDto[],
+    comment?: string | null,
+  ) {
+    const ids = [...new Set(items.map((i) => i.wasteTypeId))];
+    if (ids.length) {
+      const known = await this.prisma.wasteType.count({
+        where: { id: { in: ids }, organizationId: user.organizationId },
+      });
+      if (known !== ids.length) throw Errors.validation({ message: 'Unknown waste type' });
+    }
+
+    const keep = items.filter((i) => i.value != null) as { wasteTypeId: string; value: number }[];
+    const drop = items.filter((i) => i.value == null).map((i) => i.wasteTypeId);
+
+    await this.prisma.$transaction([
+      // A line cleared on the form is a row deleted, not a zero: the sheet
+      // distinguishes "none went out" from "nobody said".
+      ...(drop.length
+        ? [
+            this.prisma.dailyWasteEntry.deleteMany({
+              where: { siteId, entryDate: date, wasteTypeId: { in: drop } },
+            }),
+          ]
+        : []),
+      ...keep.map((i) =>
+        this.prisma.dailyWasteEntry.upsert({
+          where: {
+            siteId_entryDate_wasteTypeId: { siteId, entryDate: date, wasteTypeId: i.wasteTypeId },
+          },
+          create: {
+            organizationId: user.organizationId,
+            siteId,
+            entryDate: date,
+            wasteTypeId: i.wasteTypeId,
+            value: i.value,
+            recordedById: user.userId,
+          },
+          update: { value: i.value, recordedById: user.userId },
+        }),
+      ),
+    ]);
+
+    await this.syncWasteTotal(user, siteId, date, comment);
+  }
+
+  /** Re-derive WASTE_DISPOSAL for one site and day from its breakdown. */
+  private async syncWasteTotal(
+    user: AuthUser,
+    siteId: string,
+    date: Date,
+    comment?: string | null,
+  ) {
+    const sum = await this.prisma.dailyWasteEntry.aggregate({
+      where: { siteId, entryDate: date },
+      _sum: { value: true },
+      _count: true,
+    });
+    // No rows at all means nobody has said anything about waste today, which is
+    // a blank rather than a zero — the same distinction the rest of the sheet
+    // keeps. The comment on the row survives either way.
+    const total = sum._count === 0 ? null : (sum._sum.value ?? 0);
+    await this.upsertOne(user, siteId, date, {
+      metric: WASTE_METRIC,
+      value: total,
+      comment: comment === undefined ? await this.wasteComment(siteId, date) : comment,
+    });
+  }
+
+  /** The comment already on the WASTE_DISPOSAL row, which a resync must keep. */
+  private async wasteComment(siteId: string, date: Date): Promise<string | null> {
+    const row = await this.prisma.dailySafetyEntry.findUnique({
+      where: { siteId_entryDate_metric: { siteId, entryDate: date, metric: WASTE_METRIC } },
+      select: { comment: true },
+    });
+    return row?.comment ?? null;
   }
 
   /** Upsert a whole day in one go — what the form's Save button posts. */
@@ -175,16 +455,34 @@ export class SafetyService {
     const siteId = await this.writeSite(user, dto.siteId);
     const date = midnight(dto.date);
 
-    const writes = dto.items.map((item) =>
-      this.upsertOne(user, siteId, date, {
-        metric: item.metric,
-        // A derived metric stores only its comment; its number comes from
-        // attendance and caching it here would let the two drift apart.
-        value: isAutomated(item.metric) ? null : (item.value ?? null),
-        comment: item.comment ?? null,
-      }),
-    );
+    const writes = dto.items
+      // The waste total is the sum of the breakdown, written below. Taking a
+      // typed figure here would let the headline disagree with its own detail.
+      .filter((item) => item.metric !== WASTE_METRIC || dto.waste === undefined)
+      .map((item) =>
+        this.upsertOne(user, siteId, date, {
+          metric: item.metric,
+          // A derived metric stores only its comment; its number comes from
+          // attendance and caching it here would let the two drift apart.
+          value: isAutomated(item.metric) ? null : (item.value ?? null),
+          comment: item.comment ?? null,
+        }),
+      );
     await this.prisma.$transaction(writes);
+
+    if (dto.waste) {
+      // The comment on the waste row is still the sheet's to set; only its
+      // number is taken away from it. A save that says nothing about the
+      // comment leaves whatever is there.
+      const sent = dto.items.find((i) => i.metric === WASTE_METRIC);
+      await this.saveWaste(
+        user,
+        siteId,
+        date,
+        dto.waste,
+        sent ? (sent.comment ?? null) : undefined,
+      );
+    }
 
     await this.audit.record({
       organizationId: user.organizationId,
@@ -226,12 +524,17 @@ export class SafetyService {
     const siteId = await this.writeSite(user, dto.siteId);
     const date = midnight(dto.date);
     if (!specFor(dto.metric)) throw Errors.validation({ message: 'Unknown safety metric' });
-
-    await this.upsertOne(user, siteId, date, {
-      metric: dto.metric,
-      value: isAutomated(dto.metric) ? null : (dto.value ?? null),
-      comment: dto.comment ?? null,
-    });
+    if (dto.metric === WASTE_METRIC) {
+      // Waste is the sum of its breakdown, so this row takes the comment and
+      // leaves the figure alone — the same deal the derived metrics get.
+      await this.syncWasteTotal(user, siteId, date, dto.comment ?? null);
+    } else {
+      await this.upsertOne(user, siteId, date, {
+        metric: dto.metric,
+        value: isAutomated(dto.metric) ? null : (dto.value ?? null),
+        comment: dto.comment ?? null,
+      });
+    }
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -259,6 +562,11 @@ export class SafetyService {
     });
     if (!existing) throw Errors.notFound('Safety entry');
 
+    // Clearing the waste figure means clearing what it is the total of.
+    // Leaving the breakdown would put the number straight back on the next save.
+    if (opts.metric === WASTE_METRIC) {
+      await this.prisma.dailyWasteEntry.deleteMany({ where: { siteId, entryDate: date } });
+    }
     await this.prisma.dailySafetyEntry.delete({ where: { id: existing.id } });
     await this.audit.record({
       organizationId: user.organizationId,

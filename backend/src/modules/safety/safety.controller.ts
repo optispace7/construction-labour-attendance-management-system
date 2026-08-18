@@ -1,9 +1,9 @@
-import { Body, Controller, Delete, Get, Post, Put, Query, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Res } from '@nestjs/common';
 import { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { SafetyMetric } from '@prisma/client';
 import { SafetyService } from './safety.service';
-import { SafetyPeriod, SaveDailyDto, UpsertMetricDto } from './dto/safety.dto';
+import { SafetyPeriod, SaveDailyDto, UpsertMetricDto, WasteTypeDto } from './dto/safety.dto';
 import { RequirePermissions } from '../../common/rbac/rbac.decorators';
 import { Permission } from '../../common/rbac/permissions';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
@@ -56,6 +56,40 @@ export class SafetyController {
     @Query('metric') metric: SafetyMetric,
   ) {
     return this.safety.deleteMetric(user, { siteId, date, metric });
+  }
+
+  /**
+   * The waste dropdown. Reading it is part of reading the sheet; adding,
+   * renaming and removing belong to whoever fills the sheet in — the Safety
+   * Officer — which is what SAFETY_MANAGE already means.
+   */
+  @Get('waste-types')
+  @RequirePermissions(Permission.SAFETY_VIEW)
+  wasteTypes(@CurrentUser() user: AuthUser) {
+    return this.safety.wasteTypes(user);
+  }
+
+  @Post('waste-types')
+  @RequirePermissions(Permission.SAFETY_MANAGE)
+  createWasteType(@CurrentUser() user: AuthUser, @Body() dto: WasteTypeDto) {
+    return this.safety.createWasteType(user, dto);
+  }
+
+  @Patch('waste-types/:id')
+  @RequirePermissions(Permission.SAFETY_MANAGE)
+  updateWasteType(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() dto: WasteTypeDto,
+  ) {
+    return this.safety.updateWasteType(user, id, dto);
+  }
+
+  /** Removes an unused type outright; retires one that has figures behind it. */
+  @Delete('waste-types/:id')
+  @RequirePermissions(Permission.SAFETY_MANAGE)
+  deleteWasteType(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.safety.deleteWasteType(user, id);
   }
 
   /** One item across a date range — the per-item "view all dates". */

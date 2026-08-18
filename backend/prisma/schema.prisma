@@ -136,11 +136,12 @@ model Organization {
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
-  sites   Site[]
-  vendors Vendor[]
-  users   User[]
-  workers Worker[]
-  devices Device[]
+  sites      Site[]
+  vendors    Vendor[]
+  users      User[]
+  workers    Worker[]
+  devices    Device[]
+  wasteTypes WasteType[]
 
   @@map("organizations")
 }
@@ -167,6 +168,7 @@ model Site {
   scopes        UserSiteScope[]
   manualTaps    ManualAttendanceRequest[]
   safetyEntries DailySafetyEntry[]
+  wasteEntries  DailyWasteEntry[]
   documents     CompanyDocument[]
 
   @@unique([organizationId, code])
@@ -814,6 +816,54 @@ model DailySafetyEntry {
   @@unique([siteId, entryDate, metric])
   @@index([organizationId, entryDate])
   @@map("daily_safety_entries")
+}
+
+// The kinds of waste a site sends out — a list the client owns rather than an
+// enum they would have to ask for a release to change.
+//
+// Renaming one rewrites history on purpose: a type is the same real-world
+// stream whatever it has been called, so "Scrap" becoming "Scrap / Metal Waste"
+// should not split its past in two.
+model WasteType {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String
+  /// Where it sits in the dropdown; ties break on name.
+  sortOrder      Int      @default(0) @map("sort_order")
+  /// Retired rather than removed, once a day's sheet has used it.
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  organization Organization      @relation(fields: [organizationId], references: [id])
+  entries      DailyWasteEntry[]
+
+  @@unique([organizationId, name])
+  @@map("waste_types")
+}
+
+// One waste type's figure for one site on one day.
+//
+// The daily sheet's single "Waste disposal" count is the sum of these, still
+// written to DailySafetyEntry so every existing total, chart and export keeps
+// reading one place. This table is the breakdown behind that number.
+model DailyWasteEntry {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  siteId         String   @map("site_id") @db.Uuid
+  entryDate      DateTime @map("entry_date") @db.Date
+  wasteTypeId    String   @map("waste_type_id") @db.Uuid
+  value          Int
+  recordedById   String?  @map("recorded_by_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  site      Site      @relation(fields: [siteId], references: [id])
+  wasteType WasteType @relation(fields: [wasteTypeId], references: [id])
+
+  @@unique([siteId, entryDate, wasteTypeId])
+  @@index([organizationId, entryDate])
+  @@map("daily_waste_entries")
 }
 
 // ---------------- Company documents ----------------

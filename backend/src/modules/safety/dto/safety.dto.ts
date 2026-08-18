@@ -7,6 +7,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
   MaxLength,
   Min,
@@ -44,6 +45,24 @@ export class SafetyItemDto {
   comment?: string | null;
 }
 
+/** One waste type's figure for the day. */
+export class WasteItemDto {
+  @IsUUID()
+  wasteTypeId!: string;
+
+  /**
+   * Null or absent removes the row, which is how the sheet clears a line it
+   * filled in by mistake. Zero is a recorded zero and stays.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  value?: number | null;
+}
+
+/** The longest waste list worth accepting in one save. */
+export const MAX_WASTE_TYPES = 100;
+
 export class SaveDailyDto {
   @IsString()
   siteId!: string;
@@ -57,6 +76,24 @@ export class SaveDailyDto {
   @ValidateNested({ each: true })
   @Type(() => SafetyItemDto)
   items!: SafetyItemDto[];
+
+  /**
+   * The waste breakdown for the same day. Absent leaves it alone; present
+   * replaces it wholesale, which is what lets the form delete a line.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_WASTE_TYPES)
+  @ValidateNested({ each: true })
+  @Type(() => WasteItemDto)
+  waste?: WasteItemDto[];
+}
+
+export class WasteTypeDto {
+  /** Long enough for "Construction & demolition debris", short enough to read. */
+  @IsString()
+  @MaxLength(80)
+  name!: string;
 }
 
 export class UpsertMetricDto {

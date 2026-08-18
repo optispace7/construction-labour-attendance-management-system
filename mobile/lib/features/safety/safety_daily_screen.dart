@@ -40,6 +40,222 @@ class SafetyItem {
       );
 }
 
+/// The metric whose figure is the total of the waste breakdown, not typed.
+const _wasteMetric = 'WASTE_DISPOSAL';
+
+/// Add, rename and remove the waste types the dropdown offers.
+///
+/// Removing one that already has figures behind it retires it rather than
+/// deleting it — it leaves the dropdown, and the days that counted it keep
+/// their numbers. The API decides which of the two happened and says so.
+class _WasteTypesSheet extends StatefulWidget {
+  const _WasteTypesSheet({required this.types, required this.api});
+
+  final List<WasteTypeOption> types;
+  final Dio api;
+
+  @override
+  State<_WasteTypesSheet> createState() => _WasteTypesSheetState();
+}
+
+class _WasteTypesSheetState extends State<_WasteTypesSheet> {
+  late List<WasteTypeOption> _types = [...widget.types];
+  final _adding = TextEditingController();
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _adding.dispose();
+    super.dispose();
+  }
+
+  void _say(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  /// Runs one catalogue change and refreshes the list from the server, so the
+  /// sheet always shows what was actually saved rather than what was typed.
+  Future<void> _run(Future<void> Function() action) async {
+    setState(() => _busy = true);
+    try {
+      await action();
+      final res = await widget.api.get('/safety/waste-types');
+      if (!mounted) return;
+      setState(() {
+        _types = (res.data as List)
+            .cast<Map<String, dynamic>>()
+            .map(WasteTypeOption.fromMap)
+            .toList();
+      });
+    } on DioException catch (e) {
+      final detail = e.response?.data is Map ? (e.response!.data as Map)['meta'] : null;
+      _say((detail is Map ? detail['message'] as String? : null) ??
+          e.message ??
+          'That did not work.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _add() async {
+    final name = _adding.text.trim();
+    if (name.isEmpty) return;
+    await _run(() async {
+      await widget.api.post('/safety/waste-types', data: {'name': name});
+      _adding.clear();
+    });
+  }
+
+  Future<void> _rename(WasteTypeOption t) async {
+    final controller = TextEditingController(text: t.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(t.isActive ? 'Rename waste type' : 'Restore waste type'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(labelText: 'Name'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty) return;
+    await _run(() async {
+      await widget.api.patch('/safety/waste-types/${t.id}', data: {'name': name});
+    });
+  }
+
+  Future<void> _remove(WasteTypeOption t) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove this waste type?'),
+        content: Text(
+          '"${t.name}" comes off the dropdown. Any day it has already been recorded '
+          'against keeps its figure.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Remove')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _run(() async {
+      final res = await widget.api.delete('/safety/waste-types/${t.id}');
+      final body = (res.data as Map?)?.cast<String, dynamic>();
+      if (body?['retired'] == true) {
+        _say('Retired — ${body?['entriesKept']} recorded entries keep their figures.');
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: ClamsSpacing.lg,
+          right: ClamsSpacing.lg,
+          top: ClamsSpacing.lg,
+          // Clear of the keyboard when the add field has focus.
+          bottom: MediaQuery.of(context).viewInsets.bottom + ClamsSpacing.lg,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Waste types', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+            ClamsSpacing.gapMd,
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _adding,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: const InputDecoration(labelText: 'Add a waste type'),
+                    onSubmitted: (_) => _busy ? null : _add(),
+                  ),
+                ),
+                const SizedBox(width: ClamsSpacing.sm),
+                FilledButton(onPressed: _busy ? null : _add, child: const Text('Add')),
+              ],
+            ),
+            ClamsSpacing.gapMd,
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: _types.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (_, i) {
+                  final t = _types[i];
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(t.isActive ? t.name : '${t.name} · retired'),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextButton(
+                          onPressed: _busy ? null : () => _rename(t),
+                          child: Text(t.isActive ? 'Rename' : 'Restore'),
+                        ),
+                        if (t.isActive)
+                          IconButton(
+                            tooltip: 'Remove',
+                            onPressed: _busy ? null : () => _remove(t),
+                            icon: const Icon(Icons.delete_outline, size: 20),
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One kind of waste the site sends out, as the dropdown offers it.
+class WasteTypeOption {
+  const WasteTypeOption({required this.id, required this.name, required this.isActive});
+
+  final String id;
+  final String name;
+
+  /// Retired types keep their history and their existing lines, but cannot be
+  /// picked for a new one.
+  final bool isActive;
+
+  factory WasteTypeOption.fromMap(Map<String, dynamic> m) => WasteTypeOption(
+        id: m['id'] as String,
+        name: (m['name'] as String?) ?? '',
+        isActive: (m['isActive'] as bool?) ?? true,
+      );
+}
+
+/// A line of the breakdown while it is being edited.
+class _WasteLine {
+  _WasteLine({required this.typeId, required this.count});
+
+  /// Empty on a line just added, until a type is picked.
+  String typeId;
+  final TextEditingController count;
+}
+
 /// The Safety Officer's daily task sheet, on the phone.
 ///
 /// Only the figures somebody types appear here. Manpower, total manpower and
@@ -77,6 +293,13 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
   final Map<String, TextEditingController> _valueCtrls = {};
   final Map<String, TextEditingController> _commentCtrls = {};
 
+  /// The waste dropdown, and the day's breakdown behind the waste figure.
+  List<WasteTypeOption> _wasteTypes = const [];
+  List<_WasteLine> _wasteLines = [];
+
+  /// What the server last said the breakdown was, for the dirty check.
+  Map<String, String> _serverWaste = const {};
+
   bool _loading = true;
   bool _saving = false;
   bool _dirty = false;
@@ -107,14 +330,41 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
       (_valueCtrls[i.metric]?.text.trim() ?? '') != _serverValue(i) ||
       (_commentCtrls[i.metric]?.text.trim() ?? '') != _serverComment(i);
 
+  /// The breakdown as a comparable map, so "has it changed" is one string test.
+  Map<String, String> get _wasteNow => {
+        for (final l in _wasteLines)
+          if (l.typeId.isNotEmpty) l.typeId: l.count.text.trim(),
+      };
+
+  bool get _wasteChanged {
+    final now = _wasteNow;
+    if (now.length != _serverWaste.length) return true;
+    for (final e in now.entries) {
+      if (_serverWaste[e.key] != e.value) return true;
+    }
+    return false;
+  }
+
+  /// The waste figure as it will read once saved. Null when nothing has been
+  /// said about waste at all, which is a blank rather than a zero.
+  int? get _wasteTotal {
+    final filled = _wasteLines.where((l) => l.typeId.isNotEmpty && l.count.text.trim().isNotEmpty);
+    if (filled.isEmpty) return null;
+    return filled.fold(0, (sum, l) => sum! + (int.tryParse(l.count.text.trim()) ?? 0));
+  }
+
   /// Rebuild only when the answer actually flips, so an ordinary keystroke
   /// costs no rebuild at all.
   void _syncDirty() {
     // A reload writes every controller in turn and settles the flag itself;
     // reacting to each write would flip it on and off down the list.
     if (_resetting) return;
-    final now = _items.any(_changed);
-    if (now != _dirty) setState(() => _dirty = now);
+    final now = _items.any(_changed) || _wasteChanged;
+    // The waste total is drawn from these fields, so a keystroke there has to
+    // repaint even when the dirty flag was already set.
+    if (now != _dirty || _wasteChanged) {
+      setState(() => _dirty = now);
+    }
   }
 
   @override
@@ -130,6 +380,9 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     }
     for (final c in _commentCtrls.values) {
       c.dispose();
+    }
+    for (final l in _wasteLines) {
+      l.count.dispose();
     }
     super.dispose();
   }
@@ -158,6 +411,27 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     _resetting = false;
   }
 
+  /// Point the waste section at what the server just returned.
+  void _resetWaste(Map<String, dynamic>? waste) {
+    for (final l in _wasteLines) {
+      l.count.dispose();
+    }
+    _wasteTypes = ((waste?['types'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>()
+        .map(WasteTypeOption.fromMap)
+        .toList();
+    final rows = ((waste?['rows'] as List?) ?? const []).cast<Map<String, dynamic>>();
+    _serverWaste = {
+      for (final r in rows) r['wasteTypeId'] as String: '${(r['value'] as num?)?.toInt() ?? 0}',
+    };
+    _wasteLines = _serverWaste.entries
+        .map((e) => _WasteLine(
+              typeId: e.key,
+              count: TextEditingController(text: e.value)..addListener(_syncDirty),
+            ))
+        .toList();
+  }
+
   Future<void> _load() async {
     setState(() {
       _loading = true;
@@ -184,6 +458,7 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
             .where((i) => !i.isAutomated)
             .toList();
         _resetControllers(_items);
+        _resetWaste((m['waste'] as Map?)?.cast<String, dynamic>());
         _loading = false;
       });
     } on DioException catch (e) {
@@ -256,9 +531,29 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
         };
       }).toList();
 
+      // The breakdown, only when it has been touched. A line taken off the
+      // sheet has to be sent as null rather than simply left out: the API
+      // replaces what it is given, and saying nothing about a type means
+      // "leave it alone", not "delete it".
+      List<Map<String, dynamic>>? waste;
+      if (_wasteChanged) {
+        final now = _wasteNow;
+        waste = [
+          for (final e in now.entries)
+            {'wasteTypeId': e.key, 'value': e.value.isEmpty ? null : int.tryParse(e.value)},
+          for (final id in _serverWaste.keys)
+            if (!now.containsKey(id)) {'wasteTypeId': id, 'value': null},
+        ];
+      }
+
       await ref.read(apiClientProvider).dio.put(
         '/safety/daily',
-        data: {'siteId': _siteId, 'date': _dateParam, 'items': payload},
+        data: {
+          'siteId': _siteId,
+          'date': _dateParam,
+          'items': payload,
+          if (waste != null) 'waste': waste,
+        },
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved.')));
@@ -281,6 +576,10 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
     // Preserve the catalogue's order within each group.
     final groups = <String, List<SafetyItem>>{};
     for (final i in _items) {
+      // Waste has a section of its own below: its figure is the total of a
+      // breakdown, so a card with a Count box would be a second answer to the
+      // same question. Its comment lives down there with it.
+      if (i.metric == _wasteMetric) continue;
       groups.putIfAbsent(i.group, () => []).add(i);
     }
     final canSave = !_loading && !_saving && _dirty && _canEdit;
@@ -362,6 +661,8 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
                       ClamsSpacing.gapSm,
                       ...entry.value.map(_itemCard),
                     ],
+                    ClamsSpacing.gapXl,
+                    _wasteSection(),
                   ],
                 ),
     );
@@ -428,6 +729,189 @@ class _SafetyDailyScreenState extends ConsumerState<SafetyDailyScreen> {
           ),
         ),
       );
+
+  // ---------------------------------------------------------------------------
+  // Waste disposal
+  // ---------------------------------------------------------------------------
+
+  /// Types that may still be picked for a new line — one already on the sheet
+  /// would split the same stream into two figures.
+  List<WasteTypeOption> get _spareWasteTypes {
+    final used = _wasteLines.map((l) => l.typeId).toSet();
+    return _wasteTypes.where((t) => t.isActive && !used.contains(t.id)).toList();
+  }
+
+  void _addWasteLine() {
+    final spare = _spareWasteTypes;
+    if (spare.isEmpty) return;
+    setState(() {
+      _wasteLines.add(_WasteLine(
+        typeId: spare.first.id,
+        count: TextEditingController()..addListener(_syncDirty),
+      ));
+    });
+    _syncDirty();
+  }
+
+  void _removeWasteLine(int i) {
+    setState(() => _wasteLines.removeAt(i).count.dispose());
+    _syncDirty();
+  }
+
+  Widget _wasteSection() {
+    final total = _wasteTotal;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'WASTE DISPOSAL',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.8,
+                  color: ClamsColors.textSecondary,
+                ),
+              ),
+            ),
+            Text(
+              'Total ${total ?? '—'}',
+              style: const TextStyle(fontSize: 12, color: ClamsColors.textSecondary),
+            ),
+            if (_canEdit)
+              TextButton(
+                onPressed: _manageWasteTypes,
+                child: const Text('Manage types'),
+              ),
+          ],
+        ),
+        ClamsSpacing.gapSm,
+        if (_wasteLines.isEmpty)
+          const Padding(
+            padding: EdgeInsets.only(bottom: ClamsSpacing.sm),
+            child: Text(
+              'Nothing recorded today. Add a line for each kind of waste that went out.',
+              style: TextStyle(fontSize: 13, color: ClamsColors.textSecondary),
+            ),
+          ),
+        for (var i = 0; i < _wasteLines.length; i++) _wasteLineCard(i),
+        if (_canEdit)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _spareWasteTypes.isEmpty ? null : _addWasteLine,
+              icon: const Icon(Icons.add, size: 18),
+              label: Text(
+                _spareWasteTypes.isEmpty ? 'Every type is on the sheet' : 'Add waste type',
+              ),
+            ),
+          ),
+        // The waste row's comment, which stays the sheet's to write even though
+        // its figure is now derived.
+        if (_commentCtrls[_wasteMetric] != null)
+          Padding(
+            padding: const EdgeInsets.only(top: ClamsSpacing.sm),
+            child: TextFormField(
+              controller: _commentCtrls[_wasteMetric],
+              enabled: _canEdit,
+              minLines: 1,
+              maxLines: 3,
+              textCapitalization: TextCapitalization.sentences,
+              decoration: const InputDecoration(labelText: 'Waste comment (optional)'),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _wasteLineCard(int i) {
+    final line = _wasteLines[i];
+    // A retired type stays selectable on the line already holding it, so its
+    // figure remains readable and editable; it just cannot be chosen anew.
+    final used = _wasteLines.map((l) => l.typeId).toSet()..remove(line.typeId);
+    final choices =
+        _wasteTypes.where((t) => t.id == line.typeId || (t.isActive && !used.contains(t.id)));
+
+    return Padding(
+      key: ValueKey('waste-${line.typeId}-$i'),
+      padding: const EdgeInsets.only(bottom: ClamsSpacing.sm),
+      child: Container(
+        padding: const EdgeInsets.all(ClamsSpacing.md),
+        decoration: BoxDecoration(
+          color: ClamsColors.surface,
+          border: Border.all(color: ClamsColors.border),
+          borderRadius: BorderRadius.circular(ClamsRadius.card),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                initialValue: line.typeId.isEmpty ? null : line.typeId,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Waste type'),
+                items: [
+                  for (final t in choices)
+                    DropdownMenuItem(
+                      value: t.id,
+                      child: Text(
+                        t.isActive ? t.name : '${t.name} (retired)',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged: _canEdit
+                    ? (v) {
+                        if (v == null) return;
+                        setState(() => line.typeId = v);
+                        _syncDirty();
+                      }
+                    : null,
+              ),
+            ),
+            const SizedBox(width: ClamsSpacing.md),
+            SizedBox(
+              width: 96,
+              child: TextFormField(
+                controller: line.count,
+                enabled: _canEdit,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(labelText: 'Count'),
+              ),
+            ),
+            if (_canEdit)
+              IconButton(
+                tooltip: 'Remove this line',
+                onPressed: () => _removeWasteLine(i),
+                icon: const Icon(Icons.delete_outline, size: 20),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Add, rename and remove the types the dropdown offers.
+  Future<void> _manageWasteTypes() async {
+    // Managing the catalogue reloads the sheet afterwards, which overwrites the
+    // fields — so ask first if there is anything in them.
+    if (_dirty && !await _confirmDiscard()) return;
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => _WasteTypesSheet(
+        types: _wasteTypes,
+        api: ref.read(apiClientProvider).dio,
+      ),
+    );
+    // The sheet edits the catalogue rather than the day, so reload to pick the
+    // new list up — the figures on screen are unchanged by it.
+    if (mounted) await _load();
+  }
 
   Widget _itemCard(SafetyItem it) {
     return Padding(

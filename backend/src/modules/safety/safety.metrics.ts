@@ -110,6 +110,31 @@ export const METRIC_CATALOG: MetricSpec[] = [
   { metric: 'WASTE_DISPOSAL', label: 'Waste disposal', kind: 'MANUAL', group: 'Compliance' },
 ];
 
+/**
+ * The metric whose figure is a sum of a breakdown rather than something typed.
+ *
+ * WASTE_DISPOSAL still holds one number, and every total, chart and export goes
+ * on reading it from there — but the number is now the total of that day's
+ * waste rows, so nothing can type a figure that disagrees with its own detail.
+ */
+export const WASTE_METRIC: SafetyMetric = 'WASTE_DISPOSAL';
+
+/**
+ * What a new organization's waste dropdown starts with — the eight streams the
+ * client named. A starting point, not a fixed list: the types are rows, and the
+ * sheet can add, rename and retire them without a release.
+ */
+export const DEFAULT_WASTE_TYPES = [
+  'Civil / Block Waste',
+  'Gypsum Waste',
+  'Wooden Waste',
+  'Paper Waste',
+  'Scrap / Metal Waste',
+  'Hazardous Waste',
+  'Electrical / E-Waste',
+  'Food Waste',
+] as const;
+
 const BY_METRIC = new Map(METRIC_CATALOG.map((m) => [m.metric, m]));
 
 export const specFor = (m: SafetyMetric): MetricSpec | undefined => BY_METRIC.get(m);
