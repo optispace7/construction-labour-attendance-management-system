@@ -11,9 +11,10 @@ type Sent = { transporter: { sendMail: jest.Mock; verify: jest.Mock } };
 
 function build(sendMail: jest.Mock, verify = jest.fn().mockResolvedValue(true)) {
   const notifications: jest.Mock = jest.fn().mockResolvedValue({});
+  const cleared: jest.Mock = jest.fn().mockResolvedValue({ count: 1 });
   const prisma: any = {
     organization: { findMany: jest.fn().mockResolvedValue([{ id: 'org1' }, { id: 'org2' }]) },
-    notification: { create: notifications },
+    notification: { create: notifications, updateMany: cleared },
   };
   const svc = new MailService(prisma);
   // Swap the real transporter for the double; the constructor built one only
@@ -22,7 +23,14 @@ function build(sendMail: jest.Mock, verify = jest.fn().mockResolvedValue(true)) 
   Object.defineProperty(svc, 'logger', {
     value: { log: jest.fn(), warn: jest.fn(), error: jest.fn() },
   });
-  return { svc, notifications, prisma };
+  // Nobody should sit through the real backoff to watch a retry.
+  Object.defineProperty(svc, 'retryDelayMs', { value: 0, writable: true });
+  return { svc, notifications, cleared, prisma };
+}
+
+/** A refusal carries the SMTP reply code the way nodemailer reports it. */
+function smtpError(message: string, responseCode?: number) {
+  return Object.assign(new Error(message), responseCode ? { responseCode } : {});
 }
 
 describe('MailService', () => {
@@ -78,6 +86,94 @@ describe('MailService', () => {
 
     await svc.send(['a@b.com'], 's', 'b');
     expect(svc.failure).toBeNull();
+  });
+
+  it('takes the banner down when delivery recovers', async () => {
+    const sendMail = jest.fn().mockRejectedValueOnce(new Error('boom')).mockResolvedValue({});
+    const { svc, cleared } = build(sendMail);
+
+    await svc.send(['a@b.com'], 's', 'b');
+    expect(cleared).not.toHaveBeenCalled();
+
+    await svc.send(['a@b.com'], 's', 'b');
+    // The alarm is a stored notification: clearing the field in memory left a
+    // red banner up until somebody clicked Dismiss.
+    expect(cleared).toHaveBeenCalledWith({
+      where: { type: EMAIL_FAILING, readAt: null },
+      data: { readAt: expect.any(Date) },
+    });
+  });
+
+  it('does not sweep the notifications table after every ordinary send', async () => {
+    const { svc, cleared } = build(jest.fn().mockResolvedValue({}));
+
+    await svc.send(['a@b.com'], 's', 'b');
+    await svc.send(['a@b.com'], 's', 'b');
+
+    expect(cleared).not.toHaveBeenCalled();
+  });
+
+  it('clears an alarm raised before this container started', async () => {
+    const { svc, cleared } = build(jest.fn());
+
+    // Nothing failed in *this* process, so there is no in-memory failure to
+    // notice — the standing banner is from the revoked password we just fixed.
+    await svc.onModuleInit();
+
+    expect(cleared).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries once when the server only deferred the message', async () => {
+    const sendMail = jest
+      .fn()
+      .mockRejectedValueOnce(
+        smtpError('Data command failed: 421-4.3.0 Temporary System Problem.', 421),
+      )
+      .mockResolvedValue({});
+    const { svc, notifications } = build(sendMail);
+
+    await expect(svc.send(['a@b.com'], 's', 'b')).resolves.toBe(true);
+    expect(sendMail).toHaveBeenCalledTimes(2);
+    // A blip Gmail told us to sleep off is not an outage anyone needs to see.
+    expect(notifications).not.toHaveBeenCalled();
+  });
+
+  it('reads the deferral off the message when there is no response code', async () => {
+    const sendMail = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('Data command failed: 421-4.3.0 Temporary System Problem.'))
+      .mockResolvedValue({});
+    const { svc } = build(sendMail);
+
+    await expect(svc.send(['a@b.com'], 's', 'b')).resolves.toBe(true);
+    expect(sendMail).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry a refusal', async () => {
+    const sendMail = jest
+      .fn()
+      .mockRejectedValue(
+        smtpError('Invalid login: 535-5.7.8 Username and Password not accepted', 535),
+      );
+    const { svc, notifications } = build(sendMail);
+
+    await expect(svc.send(['a@b.com'], 's', 'b')).resolves.toBe(false);
+    // 5.x.x means never; a revoked password would just fail twice as slowly.
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(notifications).toHaveBeenCalled();
+  });
+
+  it('raises the alarm when the retry fails too', async () => {
+    const sendMail = jest
+      .fn()
+      .mockRejectedValue(
+        smtpError('Data command failed: 421-4.3.0 Temporary System Problem.', 421),
+      );
+    const { svc, notifications } = build(sendMail);
+
+    await expect(svc.send(['a@b.com'], 's', 'b')).resolves.toBe(false);
+    expect(sendMail).toHaveBeenCalledTimes(2);
+    expect(notifications).toHaveBeenCalledTimes(2);
   });
 
   it('finds a revoked password at startup, not at the first send', async () => {

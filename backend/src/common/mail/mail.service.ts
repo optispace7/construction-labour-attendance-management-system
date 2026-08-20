@@ -13,6 +13,29 @@ export const EMAIL_FAILING = 'EMAIL_FAILING';
 const RENOTIFY_AFTER_MS = 6 * 60 * 60 * 1000;
 
 /**
+ * How long to wait before the one retry. Long enough for Gmail to let go of a
+ * throttle, short enough that the forgot-password OTP — the only mail anybody
+ * waits on with the page open — still arrives while they are looking at it.
+ */
+const RETRY_DELAY_MS = 5000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Whether the server said "later" rather than "no".
+ *
+ * A 4.x.x reply is a deferral and a 5.x.x is a refusal; retrying a revoked app
+ * password just fails twice as slowly. Gmail deferred one message on a cold
+ * start with 421-4.3.0 and the missed-logout alert it carried was simply
+ * dropped, because a send that fails is never tried again.
+ */
+function deferred(e: unknown): boolean {
+  const code = (e as { responseCode?: number }).responseCode;
+  if (typeof code === 'number') return code >= 400 && code < 500;
+  return /\b4\d\d[- ]?4\.\d+\.\d+/.test((e as Error)?.message ?? '');
+}
+
+/**
  * Gmail SMTP mailer. Configure with:
  *   GMAIL_USER          — the Gmail address to send from
  *   GMAIL_APP_PASSWORD  — an app password (Google Account → Security → App passwords)
@@ -22,7 +45,8 @@ const RENOTIFY_AFTER_MS = 6 * 60 * 60 * 1000;
  * password is revoked by events nobody schedules — changing the account
  * password revokes every one of them — so the first sign is usually that a mail
  * somebody was relying on never arrived. That went unnoticed for hours once;
- * the panel now says so on the day it happens.
+ * the panel now says so on the day it happens — and stops saying so once mail
+ * is going out again, so the banner means "broken now", not "broke once".
  */
 @Injectable()
 export class MailService implements OnModuleInit {
@@ -31,6 +55,8 @@ export class MailService implements OnModuleInit {
   private lastAlarmAt = 0;
   /** The reason sending last failed, or null while the mailer is healthy. */
   private lastError: string | null = null;
+  /** Held on the instance so a test can retry without waiting five seconds. */
+  private readonly retryDelayMs = RETRY_DELAY_MS;
 
   constructor(private readonly prisma: PrismaService) {
     const user = process.env.GMAIL_USER;
@@ -52,6 +78,10 @@ export class MailService implements OnModuleInit {
     try {
       await this.transporter.verify();
       this.logger.log('SMTP credentials accepted');
+      // A working credential settles any alarm still standing from before this
+      // container started — that is how the revoked-password banner outlived
+      // the revoked password by days.
+      await this.clearAlarm(true);
     } catch (e) {
       await this.raiseAlarm((e as Error).message);
     }
@@ -74,22 +104,63 @@ export class MailService implements OnModuleInit {
   async send(to: string[], subject: string, text: string): Promise<boolean> {
     if (!this.transporter || to.length === 0) return false;
     try {
-      await this.transporter.sendMail({
+      await this.deliver({
         from: process.env.GMAIL_USER,
         bcc: to.join(','),
         subject,
         text,
       });
-      if (this.lastError) {
-        this.lastError = null;
-        this.lastAlarmAt = 0;
-        this.logger.log('Email delivery recovered');
-      }
+      await this.clearAlarm();
       return true;
     } catch (e) {
       this.logger.error(`sendMail failed: ${(e as Error).message}`);
       await this.raiseAlarm((e as Error).message);
       return false;
+    }
+  }
+
+  /**
+   * One attempt, and a second one if the server only deferred us. Twice is the
+   * whole policy: a deferral that outlasts a five-second pause is an outage
+   * worth a banner, not something to keep quietly grinding at.
+   */
+  private async deliver(message: nodemailer.SendMailOptions): Promise<void> {
+    try {
+      await this.transporter!.sendMail(message);
+    } catch (e) {
+      if (!deferred(e)) throw e;
+      const reason = (e as Error).message.split('\n')[0].trim();
+      this.logger.warn(`Deferred by the mail server, retrying once: ${reason}`);
+      await sleep(this.retryDelayMs);
+      await this.transporter!.sendMail(message);
+    }
+  }
+
+  /**
+   * Take the banner down.
+   *
+   * The alarm is a stored notification, so a mailer that starts working again
+   * leaves a red banner standing until somebody clicks Dismiss. A twenty-eight
+   * minute deferral read as a live outage the following morning. Pass `force`
+   * when the mailer is known good but this process never saw it fail.
+   */
+  private async clearAlarm(force = false) {
+    const wasFailing = this.lastError !== null;
+    this.lastError = null;
+    this.lastAlarmAt = 0;
+    if (!wasFailing && !force) return;
+    if (wasFailing) this.logger.log('Email delivery recovered');
+
+    try {
+      const { count } = await this.prisma.notification.updateMany({
+        where: { type: EMAIL_FAILING, readAt: null },
+        // No readBy: nobody read it, the mailer simply came back.
+        data: { readAt: new Date() },
+      });
+      if (count > 0) this.logger.log(`Cleared ${count} standing email-delivery alarm(s)`);
+    } catch (e) {
+      // Same rule as raising it — the alarm must never break the caller.
+      this.logger.error(`Could not clear the email-delivery alarm: ${(e as Error).message}`);
     }
   }
 
