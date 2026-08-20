@@ -10,6 +10,7 @@ import {
   METRIC_CATALOG,
   SAFETY_PERFORMANCE_TARGET,
   SAFE_MAN_HOURS_PER_DAY,
+  SCORE_INACTIVITY_MIN_DAYS,
   WASTE_METRIC,
   isAutomated,
   safetyPerformance,
@@ -30,6 +31,17 @@ const DAY_MS = 86_400_000;
 const MAX_CUSTOM_RANGE_DAYS = 366;
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const midnight = (v: string) => new Date(`${v.slice(0, 10)}T00:00:00.000Z`);
+
+/**
+ * How the derived metrics are named on the statistics board, where the figure
+ * covers the selected window rather than one day. The catalogue keeps its own
+ * labels for the daily sheet, which really is a single day.
+ */
+const WINDOW_METRIC_LABELS: Partial<Record<SafetyMetric, string>> = {
+  DAILY_MANPOWER: 'Manpower',
+  TOTAL_MANPOWER: 'Total manpower to date',
+  TOTAL_SAFE_MAN_HOURS: 'Safe man-hours',
+};
 
 @Injectable()
 export class SafetyService {
@@ -99,24 +111,39 @@ export class SafetyService {
   }
 
   /**
-   * The three figures nobody types in.
+   * The two counts every derived figure is built from.
    *
-   * `dailyManpower` is that date's man-days. `totalManpower` is every man-day up
-   * to and including it — cumulative since the project began, which is why it
-   * dwarfs the daily number. Safe man-hours is that total at a flat shift length,
-   * and does NOT reset on a lost-time injury: the client asked for the running
-   * total, not the since-last-incident streak.
+   * `inWindow` is the man-days falling inside [start, end]; `toDate` is every
+   * man-day up to and including `end`, cumulative since the project began, which
+   * is why it dwarfs the other. Kept as raw counts rather than a finished metric
+   * map because the daily sheet and the statistics board want them combined
+   * differently — the sheet is always one day, the board is whatever window the
+   * reader picked.
+   */
+  private async manpowerCounts(user: AuthUser, sites: string[] | null, start: Date, end: Date) {
+    const where = this.sessionWhere(user, sites);
+    const [inWindow, toDate] = await Promise.all([
+      this.prisma.attendanceSession.count({
+        where: { ...where, workDate: { gte: start, lte: end } },
+      }),
+      this.prisma.attendanceSession.count({ where: { ...where, workDate: { lte: end } } }),
+    ]);
+    return { inWindow, toDate };
+  }
+
+  /**
+   * The three figures nobody types in, as the daily sheet means them: one day's
+   * man-days, the project-to-date total, and that total at a flat shift length.
+   *
+   * Safe man-hours does NOT reset on a lost-time injury — the client asked for
+   * the running total, not the since-last-incident streak.
    */
   private async automated(user: AuthUser, sites: string[] | null, date: Date) {
-    const where = this.sessionWhere(user, sites);
-    const [dailyManpower, totalManpower] = await Promise.all([
-      this.prisma.attendanceSession.count({ where: { ...where, workDate: date } }),
-      this.prisma.attendanceSession.count({ where: { ...where, workDate: { lte: date } } }),
-    ]);
+    const { inWindow, toDate } = await this.manpowerCounts(user, sites, date, date);
     return {
-      DAILY_MANPOWER: dailyManpower,
-      TOTAL_MANPOWER: totalManpower,
-      TOTAL_SAFE_MAN_HOURS: totalManpower * SAFE_MAN_HOURS_PER_DAY,
+      DAILY_MANPOWER: inWindow,
+      TOTAL_MANPOWER: toDate,
+      TOTAL_SAFE_MAN_HOURS: toDate * SAFE_MAN_HOURS_PER_DAY,
     } satisfies Partial<Record<SafetyMetric, number>>;
   }
 
@@ -608,13 +635,15 @@ export class SafetyService {
       });
       const perDay = new Map<string, number>();
       for (const s of sessions) perDay.set(iso(s.workDate), (perDay.get(iso(s.workDate)) ?? 0) + 1);
-      // Cumulative metrics need the running total from before the window opened.
+      // Only TOTAL_MANPOWER still runs a total forward; the other two are
+      // per-day figures and would be nonsense carried over from before the
+      // window opened.
       const priorTotal =
-        spec.metric === 'DAILY_MANPOWER'
-          ? 0
-          : await this.prisma.attendanceSession.count({
+        spec.metric === 'TOTAL_MANPOWER'
+          ? await this.prisma.attendanceSession.count({
               where: { ...this.sessionWhere(user, sites), workDate: { lt: start } },
-            });
+            })
+          : 0;
       let running = priorTotal;
       const comments = await this.commentsFor(user, opts.metric, sites, start, end);
       return {
@@ -629,7 +658,10 @@ export class SafetyService {
               ? dayCount
               : spec.metric === 'TOTAL_MANPOWER'
                 ? running
-                : running * SAFE_MAN_HOURS_PER_DAY;
+                : // Hours earned that day, matching the board's window figure —
+                  // a running curve here beside a period total on the card was
+                  // two different questions answered as one.
+                  dayCount * SAFE_MAN_HOURS_PER_DAY;
           return {
             date: d,
             value,
@@ -751,7 +783,10 @@ export class SafetyService {
       days,
       daily,
       cumulative,
+      /** Running total at a flat shift length — the shape behind "to date". */
       safeManHours: cumulative.map((v) => v * SAFE_MAN_HOURS_PER_DAY),
+      /** Hours earned each day — the shape behind the window's safe man-hours. */
+      dailySafeManHours: daily.map((v) => v * SAFE_MAN_HOURS_PER_DAY),
     };
   }
 
@@ -854,15 +889,14 @@ export class SafetyService {
      */
     const trendStart = period === 'daily' ? new Date(anchor.getTime() - 6 * DAY_MS) : start;
 
-    const [derived, totals, trend, manpower, siteName] = await Promise.all([
-      this.automated(user, sites, anchor),
+    const [counts, totals, trend, manpower, siteName] = await Promise.all([
+      this.manpowerCounts(user, sites, start, end),
       this.totalsOver(user, sites, start, end),
       this.trendOver(user, sites, trendStart, end),
-      // A fixed trailing month, NOT the selected window. These three cards are
-      // "as of the anchor date" snapshots rather than period aggregates — their
-      // values already ignore the window — and on a daily report the window is
-      // one day, which is a single point and therefore no line at all.
-      this.manpowerSeries(user, sites, new Date(anchor.getTime() - 29 * DAY_MS), anchor),
+      // The selected window, on the same run-up rule as the trend: a daily
+      // report gets six days of context so the sparklines are lines rather than
+      // a single dot, and every other period plots exactly what was chosen.
+      this.manpowerSeries(user, sites, trendStart, end),
       opts.siteId && opts.siteId !== 'all'
         ? this.prisma.site
             .findFirst({
@@ -892,7 +926,28 @@ export class SafetyService {
       n(t, 'UNSAFE_CONDITIONS_CLOSED') +
       n(t, 'SAFETY_OBSERVATION_CLOSED');
 
-    const monthScore = safetyPerformance(mTot);
+    /**
+     * The score follows the selected window, not the calendar month.
+     *
+     * Switching period used to leave the dial where it was, which read as a
+     * broken filter. The inactivity deductions are held back on anything
+     * shorter than a month: charging a Tuesday for having no training on it
+     * would open every daily report at 96 and say nothing about safety.
+     */
+    const windowDays = Math.round((end.getTime() - start.getTime()) / DAY_MS) + 1;
+    const periodScore = safetyPerformance(totals, {
+      scoreInactivity: windowDays >= SCORE_INACTIVITY_MIN_DAYS,
+    });
+
+    const derived = {
+      // The window's man-days, so the headline moves with the filter.
+      DAILY_MANPOWER: counts.inWindow,
+      // Still cumulative — "as of" the last day of the window rather than of
+      // whichever date happened to be in the picker.
+      TOTAL_MANPOWER: counts.toDate,
+      // Hours earned inside the window, matching the manpower beside it.
+      TOTAL_SAFE_MAN_HOURS: counts.inWindow * SAFE_MAN_HOURS_PER_DAY,
+    } satisfies Partial<Record<SafetyMetric, number>>;
 
     const breakup = [
       { key: 'UNSAFE_ACTS', label: 'Unsafe acts', value: n(totals, 'UNSAFE_ACTS') },
@@ -918,14 +973,17 @@ export class SafetyService {
       siteId: opts.siteId ?? 'all',
       siteName,
       kpis: {
-        dailyManpower: derived.DAILY_MANPOWER,
+        // Named for what they now measure: two window figures and one running
+        // total. The old dailyManpower/totalSafeManHours names described an
+        // anchor-date snapshot and would lie about the numbers underneath.
+        periodManpower: derived.DAILY_MANPOWER,
         totalManpower: derived.TOTAL_MANPOWER,
-        totalSafeManHours: derived.TOTAL_SAFE_MAN_HOURS,
-        // Always the calendar month, whatever period is selected: the score is
-        // defined as a month that opens at 100 and is worn down from there.
-        safetyPerformance: monthScore.score,
-        safetyPerformanceDeductions: monthScore.deductions,
+        periodSafeManHours: derived.TOTAL_SAFE_MAN_HOURS,
+        safetyPerformance: periodScore.score,
+        safetyPerformanceDeductions: periodScore.deductions,
         safetyPerformanceTarget: SAFETY_PERFORMANCE_TARGET,
+        /** Whether the routine-activity deductions were in play for this window. */
+        safetyPerformanceScoredInactivity: windowDays >= SCORE_INACTIVITY_MIN_DAYS,
       },
       trend,
       // Series behind the three headline cards, so each has a shape to plot.
@@ -954,7 +1012,10 @@ export class SafetyService {
       // Every catalogue metric with its period figure, for the big list.
       statistics: METRIC_CATALOG.map((spec) => ({
         metric: spec.metric,
-        label: spec.label,
+        // The catalogue labels belong to the daily sheet, where every automated
+        // figure is one day's. On a board showing a week, "Daily manpower"
+        // against a week's man-days is simply the wrong word.
+        label: WINDOW_METRIC_LABELS[spec.metric] ?? spec.label,
         kind: spec.kind,
         group: spec.group,
         value:

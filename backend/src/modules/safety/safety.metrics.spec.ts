@@ -146,6 +146,25 @@ describe('safetyPerformance', () => {
     expect(score).toBe(97);
   });
 
+  it('can be told to leave the routine-activity deductions alone', () => {
+    // What a window shorter than a month is scored on: a Tuesday with no
+    // training on it has not failed at training.
+    const { score, deductions } = safetyPerformance(
+      { TOOLBOX_TALK: 1 },
+      { scoreInactivity: false },
+    );
+    expect(score).toBe(100);
+    expect(deductions).toEqual([]);
+  });
+
+  it('still scores incidents and open findings when inactivity is held back', () => {
+    const { score } = safetyPerformance(
+      { LOST_TIME_INJURY: 1, UNSAFE_ACTS: 3, UNSAFE_ACTS_CLOSED: 1 },
+      { scoreInactivity: false },
+    );
+    expect(score).toBe(88);
+  });
+
   it('floors at 0 rather than going negative', () => {
     expect(safetyPerformance({ ...active, LOST_TIME_INJURY: 20 }).score).toBe(0);
   });

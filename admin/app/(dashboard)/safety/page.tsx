@@ -48,15 +48,26 @@ interface SafetyStats {
   siteId: string;
   siteName: string | null;
   kpis: {
-    dailyManpower: number;
+    /** Man-days inside the selected window. */
+    periodManpower: number;
+    /** Cumulative man-days through the window's last day. */
     totalManpower: number;
-    totalSafeManHours: number;
+    /** Hours earned inside the window. */
+    periodSafeManHours: number;
     safetyPerformance: number;
     safetyPerformanceDeductions: ScoreDeduction[];
     safetyPerformanceTarget: number;
+    /** False on windows too short to charge for routine work not done. */
+    safetyPerformanceScoredInactivity: boolean;
   };
   trend: { days: string[]; series: TrendSeries[] };
-  manpower: { days: string[]; daily: number[]; cumulative: number[]; safeManHours: number[] };
+  manpower: {
+    days: string[];
+    daily: number[];
+    cumulative: number[];
+    safeManHours: number[];
+    dailySafeManHours: number[];
+  };
   summary: SliceRow[];
   observations: ObservationRow[];
   glance: { totalInspection: number; unsafeActsClosed: number; unsafeConditionsClosed: number };
@@ -184,12 +195,19 @@ function SafetyStatisticsBoard() {
     }
   }
 
+  /**
+   * Named off the period the figures on screen were actually built for, not the
+   * one in the dropdown. While a new window is loading the last good board is
+   * still showing, and labelling those numbers with the pending period is how a
+   * card comes to read "Manpower this week" over a day's total.
+   */
+  const shownPeriod = d?.period ?? period;
   const periodLabel =
-    period === 'daily'
+    shownPeriod === 'daily'
       ? 'today'
-      : period === 'weekly'
+      : shownPeriod === 'weekly'
         ? 'this week'
-        : period === 'monthly'
+        : shownPeriod === 'monthly'
           ? 'this month'
           : 'over the range';
 
@@ -302,9 +320,9 @@ function SafetyStatisticsBoard() {
         <div className="mb-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <Item>
             <MetricCard
-              label="Today's manpower"
-              value={d?.kpis.dailyManpower ?? null}
-              tooltip="Labour man-days recorded on the selected date."
+              label={`Manpower ${periodLabel}`}
+              value={d?.kpis.periodManpower ?? null}
+              tooltip="Labour man-days recorded inside the selected period."
               spark={d?.manpower?.daily}
               sparkHeight={92}
               loading={loading}
@@ -314,9 +332,24 @@ function SafetyStatisticsBoard() {
           </Item>
           <Item>
             <MetricCard
-              label="Total manpower as of now"
+              label={`Safe man-hours ${periodLabel}`}
+              value={d?.kpis.periodSafeManHours ?? null}
+              hint="10h per man-day"
+              tooltip="Man-days inside the period, credited at ten hours each."
+              spark={d?.manpower?.dailySafeManHours}
+              sparkHeight={92}
+              loading={loading}
+              tone="positive"
+            />
+          </Item>
+          <Item>
+            {/* The one figure that is deliberately not a period total: a running
+                project count, read as of the last day of the window. */}
+            <MetricCard
+              label="Total manpower to date"
               value={d?.kpis.totalManpower ?? null}
-              tooltip="Every labour man-day up to and including the selected date."
+              hint={d ? `through ${d.to}` : undefined}
+              tooltip="Every labour man-day from the start of the project up to the last day of the selected period."
               spark={d?.manpower?.cumulative}
               sparkHeight={92}
               loading={loading}
@@ -324,22 +357,15 @@ function SafetyStatisticsBoard() {
             />
           </Item>
           <Item>
-            <MetricCard
-              label="Total safe man-hours"
-              value={d?.kpis.totalSafeManHours ?? null}
-              hint="10h per man-day"
-              tooltip="Cumulative man-days credited at ten hours each."
-              spark={d?.manpower?.safeManHours}
-              sparkHeight={92}
-              loading={loading}
-              tone="positive"
-            />
-          </Item>
-          <Item>
             <Panel className="flex h-full flex-col">
-              {/* Always the month, whatever period is selected — the score is
-                  defined as a month that opens at 100 and is worn down. */}
-              <PanelHead title="Safety performance" subtitle="Score this month" />
+              <PanelHead
+                title="Safety performance"
+                subtitle={
+                  d && !d.kpis.safetyPerformanceScoredInactivity
+                    ? `Score ${periodLabel} · incidents and open findings only`
+                    : `Score ${periodLabel}`
+                }
+              />
               <div className="flex flex-1 flex-col items-center justify-center gap-2 pb-4">
                 <SafetyScoreDial
                   value={d?.kpis.safetyPerformance ?? null}
@@ -498,8 +524,10 @@ function SafetyStatisticsBoard() {
       />
 
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
-        Manpower counts labour only, matching the manpower report. Safe man-hours are cumulative
-        man-days at ten hours each and do not reset after an incident.
+        Manpower counts labour only, matching the manpower report. Every figure covers the selected
+        period except total manpower to date, which runs from the start of the project to the last
+        day of that period. Safe man-hours are man-days at ten hours each and do not reset after an
+        incident.
       </Typography>
     </Box>
   );
@@ -518,7 +546,7 @@ function ScoreWorking({ lines, loading }: { lines: ScoreDeduction[]; loading: bo
   if (lines.length === 0) {
     return (
       <p className="px-5 text-center text-[12px] text-ink-faint">
-        Nothing deducted — a clean month.
+        Nothing deducted — a clean period.
       </p>
     );
   }

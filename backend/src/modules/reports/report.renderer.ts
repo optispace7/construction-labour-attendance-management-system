@@ -1197,9 +1197,12 @@ export interface SafetyPdfReport {
   to: string;
   siteName: string | null;
   kpis: {
-    dailyManpower: number;
+    /** Man-days inside the reported window. */
+    periodManpower: number;
+    /** Cumulative man-days through the window's last day. */
     totalManpower: number;
-    totalSafeManHours: number;
+    /** Hours earned inside the window. */
+    periodSafeManHours: number;
     safetyPerformance: number;
     safetyPerformanceTarget: number;
   };
@@ -1564,13 +1567,24 @@ export function renderSafetyPdf(
     let y = headH + 16;
     const tileH = 58;
     const tileW = (contentW - gap * 3) / 4;
+    // Three of the four tiles now cover the reported window, so they have to
+    // say which window — a sheet headed "Weekly" with a tile reading "Today's
+    // manpower" was the printed version of the same confusion.
+    const span =
+      periodName === 'Daily'
+        ? 'today'
+        : periodName === 'Weekly'
+          ? 'this week'
+          : periodName === 'Monthly'
+            ? 'this month'
+            : 'in range';
     const tiles: [string, string, string][] = [
-      ["Today's manpower", fmt(r.kpis.dailyManpower), SERIES[0]],
-      ['Total manpower as of now', fmt(r.kpis.totalManpower), SERIES[4]],
-      ['Total safe man-hours', fmt(r.kpis.totalSafeManHours), SERIES[5]],
+      [`Manpower ${span}`, fmt(r.kpis.periodManpower), SERIES[0]],
+      ['Total manpower to date', fmt(r.kpis.totalManpower), SERIES[4]],
+      [`Safe man-hours ${span}`, fmt(r.kpis.periodSafeManHours), SERIES[5]],
       // Short on purpose: the dial in the score panel carries the target, and
       // this tile only has room for a label that stays on one line.
-      ['Safety score this month', `${r.kpis.safetyPerformance}%`, SERIES[3]],
+      [`Safety score ${span}`, `${r.kpis.safetyPerformance}%`, SERIES[3]],
     ];
     tiles.forEach(([label, value, accent], i) => {
       drawKpiTile(doc, M + (tileW + gap) * i, y, tileW, tileH, label, value, accent);
@@ -1607,7 +1621,7 @@ export function renderSafetyPdf(
       contentW - trendW - obsW - gap * 2,
       midH,
       'Safety score',
-      'The month, and every point off it',
+      'The period, and every point off it',
     );
     // Dial beside the working, not above it. Stacked, the dial ate half the
     // panel and the deductions were cut to three of four with a "+ 1 more" —
@@ -1679,7 +1693,7 @@ function drawScoreLines(
 ) {
   const { x, y, w, h } = box;
   if (lines.length === 0) {
-    return emptyPanel(doc, box, 'Nothing deducted — a clean month at 100%');
+    return emptyPanel(doc, box, 'Nothing deducted — a clean period at 100%');
   }
   const rowH = 17;
   const shown = lines.slice(0, Math.max(1, Math.floor(h / rowH)));

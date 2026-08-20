@@ -188,6 +188,16 @@ export const SAFETY_SCORE_WEIGHTS = {
 } as const;
 
 /**
+ * The shortest window the inactivity deductions are allowed to bite on.
+ *
+ * Twenty-eight days is February — the shortest thing anyone calls a month — so
+ * every monthly window clears it and no daily or weekly one does. Without this
+ * floor a single quiet Tuesday opens at 96, because four routine activities
+ * that nobody expects daily all read as "none recorded".
+ */
+export const SCORE_INACTIVITY_MIN_DAYS = 28;
+
+/**
  * The routine safety work a month is expected to show at least some of.
  *
  * Scored once for the month rather than once per day: a per-day penalty over a
@@ -245,8 +255,18 @@ export interface SafetyScore {
  * Note the deliberate trade the client accepted: raising a finding and not
  * closing it costs a point, so the score is not neutral to how much a site
  * reports. Closing what you raise is what protects it.
+ *
+ * `scoreInactivity` exists because the board now scores whatever window is
+ * selected. "No training recorded" is a fair charge against a month and a
+ * meaningless one against a Tuesday, so a window shorter than a month is scored
+ * on what went wrong in it and not on the routine work it was too short to
+ * hold. See SCORE_INACTIVITY_MIN_DAYS.
  */
-export function safetyPerformance(totals: Partial<Record<SafetyMetric, number>>): SafetyScore {
+export function safetyPerformance(
+  totals: Partial<Record<SafetyMetric, number>>,
+  opts: { scoreInactivity?: boolean } = {},
+): SafetyScore {
+  const { scoreInactivity = true } = opts;
   const n = (m: SafetyMetric) => totals[m] ?? 0;
   const deductions: SafetyScoreLine[] = [];
 
@@ -282,7 +302,7 @@ export function safetyPerformance(totals: Partial<Record<SafetyMetric, number>>)
 
   // Nothing entered at all is a month not yet started, not a month failed.
   const recorded = Object.keys(totals).length > 0;
-  if (recorded) {
+  if (recorded && scoreInactivity) {
     for (const metric of ACTIVITY_METRICS) {
       if (n(metric) === 0) {
         deductions.push({
