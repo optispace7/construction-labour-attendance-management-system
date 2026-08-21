@@ -62,37 +62,22 @@ const visibleFor = (role: Parameters<typeof navForRole>[0]) =>
     .map((i) => i.href);
 
 describe('hidden nav items', () => {
-  it('keeps the safety pages out of the two admin roles’ visible nav', () => {
-    // navForRole still returns them — the shell filters on `hiddenFor` — so the
-    // guarantee being checked is that they are flagged for those roles.
-    for (const role of ['SUPER_ADMIN', 'SITE_ADMIN'] as const) {
-      const visible = visibleFor(role);
-      expect(visible).not.toContain('/safety');
-      expect(visible).not.toContain('/safety/daily');
-    }
-  });
-
-  it('gives the safety officer the board without the chord — it is their record', () => {
-    const visible = visibleFor('SUPERVISOR');
-    expect(visible).toContain('/safety');
-    expect(visible).toContain('/safety/daily');
-    expect(isPathHiddenFor('SUPERVISOR', '/safety')).toBe(false);
-    expect(isPathHiddenFor('SUPERVISOR', '/safety/daily')).toBe(false);
-  });
-
-  it('flags exactly the two safety pages, and only against the admin roles', () => {
-    const hidden = NAV_ITEMS.filter((i) => i.hiddenFor?.length).map((i) => i.href).sort();
-    expect(hidden).toEqual(['/safety', '/safety/daily']);
-    for (const role of ['SUPER_ADMIN', 'SITE_ADMIN'] as const) {
-      expect(isPathHiddenFor(role, '/safety')).toBe(true);
-      // Resolved by the most specific rule, not by '/safety' swallowing it.
-      expect(isPathHiddenFor(role, '/safety/daily')).toBe(true);
-    }
-  });
-
-  it('conceals nothing else', () => {
+  it('gives every role that carries the safety pages an ordinary sidebar entry', () => {
+    // They were concealed from the admin roles while the board was in progress.
+    // It has shipped, so the chord is no longer between anyone and the page.
     for (const role of ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'] as const) {
-      for (const path of ['/', '/attendance', '/reports', '/workers']) {
+      const visible = visibleFor(role);
+      expect(visible).toContain('/safety');
+      expect(visible).toContain('/safety/daily');
+    }
+  });
+
+  it('conceals nothing from anyone', () => {
+    // The machinery stays for the next page that needs shaping in production;
+    // what it must not do is keep hiding a board that is finished.
+    expect(NAV_ITEMS.filter((i) => i.hiddenFor?.length)).toEqual([]);
+    for (const role of ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'] as const) {
+      for (const path of ['/', '/attendance', '/reports', '/workers', '/safety', '/safety/daily']) {
         expect(isPathHiddenFor(role, path)).toBe(false);
       }
     }

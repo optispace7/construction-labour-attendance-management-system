@@ -48,25 +48,22 @@ export const NAV_ITEMS: NavItem[] = [
   { label: 'Reports', href: '/reports', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'Operations' },
   // The safety board is the Safety Officer's own record: they enter the daily
   // figures and read the statistics off them, so both pages are theirs as much
-  // as an admin's — and they get them in the sidebar, no chord needed.
+  // as an admin's.
   //
-  // Still concealed from the two admin roles. A client holds an admin login to
-  // this panel and was asking about a board that is still being shaped, so it
-  // stays out of *their* rail until someone presses the reveal chord. Drop the
-  // `hiddenFor` lists to ship it to everyone.
+  // These were concealed from the two admin roles while the board was being
+  // shaped, because a client holds an admin login to this panel. It is shaped;
+  // both pages now ship to everyone whose role carries them, no chord needed.
   {
     label: 'Safety statistics',
     href: '/safety',
     roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
     group: 'Safety',
-    hiddenFor: ['SUPER_ADMIN', 'SITE_ADMIN'],
   },
   {
     label: 'Daily task',
     href: '/safety/daily',
     roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'],
     group: 'Safety',
-    hiddenFor: ['SUPER_ADMIN', 'SITE_ADMIN'],
   },
   { label: 'Workers', href: '/workers', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
   { label: 'Staff', href: '/staff', roles: ['SUPER_ADMIN', 'SITE_ADMIN', 'SUPERVISOR'], group: 'People' },
