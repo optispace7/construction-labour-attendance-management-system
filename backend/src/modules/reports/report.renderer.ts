@@ -1212,8 +1212,6 @@ export interface SafetyPdfReport {
   observations: { bucket: string; raised: number; closed: number }[];
   statistics: { label: string; kind: string; value: number }[];
   categoryBreakup: { rows: { label: string; value: number; percent: number }[] };
-  /** The split behind the single waste figure in the statistics list. */
-  wasteBreakup: { rows: { label: string; value: number; percent: number }[] };
 }
 
 /** Headline tile for the safety sheet. */
@@ -1656,31 +1654,18 @@ export function renderSafetyPdf(
     const listBox = panel(doc, M, y, listW, lowH, 'Safety statistics', 'Every tracked item');
     drawStatList(doc, listBox, r.statistics);
 
-    // The right-hand column carries two breakups stacked: findings and
-    // incidents, then the waste split that the single "Waste disposal" line in
-    // the list is the total of. Printing the total without its detail was the
-    // gap the client hit — the sheet asks for eight numbers a day and the
-    // report showed one.
-    const rightX = M + listW + gap;
-    const rightW = contentW - listW - gap;
-    const topH = Math.round((lowH - gap) * 0.52);
-    drawCategoryBars(
-      doc,
-      panel(doc, rightX, y, rightW, topH, 'Category-wise breakup', 'Findings and incidents'),
-      r.categoryBreakup.rows,
-    );
     drawCategoryBars(
       doc,
       panel(
         doc,
-        rightX,
-        y + topH + gap,
-        rightW,
-        lowH - topH - gap,
-        'Waste disposal',
-        'By type, over the period',
+        M + listW + gap,
+        y,
+        contentW - listW - gap,
+        lowH,
+        'Category-wise breakup',
+        'Findings and incidents',
       ),
-      r.wasteBreakup.rows,
+      r.categoryBreakup.rows,
     );
 
     doc.font('Helvetica').fontSize(6.5).fillColor(INK_3);

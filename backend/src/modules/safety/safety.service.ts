@@ -922,55 +922,6 @@ export class SafetyService {
   }
 
   /**
-   * Waste disposal split by type over a window — the detail behind the single
-   * WASTE_DISPOSAL figure.
-   *
-   * The sheet asks for eight numbers a day and the board reported their sum, so
-   * the split the client actually types in was visible only on the day it was
-   * entered. It is the same breakdown table the daily sheet writes, summed over
-   * whatever period the board is showing.
-   *
-   * Retired types are still listed when they hold figures inside the window:
-   * retiring a stream should not quietly rewrite the months it was in use.
-   */
-  private async wasteBreakupOver(
-    user: AuthUser,
-    sites: string[] | null,
-    start: Date,
-    end: Date,
-  ): Promise<{ total: number; rows: { key: string; label: string; value: number }[] }> {
-    const grouped = await this.prisma.dailyWasteEntry.groupBy({
-      by: ['wasteTypeId'],
-      where: {
-        organizationId: user.organizationId,
-        entryDate: { gte: start, lte: end },
-        ...(sites ? { siteId: { in: sites } } : {}),
-      },
-      _sum: { value: true },
-    });
-    if (grouped.length === 0) return { total: 0, rows: [] };
-
-    const types = await this.prisma.wasteType.findMany({
-      where: { id: { in: grouped.map((g) => g.wasteTypeId) }, organizationId: user.organizationId },
-      select: { id: true, name: true, sortOrder: true },
-    });
-    const byId = new Map(types.map((t) => [t.id, t]));
-    const rows = grouped
-      .map((g) => ({
-        key: g.wasteTypeId,
-        label: byId.get(g.wasteTypeId)?.name ?? 'Unknown type',
-        sortOrder: byId.get(g.wasteTypeId)?.sortOrder ?? 0,
-        value: g._sum.value ?? 0,
-      }))
-      // The dropdown's own order, so the board reads down the same list the
-      // officer fills in rather than reshuffling by size every period.
-      .sort((a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label))
-      .map(({ key, label, value }) => ({ key, label, value }));
-
-    return { total: rows.reduce((a, r) => a + r.value, 0), rows };
-  }
-
-  /**
    * A YYYY-MM-DD query parameter as a UTC midnight.
    *
    * Checked rather than trusted: `new Date('rubbish')` is an Invalid Date, which
@@ -1053,7 +1004,7 @@ export class SafetyService {
      */
     const trendStart = period === 'daily' ? new Date(anchor.getTime() - 6 * DAY_MS) : start;
 
-    const [counts, totals, trend, manpower, wasteBreakup, siteName] = await Promise.all([
+    const [counts, totals, trend, manpower, siteName] = await Promise.all([
       this.manpowerCounts(user, sites, start, end),
       this.totalsOver(user, sites, start, end),
       this.trendOver(user, sites, trendStart, end),
@@ -1061,9 +1012,6 @@ export class SafetyService {
       // report gets six days of context so the sparklines are lines rather than
       // a single dot, and every other period plots exactly what was chosen.
       this.manpowerSeries(user, sites, trendStart, end),
-      // The split behind the waste figure, over exactly the window the totals
-      // above cover.
-      this.wasteBreakupOver(user, sites, start, end),
       opts.siteId && opts.siteId !== 'all'
         ? this.prisma.site
             .findFirst({
@@ -1197,19 +1145,6 @@ export class SafetyService {
           percent: breakupTotal > 0 ? Math.round((b.value / breakupTotal) * 100) : 0,
         })),
       },
-      /**
-       * Waste disposal by type, the same shape as the category breakup so the
-       * page can draw it with the panel it already has. Empty when nothing has
-       * been recorded in the window, which the panel shows as an empty state
-       * rather than a ring of zeroes.
-       */
-      wasteBreakup: {
-        total: wasteBreakup.total,
-        rows: wasteBreakup.rows.map((r) => ({
-          ...r,
-          percent: wasteBreakup.total > 0 ? Math.round((r.value / wasteBreakup.total) * 100) : 0,
-        })),
-      },
       reportingSummary: {
         daily: raised(dTot) + closed(dTot),
         weekly: raised(wTot) + closed(wTot),
@@ -1293,7 +1228,6 @@ export class SafetyService {
         observations: s.observations,
         statistics: s.statistics.map((x) => ({ label: x.label, kind: x.kind, value: x.value })),
         categoryBreakup: { rows: s.categoryBreakup.rows },
-        wasteBreakup: { rows: s.wasteBreakup.rows },
       },
       org?.name ?? '',
       periodName,

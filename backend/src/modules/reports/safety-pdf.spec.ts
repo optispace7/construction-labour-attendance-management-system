@@ -3,9 +3,8 @@ import { renderSafetyPdf, SafetyPdfReport } from './report.renderer';
 /**
  * The safety sheet is a one-page export, and it is laid out by hand: fixed
  * boxes filled top to bottom rather than a flow that would reflow onto page
- * two. Adding the waste breakdown put a fourth panel on the lower half, so this
- * pins the thing that would actually break — a second page appearing, or the
- * render throwing on an empty panel — rather than the pixels.
+ * two. This pins the thing that would actually break when a panel is added or
+ * resized — a second page appearing — rather than the pixels.
  */
 
 const days = Array.from({ length: 30 }, (_, i) => `2026-08-${String(i + 1).padStart(2, '0')}`);
@@ -54,18 +53,6 @@ const report = (over: Partial<SafetyPdfReport> = {}): SafetyPdfReport => ({
       { label: 'Lost time injuries', value: 1, percent: 4 },
     ],
   },
-  wasteBreakup: {
-    rows: [
-      { label: 'Civil / Block Waste', value: 48, percent: 35 },
-      { label: 'Gypsum Waste', value: 30, percent: 22 },
-      { label: 'Wooden Waste', value: 22, percent: 16 },
-      { label: 'Paper Waste', value: 15, percent: 11 },
-      { label: 'Scrap / Metal Waste', value: 12, percent: 9 },
-      { label: 'Hazardous Waste', value: 6, percent: 4 },
-      { label: 'Electrical / E-Waste', value: 3, percent: 2 },
-      { label: 'Food Waste', value: 1, percent: 1 },
-    ],
-  },
   ...over,
 });
 
@@ -73,22 +60,10 @@ const pageCount = (buf: Buffer) =>
   buf.toString('latin1').match(/\/Type\s*\/Page[^s]/g)?.length ?? 0;
 
 describe('the safety sheet as a PDF', () => {
-  it('stays on one page with the waste breakdown on it', async () => {
+  it('stays on one page', async () => {
     const buf = await renderSafetyPdf(report(), 'Optispace Infra Pvt. Ltd.', 'Monthly');
 
     expect(buf.subarray(0, 5).toString()).toBe('%PDF-');
-    expect(pageCount(buf)).toBe(1);
-  });
-
-  it('renders a period with no waste recorded rather than throwing', async () => {
-    // An empty breakdown draws the panel's empty state; it used to be a shape
-    // the layout had never been handed.
-    const buf = await renderSafetyPdf(
-      report({ wasteBreakup: { rows: [] } }),
-      'Optispace Infra Pvt. Ltd.',
-      'Daily',
-    );
-
     expect(pageCount(buf)).toBe(1);
   });
 });

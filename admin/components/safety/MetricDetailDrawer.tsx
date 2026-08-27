@@ -281,52 +281,6 @@ export function MetricDetailDrawer({
 
               <Divider />
 
-              {/* ---- What the day's figure is made of ----
-                  Only the metrics that are a total of something have this, and
-                  today that is waste disposal. A bare "3 recorded" against a
-                  day somebody split across two streams is a true total and
-                  half an answer. */}
-              {current?.breakdown && current.breakdown.length > 0 && (
-                <>
-                  <Box sx={{ px: 2.5, py: 2 }}>
-                    <Typography
-                      variant="caption"
-                      sx={{ fontWeight: 700, letterSpacing: '0.08em', color: 'text.disabled' }}
-                    >
-                      BY TYPE
-                    </Typography>
-                    <Stack sx={{ mt: 1 }} divider={<Divider flexItem />}>
-                      {current.breakdown.map((b) => (
-                        <Stack
-                          key={b.label}
-                          direction="row"
-                          spacing={1.5}
-                          alignItems="center"
-                          sx={{ py: 0.75 }}
-                        >
-                          <Typography
-                            variant="body2"
-                            color="text.secondary"
-                            noWrap
-                            title={b.label}
-                            sx={{ minWidth: 0, flex: 1 }}
-                          >
-                            {b.label}
-                          </Typography>
-                          <Typography
-                            variant="body2"
-                            sx={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}
-                          >
-                            {formatNumber(b.value)}
-                          </Typography>
-                        </Stack>
-                      ))}
-                    </Stack>
-                  </Box>
-                  <Divider />
-                </>
-              )}
-
               {/* ---- Comment for the selected day ---- */}
               <Box sx={{ px: 2.5, py: 2 }}>
                 <Typography
@@ -407,22 +361,30 @@ export function MetricDetailDrawer({
                           </Typography>
                         </Stack>
 
-                        {/* What that day's total was made of, on the row it
-                            belongs to. The panel above answers the same
-                            question for the selected day, but a reader
-                            scanning the log should not have to click each
-                            date and look back up to read it. */}
-                        {r.breakdown && r.breakdown.length > 0 && (
-                          <Stack
-                            direction="row"
-                            flexWrap="wrap"
-                            sx={{ pl: '70px', pr: 1, columnGap: 1.5, rowGap: 0.25 }}
-                          >
+                        {/* What that day's total was made of, revealed by
+                            clicking the row it belongs to. Only the open row
+                            shows it: thirty days of splits at once is a wall,
+                            and the question being asked is about one day. */}
+                        {r.date === selected && r.breakdown && r.breakdown.length > 0 && (
+                          <Stack sx={{ pl: '70px', pr: 1, pt: 0.5, rowGap: 0.25 }}>
                             {r.breakdown.map((b) => (
-                              <Typography key={b.label} variant="caption" color="text.disabled">
-                                {b.label}{' '}
-                                <Box
-                                  component="span"
+                              <Stack
+                                key={b.label}
+                                direction="row"
+                                spacing={1}
+                                alignItems="baseline"
+                              >
+                                <Typography
+                                  variant="caption"
+                                  color="text.disabled"
+                                  noWrap
+                                  title={b.label}
+                                  sx={{ minWidth: 0, flex: 1 }}
+                                >
+                                  {b.label}
+                                </Typography>
+                                <Typography
+                                  variant="caption"
                                   sx={{
                                     fontWeight: 700,
                                     color: 'text.secondary',
@@ -430,8 +392,8 @@ export function MetricDetailDrawer({
                                   }}
                                 >
                                   {formatNumber(b.value)}
-                                </Box>
-                              </Typography>
+                                </Typography>
+                              </Stack>
                             ))}
                           </Stack>
                         )}
