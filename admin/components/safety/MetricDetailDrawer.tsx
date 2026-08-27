@@ -142,11 +142,7 @@ export function MetricDetailDrawer({
       {metric && (
         <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           {/* ---- Header ---- */}
-          <Stack
-            direction="row"
-            alignItems="flex-start"
-            sx={{ px: 2.5, pt: 2.5, pb: 2, gap: 1 }}
-          >
+          <Stack direction="row" alignItems="flex-start" sx={{ px: 2.5, pt: 2.5, pb: 2, gap: 1 }}>
             <Box sx={{ minWidth: 0, flex: 1 }}>
               <Typography variant="h6" sx={{ lineHeight: 1.25 }}>
                 {metric.label}
@@ -238,7 +234,7 @@ export function MetricDetailDrawer({
                       <Tooltip
                         key={r.date}
                         title={`${shortDay(r.date)} · ${r.value == null ? 'not filled in' : formatNumber(r.value)}`}
-                sx={{ flex: 1 }}
+                        sx={{ flex: 1 }}
                       >
                         <Box
                           role="button"
@@ -373,11 +369,8 @@ export function MetricDetailDrawer({
                 ) : (
                   <Stack sx={{ mt: 1 }} divider={<Divider flexItem />}>
                     {logRows.map((r) => (
-                      <Stack
+                      <Box
                         key={r.date}
-                        direction="row"
-                        spacing={1.5}
-                        alignItems="center"
                         onClick={() => setSelected(r.date)}
                         sx={{
                           py: 1,
@@ -387,31 +380,62 @@ export function MetricDetailDrawer({
                           '&:hover': { bgcolor: 'action.hover' },
                         }}
                       >
-                        <Typography variant="body2" sx={{ width: 58, flexShrink: 0 }}>
-                          {shortDay(r.date)}
-                        </Typography>
-                        <Typography
-                          variant="body2"
-                          sx={{
-                            width: 46,
-                            flexShrink: 0,
-                            textAlign: 'right',
-                            fontWeight: 700,
-                            fontVariantNumeric: 'tabular-nums',
-                          }}
-                        >
-                          {r.value == null ? '—' : formatNumber(r.value)}
-                        </Typography>
-                        <Typography
-                          variant="body2"
-                          color="text.secondary"
-                          noWrap
-                          title={r.comment ?? undefined}
-                          sx={{ minWidth: 0, flex: 1 }}
-                        >
-                          {r.comment ?? '—'}
-                        </Typography>
-                      </Stack>
+                        <Stack direction="row" spacing={1.5} alignItems="center">
+                          <Typography variant="body2" sx={{ width: 58, flexShrink: 0 }}>
+                            {shortDay(r.date)}
+                          </Typography>
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              width: 46,
+                              flexShrink: 0,
+                              textAlign: 'right',
+                              fontWeight: 700,
+                              fontVariantNumeric: 'tabular-nums',
+                            }}
+                          >
+                            {r.value == null ? '—' : formatNumber(r.value)}
+                          </Typography>
+                          <Typography
+                            variant="body2"
+                            color="text.secondary"
+                            noWrap
+                            title={r.comment ?? undefined}
+                            sx={{ minWidth: 0, flex: 1 }}
+                          >
+                            {r.comment ?? '—'}
+                          </Typography>
+                        </Stack>
+
+                        {/* What that day's total was made of, on the row it
+                            belongs to. The panel above answers the same
+                            question for the selected day, but a reader
+                            scanning the log should not have to click each
+                            date and look back up to read it. */}
+                        {r.breakdown && r.breakdown.length > 0 && (
+                          <Stack
+                            direction="row"
+                            flexWrap="wrap"
+                            sx={{ pl: '70px', pr: 1, columnGap: 1.5, rowGap: 0.25 }}
+                          >
+                            {r.breakdown.map((b) => (
+                              <Typography key={b.label} variant="caption" color="text.disabled">
+                                {b.label}{' '}
+                                <Box
+                                  component="span"
+                                  sx={{
+                                    fontWeight: 700,
+                                    color: 'text.secondary',
+                                    fontVariantNumeric: 'tabular-nums',
+                                  }}
+                                >
+                                  {formatNumber(b.value)}
+                                </Box>
+                              </Typography>
+                            ))}
+                          </Stack>
+                        )}
+                      </Box>
                     ))}
                   </Stack>
                 )}
