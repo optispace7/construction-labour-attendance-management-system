@@ -1,4 +1,4 @@
-import { SafetyMetric } from '@prisma/client';
+import { PersonCategory, SafetyMetric } from '@prisma/client';
 
 /**
  * The safety board's metric catalogue: what each one is called, whether it is
@@ -27,6 +27,20 @@ export interface MetricSpec {
  * the man-day count. Chosen by the client.
  */
 export const SAFE_MAN_HOURS_PER_DAY = 10;
+
+/**
+ * Who counts as manpower on the safety board.
+ *
+ * Staff as well as labour: an engineer or a supervisor on site is exposed to
+ * the same hazards as the gang they are standing beside, so leaving them out
+ * understated both the headcount and the safe man-hours the client puts on the
+ * board. Visitors stay out — somebody walking the site for an hour is not a
+ * man-day and must not earn safe hours.
+ *
+ * Deliberately narrower than the manpower report, which is a labour report and
+ * still counts WORKER alone.
+ */
+export const SAFETY_MANPOWER_CATEGORIES: PersonCategory[] = ['WORKER', 'STAFF'];
 
 /** The safety-performance percentage a site is expected to hold. */
 export const SAFETY_PERFORMANCE_TARGET = 90;

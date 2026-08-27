@@ -28,10 +28,15 @@ function build(
   opts: {
     manDays?: Record<string, number>;
     entries?: { metric: string; date: string; value: number }[];
+    /** Waste rows behind the WASTE_DISPOSAL figure: type id, day, amount. */
+    waste?: { typeId: string; date: string; value: number }[];
+    wasteTypes?: { id: string; name: string; sortOrder: number }[];
   } = {},
 ) {
   const manDays = opts.manDays ?? {};
   const entries = opts.entries ?? [];
+  const wasteRows = opts.waste ?? [];
+  const wasteTypes = opts.wasteTypes ?? [];
 
   const sessionDates: string[] = [];
   for (const [day, n] of Object.entries(manDays)) {
@@ -74,6 +79,20 @@ function build(
         for (const e of hits) sums.set(e.metric, (sums.get(e.metric) ?? 0) + e.value);
         return [...sums].map(([metric, value]) => ({ metric, _sum: { value } }));
       }),
+    },
+    dailyWasteEntry: {
+      groupBy: jest.fn(async ({ where }: any) => {
+        const w = where.entryDate ?? {};
+        const hits = wasteRows.filter((r) => inRange(r.date, w));
+        const sums = new Map<string, number>();
+        for (const r of hits) sums.set(r.typeId, (sums.get(r.typeId) ?? 0) + r.value);
+        return [...sums].map(([wasteTypeId, value]) => ({ wasteTypeId, _sum: { value } }));
+      }),
+    },
+    wasteType: {
+      findMany: jest.fn(async ({ where }: any) =>
+        wasteTypes.filter((t) => !where?.id?.in || where.id.in.includes(t.id)),
+      ),
     },
   };
 
@@ -241,5 +260,53 @@ describe('safety stats — the period selector', () => {
     expect(labels.get('DAILY_MANPOWER')).toBe('Manpower');
     expect(labels.get('TOTAL_MANPOWER')).toBe('Total manpower to date');
     expect(labels.get('TOTAL_SAFE_MAN_HOURS')).toBe('Safe man-hours');
+  });
+
+  it('counts staff as manpower, and leaves visitors out', async () => {
+    const { svc, prisma } = build({ manDays: evenMonth('2026-06') });
+
+    await svc.stats(user, { period: 'weekly', date: '2026-06-17' });
+
+    // An engineer standing in the same hazard is a man-day on the safety board
+    // and earns the same safe hours; somebody walking through for an hour is
+    // not. Asserted on the query because the board's whole headline row is
+    // built from it.
+    const where = prisma.attendanceSession.count.mock.calls[0][0].where;
+    expect(where.worker.category).toEqual({ in: ['WORKER', 'STAFF'] });
+  });
+
+  it('reports the waste split behind the single waste figure', async () => {
+    const { svc } = build({
+      manDays: evenMonth('2026-06'),
+      wasteTypes: [
+        { id: 't2', name: 'Gypsum Waste', sortOrder: 2 },
+        { id: 't1', name: 'Civil / Block Waste', sortOrder: 1 },
+      ],
+      waste: [
+        { typeId: 't1', date: '2026-06-16', value: 4 },
+        { typeId: 't1', date: '2026-06-17', value: 2 },
+        { typeId: 't2', date: '2026-06-17', value: 2 },
+        // Outside the week, so it must not reach the week's breakdown.
+        { typeId: 't2', date: '2026-06-30', value: 99 },
+      ],
+    });
+
+    const weekly = await svc.stats(user, { period: 'weekly', date: '2026-06-17' });
+
+    expect(weekly.wasteBreakup.total).toBe(8);
+    // The dropdown's own order, not biggest first, so the board reads down the
+    // same list the officer fills in.
+    expect(weekly.wasteBreakup.rows.map((r) => [r.label, r.value, r.percent])).toEqual([
+      ['Civil / Block Waste', 6, 75],
+      ['Gypsum Waste', 2, 25],
+    ]);
+  });
+
+  it('leaves the waste breakdown empty rather than drawing a ring of zeroes', async () => {
+    const { svc } = build({ manDays: evenMonth('2026-06') });
+
+    const weekly = await svc.stats(user, { period: 'weekly', date: '2026-06-17' });
+
+    expect(weekly.wasteBreakup).toEqual({ total: 0, rows: [] });
   });
 });

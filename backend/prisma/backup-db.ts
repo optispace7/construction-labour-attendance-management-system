@@ -49,6 +49,11 @@ const MODELS = [
   'notification',
   'pushToken',
   'dailySafetyEntry',
+  // The waste dropdown and the breakdown behind the WASTE_DISPOSAL figure. Both
+  // were missed when waste stopped being a single typed number, which would
+  // have restored a safety sheet with its totals intact and its detail gone.
+  'wasteType',
+  'dailyWasteEntry',
   'companyDocument',
   'reportJob',
 ] as const;

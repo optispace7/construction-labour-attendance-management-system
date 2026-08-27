@@ -84,6 +84,8 @@ interface HistoryRow {
   comment: string | null;
   /** False for a day with nothing entered — the API returns the whole window. */
   recorded: boolean;
+  /** What the figure is a total of, for waste disposal. Null for the rest. */
+  breakdown: { label: string; value: number }[] | null;
 }
 interface HistoryResult {
   metric: string;
@@ -802,7 +804,17 @@ function HistoryDialog({
             <TableBody>
               {recordedRows.map((r) => (
                 <TableRow key={r.date} hover>
-                  <TableCell>{r.date}</TableCell>
+                  <TableCell>
+                    {r.date}
+                    {/* Waste is a total of typed-in lines, so the day that
+                        total came from is spelled out under it rather than
+                        left as a number with no working. */}
+                    {r.breakdown && r.breakdown.length > 0 && (
+                      <Typography variant="caption" color="text.disabled" display="block">
+                        {r.breakdown.map((b) => `${b.label} ${b.value}`).join(' · ')}
+                      </Typography>
+                    )}
+                  </TableCell>
                   <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
                     {r.value ?? '—'}
                   </TableCell>

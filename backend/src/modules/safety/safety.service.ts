@@ -8,6 +8,7 @@ import { businessDate } from '../../common/time/time.util';
 import {
   DEFAULT_WASTE_TYPES,
   METRIC_CATALOG,
+  SAFETY_MANPOWER_CATEGORIES,
   SAFETY_PERFORMANCE_TARGET,
   SAFE_MAN_HOURS_PER_DAY,
   SCORE_INACTIVITY_MIN_DAYS,
@@ -31,6 +32,24 @@ const DAY_MS = 86_400_000;
 const MAX_CUSTOM_RANGE_DAYS = 366;
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const midnight = (v: string) => new Date(`${v.slice(0, 10)}T00:00:00.000Z`);
+
+/**
+ * Fold one site's comment into the note for a day that covers several.
+ *
+ * A comment belongs to the site whose officer wrote it, so an aggregate row
+ * names each one — "Tower A: skip overflowing" — rather than picking one at
+ * random or, as it used to, dropping the lot. Sites with nothing to say add
+ * nothing, so the common case of one site commenting still reads as one line.
+ */
+function joinSiteComments(
+  soFar: string | null | undefined,
+  siteName: string,
+  comment: string | null,
+): string | null {
+  if (!comment?.trim()) return soFar ?? null;
+  const line = `${siteName}: ${comment.trim()}`;
+  return soFar ? `${soFar} · ${line}` : line;
+}
 
 /**
  * How the derived metrics are named on the statistics board, where the figure
@@ -103,9 +122,12 @@ export class SafetyService {
     return {
       organizationId: user.organizationId,
       state: { not: 'VOID' },
-      // Manpower means labour, the same as it does on the manpower report — a
-      // visitor walking the site is not a man-day and must not earn safe hours.
-      worker: { category: 'WORKER' },
+      // Everybody who works the site, labour and staff alike: a supervisor
+      // standing in the same hazard is a man-day on the safety board and earns
+      // the same safe hours. A visitor walking through is not, and is the one
+      // category left out — which is why this is a list rather than "not
+      // VISITOR", so a category added later has to be thought about.
+      worker: { category: { in: SAFETY_MANPOWER_CATEGORIES } },
       ...(sites ? { siteId: { in: sites } } : {}),
     };
   }
@@ -168,19 +190,24 @@ export class SafetyService {
           entryDate: date,
           ...(sites ? { siteId: { in: sites } } : {}),
         },
+        include: { site: { select: { name: true } } },
       }),
       this.automated(user, sites, date),
       this.wasteTypes(user),
       this.wasteFor(user, sites, date),
     ]);
 
-    // Across several sites a typed metric is the sum of them, and a comment can
-    // only sensibly belong to one site, so it is dropped from the aggregate view.
+    // Across several sites a typed metric is the sum of them. A comment belongs
+    // to the site whose officer wrote it, so the aggregate names each one
+    // instead of dropping them — only the entry id, which is what per-item
+    // editing needs, is meaningless across sites.
     const summed = new Map<SafetyMetric, number>();
     const byMetric = new Map<SafetyMetric, (typeof rows)[number]>();
+    const notes = new Map<SafetyMetric, string | null>();
     for (const r of rows) {
       if (r.value != null) summed.set(r.metric, (summed.get(r.metric) ?? 0) + r.value);
       if (single) byMetric.set(r.metric, r);
+      else notes.set(r.metric, joinSiteComments(notes.get(r.metric), r.site.name, r.comment));
     }
 
     const items = METRIC_CATALOG.map((spec) => {
@@ -192,7 +219,7 @@ export class SafetyService {
         kind: spec.kind,
         group: spec.group,
         value: spec.kind === 'AUTOMATED' ? automatedValue : (summed.get(spec.metric) ?? null),
-        comment: row?.comment ?? null,
+        comment: single ? (row?.comment ?? null) : (notes.get(spec.metric) ?? null),
         entryId: row?.id ?? null,
         updatedAt: row?.updatedAt ?? null,
       };
@@ -669,6 +696,9 @@ export class SafetyService {
             entryId: null,
             // A derived figure exists for every day by definition.
             recorded: true,
+            // Manpower is one number counted from attendance; there is nothing
+            // underneath it the way there is under waste.
+            breakdown: null,
           };
         }),
       };
@@ -682,6 +712,7 @@ export class SafetyService {
         ...(sites ? { siteId: { in: sites } } : {}),
       },
       orderBy: { entryDate: 'asc' },
+      include: { site: { select: { name: true } } },
     });
     const single = opts.siteId && opts.siteId !== 'all';
     const perDay = new Map<string, { value: number | null; comment: string | null; id: string }>();
@@ -690,10 +721,30 @@ export class SafetyService {
       const prev = perDay.get(key);
       perDay.set(key, {
         value: (prev?.value ?? 0) + (r.value ?? 0),
-        comment: single ? r.comment : null,
+        // A comment survives the aggregate rather than being thrown away with
+        // it. The statistics board reads this drawer with "All sites" selected
+        // by default, and dropping the note there meant every comment anybody
+        // typed on the daily sheet read back as "no comment on this day".
+        // Several sites on one day are joined and named, because the note only
+        // makes sense against the site whose officer wrote it.
+        comment: single ? r.comment : joinSiteComments(prev?.comment, r.site.name, r.comment),
         id: r.id,
       });
     }
+
+    /**
+     * The waste figure is a total of typed-in lines, so its history carries
+     * them. Every other metric is a single number and has nothing underneath.
+     *
+     * Without this the drawer answered "3 recorded" for a day somebody entered
+     * one skip of block waste and two of gypsum — a true total, and half the
+     * answer to the question the drawer exists to ask.
+     */
+    const breakdowns =
+      opts.metric === WASTE_METRIC
+        ? await this.wasteBreakdownByDay(user, sites, start, end)
+        : new Map<string, { label: string; value: number }[]>();
+
     return {
       metric: opts.metric,
       label: spec.label,
@@ -715,9 +766,66 @@ export class SafetyService {
           comment: hit?.comment ?? null,
           entryId: single ? (hit?.id ?? null) : null,
           recorded: Boolean(hit),
+          /** What the figure is made of, where it is made of anything. */
+          breakdown: breakdowns.get(d) ?? null,
         };
       }),
     };
+  }
+
+  /**
+   * The waste breakdown day by day across a window, named and in dropdown
+   * order — what the day-by-day drawer shows under each day's total.
+   *
+   * One query for the whole window rather than one per day: a thirty-day
+   * drawer would otherwise be thirty round trips to draw a panel.
+   */
+  private async wasteBreakdownByDay(
+    user: AuthUser,
+    sites: string[] | null,
+    start: Date,
+    end: Date,
+  ): Promise<Map<string, { label: string; value: number }[]>> {
+    const grouped = await this.prisma.dailyWasteEntry.groupBy({
+      by: ['entryDate', 'wasteTypeId'],
+      where: {
+        organizationId: user.organizationId,
+        entryDate: { gte: start, lte: end },
+        ...(sites ? { siteId: { in: sites } } : {}),
+      },
+      _sum: { value: true },
+    });
+    if (grouped.length === 0) return new Map();
+
+    const types = await this.prisma.wasteType.findMany({
+      where: {
+        id: { in: [...new Set(grouped.map((g) => g.wasteTypeId))] },
+        organizationId: user.organizationId,
+      },
+      select: { id: true, name: true, sortOrder: true },
+    });
+    const byId = new Map(types.map((t) => [t.id, t]));
+
+    const out = new Map<string, { label: string; value: number; sortOrder: number }[]>();
+    for (const g of grouped) {
+      const key = iso(g.entryDate);
+      const type = byId.get(g.wasteTypeId);
+      const list = out.get(key) ?? [];
+      list.push({
+        label: type?.name ?? 'Unknown type',
+        value: g._sum.value ?? 0,
+        sortOrder: type?.sortOrder ?? 0,
+      });
+      out.set(key, list);
+    }
+    return new Map(
+      [...out].map(([day, list]) => [
+        day,
+        list
+          .sort((a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label))
+          .map(({ label, value }) => ({ label, value })),
+      ]),
+    );
   }
 
   /** Comments attached to a derived metric, which has no stored value. */
@@ -736,9 +844,16 @@ export class SafetyService {
         comment: { not: null },
         ...(sites ? { siteId: { in: sites } } : {}),
       },
-      select: { entryDate: true, comment: true },
+      select: { entryDate: true, comment: true, site: { select: { name: true } } },
     });
-    return new Map(rows.map((r) => [iso(r.entryDate), r.comment]));
+    const out = new Map<string, string | null>();
+    for (const r of rows) {
+      const key = iso(r.entryDate);
+      // Two sites commenting on the same day used to leave whichever row came
+      // back last; both are kept and named instead.
+      out.set(key, joinSiteComments(out.get(key), r.site.name, r.comment));
+    }
+    return out;
   }
 
   /**
@@ -804,6 +919,55 @@ export class SafetyService {
     const out: Partial<Record<SafetyMetric, number>> = {};
     for (const g of grouped) out[g.metric] = g._sum.value ?? 0;
     return out;
+  }
+
+  /**
+   * Waste disposal split by type over a window — the detail behind the single
+   * WASTE_DISPOSAL figure.
+   *
+   * The sheet asks for eight numbers a day and the board reported their sum, so
+   * the split the client actually types in was visible only on the day it was
+   * entered. It is the same breakdown table the daily sheet writes, summed over
+   * whatever period the board is showing.
+   *
+   * Retired types are still listed when they hold figures inside the window:
+   * retiring a stream should not quietly rewrite the months it was in use.
+   */
+  private async wasteBreakupOver(
+    user: AuthUser,
+    sites: string[] | null,
+    start: Date,
+    end: Date,
+  ): Promise<{ total: number; rows: { key: string; label: string; value: number }[] }> {
+    const grouped = await this.prisma.dailyWasteEntry.groupBy({
+      by: ['wasteTypeId'],
+      where: {
+        organizationId: user.organizationId,
+        entryDate: { gte: start, lte: end },
+        ...(sites ? { siteId: { in: sites } } : {}),
+      },
+      _sum: { value: true },
+    });
+    if (grouped.length === 0) return { total: 0, rows: [] };
+
+    const types = await this.prisma.wasteType.findMany({
+      where: { id: { in: grouped.map((g) => g.wasteTypeId) }, organizationId: user.organizationId },
+      select: { id: true, name: true, sortOrder: true },
+    });
+    const byId = new Map(types.map((t) => [t.id, t]));
+    const rows = grouped
+      .map((g) => ({
+        key: g.wasteTypeId,
+        label: byId.get(g.wasteTypeId)?.name ?? 'Unknown type',
+        sortOrder: byId.get(g.wasteTypeId)?.sortOrder ?? 0,
+        value: g._sum.value ?? 0,
+      }))
+      // The dropdown's own order, so the board reads down the same list the
+      // officer fills in rather than reshuffling by size every period.
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label))
+      .map(({ key, label, value }) => ({ key, label, value }));
+
+    return { total: rows.reduce((a, r) => a + r.value, 0), rows };
   }
 
   /**
@@ -889,7 +1053,7 @@ export class SafetyService {
      */
     const trendStart = period === 'daily' ? new Date(anchor.getTime() - 6 * DAY_MS) : start;
 
-    const [counts, totals, trend, manpower, siteName] = await Promise.all([
+    const [counts, totals, trend, manpower, wasteBreakup, siteName] = await Promise.all([
       this.manpowerCounts(user, sites, start, end),
       this.totalsOver(user, sites, start, end),
       this.trendOver(user, sites, trendStart, end),
@@ -897,6 +1061,9 @@ export class SafetyService {
       // report gets six days of context so the sparklines are lines rather than
       // a single dot, and every other period plots exactly what was chosen.
       this.manpowerSeries(user, sites, trendStart, end),
+      // The split behind the waste figure, over exactly the window the totals
+      // above cover.
+      this.wasteBreakupOver(user, sites, start, end),
       opts.siteId && opts.siteId !== 'all'
         ? this.prisma.site
             .findFirst({
@@ -1030,6 +1197,19 @@ export class SafetyService {
           percent: breakupTotal > 0 ? Math.round((b.value / breakupTotal) * 100) : 0,
         })),
       },
+      /**
+       * Waste disposal by type, the same shape as the category breakup so the
+       * page can draw it with the panel it already has. Empty when nothing has
+       * been recorded in the window, which the panel shows as an empty state
+       * rather than a ring of zeroes.
+       */
+      wasteBreakup: {
+        total: wasteBreakup.total,
+        rows: wasteBreakup.rows.map((r) => ({
+          ...r,
+          percent: wasteBreakup.total > 0 ? Math.round((r.value / wasteBreakup.total) * 100) : 0,
+        })),
+      },
       reportingSummary: {
         daily: raised(dTot) + closed(dTot),
         weekly: raised(wTot) + closed(wTot),
@@ -1113,6 +1293,7 @@ export class SafetyService {
         observations: s.observations,
         statistics: s.statistics.map((x) => ({ label: x.label, kind: x.kind, value: x.value })),
         categoryBreakup: { rows: s.categoryBreakup.rows },
+        wasteBreakup: { rows: s.wasteBreakup.rows },
       },
       org?.name ?? '',
       periodName,

@@ -33,6 +33,11 @@ interface HistoryRow {
   value: number | null;
   comment: string | null;
   recorded: boolean;
+  /**
+   * What the day's figure is made of, for the metrics that are a total of
+   * something rather than a number somebody typed. Null for the rest.
+   */
+  breakdown: { label: string; value: number }[] | null;
 }
 interface HistoryResult {
   metric: string;
@@ -279,6 +284,52 @@ export function MetricDetailDrawer({
               </Box>
 
               <Divider />
+
+              {/* ---- What the day's figure is made of ----
+                  Only the metrics that are a total of something have this, and
+                  today that is waste disposal. A bare "3 recorded" against a
+                  day somebody split across two streams is a true total and
+                  half an answer. */}
+              {current?.breakdown && current.breakdown.length > 0 && (
+                <>
+                  <Box sx={{ px: 2.5, py: 2 }}>
+                    <Typography
+                      variant="caption"
+                      sx={{ fontWeight: 700, letterSpacing: '0.08em', color: 'text.disabled' }}
+                    >
+                      BY TYPE
+                    </Typography>
+                    <Stack sx={{ mt: 1 }} divider={<Divider flexItem />}>
+                      {current.breakdown.map((b) => (
+                        <Stack
+                          key={b.label}
+                          direction="row"
+                          spacing={1.5}
+                          alignItems="center"
+                          sx={{ py: 0.75 }}
+                        >
+                          <Typography
+                            variant="body2"
+                            color="text.secondary"
+                            noWrap
+                            title={b.label}
+                            sx={{ minWidth: 0, flex: 1 }}
+                          >
+                            {b.label}
+                          </Typography>
+                          <Typography
+                            variant="body2"
+                            sx={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}
+                          >
+                            {formatNumber(b.value)}
+                          </Typography>
+                        </Stack>
+                      ))}
+                    </Stack>
+                  </Box>
+                  <Divider />
+                </>
+              )}
 
               {/* ---- Comment for the selected day ---- */}
               <Box sx={{ px: 2.5, py: 2 }}>
