@@ -16,7 +16,6 @@ import {
   type SliceRow,
   type TrendSeries,
 } from '@/components/safety/SafetyCharts';
-import { cssSeries } from '@/components/dash/charts';
 import { api, apiErrorMessage } from '@/lib/api/browser';
 import { formatNumber } from '@/lib/format';
 import * as I from '@/components/icons';
@@ -74,8 +73,6 @@ interface SafetyStats {
   glance: { totalInspection: number; unsafeActsClosed: number; unsafeConditionsClosed: number };
   statistics: StatRow[];
   categoryBreakup: { total: number; rows: (SliceRow & { percent: number })[] };
-  /** Waste disposal split by type over the period — the detail behind one figure. */
-  wasteBreakup: { total: number; rows: (SliceRow & { percent: number })[] };
   reportingSummary: { daily: number; weekly: number; monthly: number };
 }
 
@@ -171,16 +168,6 @@ function SafetyStatisticsBoard() {
   const d = stats.data;
   const err = stats.isError ? apiErrorMessage(stats.error, 'Could not load the statistics.') : null;
   const loading = stats.isLoading && !d && !rangeError;
-
-  /**
-   * The biggest waste stream in the period, which every bar is drawn against.
-   * Floored at 1 so a period of nothing but zeroes divides rather than
-   * producing a NaN width.
-   */
-  const wastePeak = React.useMemo(
-    () => Math.max(1, ...(d?.wasteBreakup.rows ?? []).map((r) => r.value)),
-    [d],
-  );
 
   /**
    * Pull the PDF and hand it to the browser as a download.
@@ -491,37 +478,6 @@ function SafetyStatisticsBoard() {
           </Item>
         </div>
 
-        {/* ---- Waste disposal, split by the types the site actually sends out ---- */}
-        <Item>
-          <ChartPanel
-            title="Waste disposal by type"
-            subtitle={`What went out ${periodLabel} · the detail behind the single figure below`}
-            loading={loading}
-            error={err}
-            onRetry={() => stats.refetch()}
-            empty={(d?.wasteBreakup.total ?? 0) === 0}
-            emptyTitle="No waste recorded in this period"
-            emptyDescription="Fill the breakdown in on the daily task sheet and it appears here."
-            bodyHeight={168}
-            skeleton="bars"
-          >
-            {/* Two columns on a wide screen: eight streams down one column
-                would be a taller panel than anything beside it. */}
-            <div className="grid gap-x-6 gap-y-0 px-5 pb-4 md:grid-cols-2">
-              {(d?.wasteBreakup.rows ?? []).map((row, i) => (
-                <WasteBar
-                  key={row.key}
-                  label={row.label}
-                  value={row.value}
-                  percent={row.percent}
-                  share={row.value / wastePeak}
-                  colour={cssSeries(i)}
-                />
-              ))}
-            </div>
-          </ChartPanel>
-        </Item>
-
         {/* ---- The full list ---- */}
         <Item>
           <Panel>
@@ -609,52 +565,6 @@ function ScoreWorking({ lines, loading }: { lines: ScoreDeduction[]; loading: bo
           <span className="text-[12px] font-bold tabular-nums text-critical">−{line.points}</span>
         </div>
       ))}
-    </div>
-  );
-}
-
-/**
- * One waste stream: what it is called, how much went out, and its share.
- *
- * Bars rather than a donut. Eight streams in a ring is eight slices nobody can
- * tell apart, and the question being asked here — "which one is the big one?" —
- * is read off lengths far faster than off angles.
- *
- * The colour arrives as a `var()` rather than a resolved hex: this is plain
- * DOM, and a hex picked during the server render freezes at the dark value on a
- * light page.
- */
-function WasteBar({
-  label,
-  value,
-  percent,
-  share,
-  colour,
-}: {
-  label: string;
-  value: number;
-  percent: number;
-  /** 0–1, against the period's largest stream — the bar's own length. */
-  share: number;
-  colour: string;
-}) {
-  return (
-    <div className="flex items-center gap-3 border-b border-line py-2 last:border-0">
-      <span className="w-[38%] min-w-0 truncate text-[13px] text-ink-muted" title={label}>
-        {label}
-      </span>
-      <span className="h-2.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-sunken">
-        <span
-          className="block h-full rounded-full"
-          style={{ width: `${Math.max(2, share * 100)}%`, background: colour }}
-        />
-      </span>
-      <span className="w-10 shrink-0 text-right text-[13px] font-bold tabular-nums text-ink">
-        {formatNumber(value)}
-      </span>
-      <span className="w-9 shrink-0 text-right text-[11px] tabular-nums text-ink-faint">
-        {percent}%
-      </span>
     </div>
   );
 }
