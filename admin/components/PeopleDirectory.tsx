@@ -69,6 +69,7 @@ interface PersonForm {
   dateOfBirth?: string;
   language?: string;
   mobileNumber?: string;
+  email?: string;
   pincode?: string;
   bloodGroup?: string;
   emergencyContactName?: string;
@@ -133,6 +134,21 @@ const LABELS: Record<PersonCategory, { plural: string; singular: string; subtitl
   },
 };
 
+/**
+ * Optional free-text details that an ID card prints, and which therefore have
+ * to be removable and not merely editable. Every one of them is a plain
+ * `@IsString()` (or the e-mail, which allows a blank) on the API, so sending
+ * an empty value clears it rather than failing validation.
+ */
+const CLEARABLE_ON_EDIT = [
+  'email',
+  'bloodGroup',
+  'emergencyContactName',
+  'emergencyContactNumber',
+  'mobileNumber',
+  'inductedBy',
+] as const;
+
 function toForm(w: WorkerDetail): PersonForm {
   return {
     workerCode: w.workerCode,
@@ -142,6 +158,7 @@ function toForm(w: WorkerDetail): PersonForm {
     dateOfBirth: w.dateOfBirth ? w.dateOfBirth.slice(0, 10) : '',
     language: w.language ?? '',
     mobileNumber: w.mobileNumber ?? '',
+    email: w.email ?? '',
     pincode: w.pincode ?? '',
     bloodGroup: w.bloodGroup ?? '',
     emergencyContactName: w.emergencyContactName ?? '',
@@ -483,6 +500,15 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
       if (isVisitor && editing) {
         body.visitorCompany = v.visitorCompany ? v.visitorCompany : null;
         body.idProofPhotoId = v.idProofPhotoId ? v.idProofPhotoId : null;
+      }
+      // Same for the optional details an ID card prints. Blank means blank:
+      // without this the loop above drops the empty box and the old value
+      // stays in the database, so a mistyped e-mail or blood group could be
+      // corrected but never removed — and it would keep printing on the card.
+      if (editing) {
+        CLEARABLE_ON_EDIT.forEach((k) => {
+          body[k] = v[k] ? v[k] : null;
+        });
       }
 
       if (!editing) {
@@ -1175,6 +1201,13 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
                     Optional
                   </Typography>
                 </Stack>
+                {isStaff && (
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                    Shoot head-and-shoulders against a plain white wall. The ID card cuts the white
+                    backdrop away so the person sits on the card artwork, and prints the photo in
+                    black and white.
+                  </Typography>
+                )}
               </>
             )}
 
@@ -1325,6 +1358,8 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
               {!isVisitor && field('dateOfBirth', 'Date of birth', { type: 'date' })}
               {!isVisitor && field('language', 'Language')}
               {field('mobileNumber', 'Mobile number')}
+              {/* Printed as the "Mail Id" line on the staff ID card. */}
+              {isStaff && field('email', 'Work e-mail')}
               {!isVisitor && !isStaff && field('pincode', 'Zipcode / pincode')}
               {field('bloodGroup', 'Blood group')}
               {isVisitor && field('escortName', 'Escort name *', { required: 'Escort name is required' })}

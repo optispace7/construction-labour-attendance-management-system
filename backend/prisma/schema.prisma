@@ -309,6 +309,8 @@ model Worker {
   language               String?
   photoUrl               String?        @map("photo_url")
   mobileNumber           String?        @map("mobile_number")
+  // Work e-mail, printed as the "Mail Id" line on the staff ID card.
+  email                  String?
   pincode                String?
   bloodGroup             String?        @map("blood_group")
   emergencyContactName   String?        @map("emergency_contact_name")

@@ -88,6 +88,8 @@ export interface Worker {
   language?: string | null;
   photoUrl?: string | null;
   mobileNumber?: string | null;
+  // Work e-mail — the "Mail Id" line on a staff ID card.
+  email?: string | null;
   pincode?: string | null;
   status: 'ACTIVE' | 'INACTIVE' | 'EXITED' | 'SUSPENDED';
   bloodGroup?: string | null;

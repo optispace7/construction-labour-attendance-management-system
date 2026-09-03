@@ -52,21 +52,24 @@
   }
 }
 
-/* --- PVC card-stock printing (disabled: we print on A4 sheets instead) ---
+/* --- PVC card-stock printing ---------------------------------------------
+   Only in force when the badges page puts `pvc` on the print-area, i.e. the
+   admin picked "PVC card printer" rather than "A4 sheet". The badges page also
+   swaps @page to the exact stock size, so here one page == one blank card. */
 @media print {
-  .print-area {
+  .print-area.pvc {
     display: block !important;
     margin: 0 !important;
     padding: 0 !important;
     gap: 0 !important;
   }
 
-  // Every wrapper between .print-area and a card face — the per-worker box and
-  // the flex row holding front/back — is flattened to a plain block in normal
-  // flow. Without this the faces sit side by side (~171mm) and the back one is
-  // clipped off the card page, and the wrapper's padding/outline overflows the
-  // page and emits blank cards.
-  .print-area *:has(.pvc-face):not(.pvc-skip) {
+  /* Every wrapper between .print-area and a card face — the per-person box and
+     the flex row holding front/back — is flattened to a plain block in normal
+     flow. Without this the faces sit side by side and the back one is clipped
+     off the card page, and the wrapper's padding/outline overflows the page and
+     emits blank cards. */
+  .print-area.pvc *:has(.pvc-face):not(.pvc-skip) {
     display: block !important;
     position: static !important;
     margin: 0 !important;
@@ -79,10 +82,9 @@
     overflow: visible !important;
   }
 
-  // Each card face prints alone on its own (card-sized) page so a PVC card
-  // printer feeds one blank per face. The @page size itself is injected by the
-  // badges page to match the selected PVC stock.
-  .pvc-face {
+  /* Each card face prints alone on its own (card-sized) page so a PVC card
+     printer feeds one blank per face. */
+  .print-area.pvc .pvc-face {
     display: block !important;
     margin: 0 !important;
     padding: 0 !important;
@@ -92,16 +94,16 @@
     break-inside: avoid;
     page-break-inside: avoid;
   }
-  // Unticked cards never reach the printer.
-  .print-area .pvc-skip {
+
+  /* Unticked cards never reach the printer. */
+  .print-area.pvc .pvc-skip {
     display: none !important;
   }
 
-  // Suppress the trailing blank page after the very last selected face so the
-  // printer doesn't eject (and waste) one extra card.
-  .pvc-last .pvc-face:last-child {
+  /* Suppress the trailing blank page after the very last selected face so the
+     printer doesn't eject (and waste) one extra card. */
+  .print-area.pvc .pvc-last .pvc-face:last-child {
     break-after: auto;
     page-break-after: auto;
   }
 }
---- end PVC card-stock printing --- */

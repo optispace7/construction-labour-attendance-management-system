@@ -7,41 +7,46 @@ import { qrPayload } from '@/components/QrBadge';
 import { photoSrc } from '@/components/PeopleDirectory';
 import { DisciplinaryBadges, SafetySeal, TRAINING_SEALS } from '@/components/SafetySeals';
 
-// Cards are printed on plain A4 and cut out, so the size is a free choice rather
-// than a fixed card stock: S/M/L scale the whole card off CR80 (85.6 × 54 mm).
+// A card face has two printing routes, and the size means a different thing on
+// each. On A4 the sheet is cut up by hand, so S/M/L just scale the whole card
+// off CR80 (85.6 x 54 mm). On a desktop PVC card printer the size is the blank
+// card being fed, so it has to be one of the real stock sizes.
+export type PrintMode = 'A4' | 'PVC';
 export type CardSize = 'S' | 'M' | 'L';
+export type CardStock = 'CR80' | 'CR79' | 'CR100';
 export type CardOrientation = 'portrait' | 'landscape';
 
-const SIZE_SCALE: Record<CardSize, number> = { S: 0.82, M: 1, L: 1.22 };
-const BASE_LONG = 85.6;
-const BASE_SHORT = 54;
-
-/* --- PVC card-stock printing (disabled: we print on A4 sheets instead) ---
-// Standard PVC card stock sizes (long edge × short edge, in mm). These match the
-// blank cards that desktop PVC card printers (Evolis, Fargo, Magicard, Zebra…)
-// feed, so the printout lands edge-to-edge on the card.
-export type CardSize = 'CR80' | 'CR79' | 'CR100';
-
-export const PVC_SIZES: Record<CardSize, { long: number; short: number; label: string }> = {
-  CR80: { long: 85.6, short: 54, label: 'CR80 — Standard (85.6 × 54 mm)' },
-  CR79: { long: 83.9, short: 51, label: 'CR79 (83.9 × 51 mm)' },
-  CR100: { long: 98.5, short: 67, label: 'CR100 — Oversized (98.5 × 67 mm)' },
+export type CardSpec = {
+  mode: PrintMode;
+  size: CardSize;
+  stock: CardStock;
+  orientation: CardOrientation;
 };
 
-// CR80 is the reference; everything (text, QR, logo) scales off its short edge.
-const BASE_SHORT = PVC_SIZES.CR80.short;
+// Blank card stock that desktop PVC printers (Evolis, Fargo, Magicard, Zebra...)
+// feed, long edge x short edge in mm. Printing at exactly these sizes lands the
+// artwork edge-to-edge on the card.
+export const PVC_STOCKS: Record<CardStock, { long: number; short: number; label: string }> = {
+  CR80: { long: 85.6, short: 54, label: 'CR80 - Standard (85.6 x 54 mm)' },
+  CR79: { long: 83.9, short: 51, label: 'CR79 (83.9 x 51 mm)' },
+  CR100: { long: 98.5, short: 67, label: 'CR100 - Oversized (98.5 x 67 mm)' },
+};
 
-export function cardDimsMm(size: CardSize, orientation: CardOrientation) {
-  const { long, short } = PVC_SIZES[size];
-  return orientation === 'portrait' ? { w: short, h: long } : { w: long, h: short };
-}
---- end PVC card-stock printing --- */
+const SIZE_SCALE: Record<CardSize, number> = { S: 0.82, M: 1, L: 1.22 };
+const BASE_LONG = PVC_STOCKS.CR80.long;
+const BASE_SHORT = PVC_STOCKS.CR80.short;
 
-export function cardDimsMm(size: CardSize, orientation: CardOrientation) {
-  const s = SIZE_SCALE[size];
-  const long = BASE_LONG * s;
-  const short = BASE_SHORT * s;
-  return orientation === 'portrait' ? { w: short, h: long } : { w: long, h: short };
+/**
+ * The printed face in mm, plus `u` - the unit scale every type size, QR and
+ * seal is expressed in. u === 1 is a CR80 card, so a card of any other size
+ * keeps the same proportions.
+ */
+export function cardMetrics(spec: CardSpec): { w: number; h: number; u: number } {
+  const long = spec.mode === 'PVC' ? PVC_STOCKS[spec.stock].long : BASE_LONG * SIZE_SCALE[spec.size];
+  const short =
+    spec.mode === 'PVC' ? PVC_STOCKS[spec.stock].short : BASE_SHORT * SIZE_SCALE[spec.size];
+  const u = short / BASE_SHORT;
+  return spec.orientation === 'portrait' ? { w: short, h: long, u } : { w: long, h: short, u };
 }
 
 const NAVY = '#0d1b3e';
@@ -72,26 +77,22 @@ function ageFrom(dob?: string | null): string {
 export function IdCard({
   worker,
   org,
-  size,
-  orientation,
+  spec,
   side,
 }: {
   worker: Worker;
   org?: Organization | null;
-  size: CardSize;
-  orientation: CardOrientation;
+  spec: CardSpec;
   side: 'front' | 'back';
 }) {
-  const { w, h } = cardDimsMm(size, orientation);
-  // A unit scale so text/QR grow with the card. 1 == Medium.
-  const u = SIZE_SCALE[size];
+  const { w, h, u } = cardMetrics(spec);
   const logoScale = org?.logoScale ?? 1;
 
   const shell: React.CSSProperties = {
     width: `${w}mm`,
     height: `${h}mm`,
     boxSizing: 'border-box',
-    border: `1px solid ${BORDER}`,
+    border: spec.mode === 'A4' ? `1px solid ${BORDER}` : undefined,
     background: '#fff',
     overflow: 'hidden',
     breakInside: 'avoid',

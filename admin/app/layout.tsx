@@ -1,6 +1,6 @@
 import * as React from 'react';
 import type { Metadata } from 'next';
-import { IBM_Plex_Sans } from 'next/font/google';
+import { Bebas_Neue, Comfortaa, IBM_Plex_Sans } from 'next/font/google';
 import { Providers } from './providers';
 import { colorModeScript } from '@/theme/ColorModeProvider';
 import './tailwind.css';
@@ -10,6 +10,22 @@ const plex = IBM_Plex_Sans({
   subsets: ['latin'],
   weight: ['400', '500', '600', '700'],
   variable: '--font-plex',
+  display: 'swap',
+});
+
+// Only the printed ID cards use these two: Bebas Neue for the small-caps labels
+// and Comfortaa for names and values, matching the company's corporate card.
+const bebas = Bebas_Neue({
+  subsets: ['latin'],
+  weight: ['400'],
+  variable: '--font-bebas',
+  display: 'swap',
+});
+
+const comfortaa = Comfortaa({
+  subsets: ['latin'],
+  weight: ['300', '400', '600', '700'],
+  variable: '--font-comfortaa',
   display: 'swap',
 });
 
@@ -23,7 +39,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     // suppressHydrationWarning: the pre-paint script below writes data-theme and
     // an inline background onto <html>, so the client tree legitimately differs
     // from what the server sent. Scoped to this element only.
-    <html lang="en" className={plex.variable} suppressHydrationWarning data-theme="dark">
+    <html lang="en" className={`${plex.variable} ${bebas.variable} ${comfortaa.variable}`} suppressHydrationWarning data-theme="dark">
       <head>
         {/* Runs before first paint so a dark-mode user never sees a white
             flash. Must stay ahead of anything that renders. */}

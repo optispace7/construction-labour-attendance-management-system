@@ -5,6 +5,7 @@ import {
   ArrayNotEmpty,
   IsArray,
   IsDateString,
+  IsEmail,
   IsEnum,
   IsNotEmpty,
   IsOptional,
@@ -12,6 +13,7 @@ import {
   IsUUID,
   Length,
   Matches,
+  ValidateIf,
 } from 'class-validator';
 
 export class CreateWorkerDto {
@@ -104,6 +106,12 @@ export class CreateWorkerDto {
   @IsOptional()
   @IsString()
   mobileNumber?: string;
+
+  @ApiProperty({ required: false, description: 'Work e-mail (printed on the staff ID card)' })
+  @IsOptional()
+  @ValidateIf((_o, v) => v !== '')
+  @IsEmail()
+  email?: string;
 
   @ApiProperty({ required: false })
   @IsOptional()

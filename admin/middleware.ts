@@ -80,12 +80,15 @@ export const config = {
   matcher: [
     // Protect everything except login, the auth routes, and public/static assets
     // (logo.png must be reachable on the unauthenticated login page).
+    // logo.svg is the vector mark the printed ID cards use. It is not a page,
+    // so canAccessPath below denies it as an unknown route and the <img> loads
+    // a redirect to the dashboard instead — a logo-shaped hole on every card.
     // /download serves the Android APK and must stay public.
     // /zxing holds the QR-reader WebAssembly: a static asset with no secrets,
     // and a redirect served in its place fails to instantiate.
     // /vendor and login-bg.png dress the unauthenticated login page. A 307 to
     // /login in place of a script parses as HTML and throws "Unexpected token
     // '<'", which is how the glass effect silently never loaded.
-    '/((?!login|api/auth|download|zxing|vendor|login-bg.png|_next/static|_next/image|favicon.ico|logo.png).*)',
+    '/((?!login|api/auth|download|zxing|vendor|login-bg.png|_next/static|_next/image|favicon.ico|logo.png|logo.svg).*)',
   ],
 };
