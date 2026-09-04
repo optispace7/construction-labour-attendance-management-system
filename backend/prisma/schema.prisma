@@ -901,7 +901,11 @@ model CompanyDocument {
   /// original document even after the display name is changed.
   fileName       String @map("file_name")
   mimeType       String @map("mime_type")
-  data           Bytes
+  /// Where the PDF itself lives. `storageKey` names an object in the media
+  /// bucket; `data` is the old in-database column, nullable so documents
+  /// uploaded before the move still open. Nothing writes it any more.
+  storageKey     String? @map("storage_key")
+  data           Bytes?
   sizeBytes      Int    @map("size_bytes")
 
   /// The day the document stops being valid. Null = nothing to expire.

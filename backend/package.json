@@ -21,7 +21,7 @@
     "worker": "node dist/worker.js",
     "build:workers": "tsc -p tsconfig.workers.json",
     "deploy:workers": "npm run build:workers && wrangler deploy",
-    "backfill:photos": "ts-node prisma/backfill-photos-to-object-storage.ts"
+    "backfill:blobs": "ts-node prisma/backfill-blobs-to-object-storage.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

@@ -1,10 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { DateTime } from 'luxon';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
+import { randomUUID } from 'node:crypto';
+import { blobStore, blobStoreConfigured } from '../files/blob-store';
+import { readStoredBytes } from '../files/read-blob';
 import {
   ALLOWED_DOCUMENT_TYPES,
   DEFAULT_REMIND_DAYS_BEFORE,
@@ -68,6 +71,8 @@ export function daysUntil(validUntil: Date, timezone: string): number {
 
 @Injectable()
 export class CompanyDocumentsService {
+  private readonly logger = new Logger(CompanyDocumentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
@@ -138,15 +143,27 @@ export class CompanyDocumentsService {
       throw Errors.validation({ message: 'That file is not a PDF' });
     }
 
+    // The PDF goes to object storage and the row keeps only metadata. Written
+    // before the row, so a failed upload leaves nothing behind rather than a
+    // document that lists but will not open.
+    const id = randomUUID();
+    const useStore = blobStoreConfigured();
+    const storageKey = `org/${user.organizationId}/documents/${id}`;
+    if (useStore) {
+      await blobStore.put(storageKey, raw, dto.mimeType);
+    }
+
     const doc = await this.prisma.companyDocument.create({
       data: {
+        id,
         organizationId: user.organizationId,
         siteId: dto.siteId,
         // The file's own name is the opening suggestion; the client renames it.
         name: (dto.name?.trim() || defaultName(dto.fileName)).slice(0, 160),
         fileName: dto.fileName,
         mimeType: dto.mimeType,
-        data: raw,
+        storageKey: useStore ? storageKey : null,
+        data: useStore ? null : raw,
         sizeBytes: raw.length,
         validUntil: dto.validUntil ? parseDay(dto.validUntil) : null,
         remindDaysBefore: dto.remindDaysBefore ?? DEFAULT_REMIND_DAYS_BEFORE,
@@ -208,7 +225,19 @@ export class CompanyDocumentsService {
 
   async remove(user: AuthUser, id: string) {
     const before = await this.getMeta(user, id);
+    const stored = await this.prisma.companyDocument.findUnique({
+      where: { id },
+      select: { storageKey: true },
+    });
     await this.prisma.companyDocument.delete({ where: { id } });
+    if (stored?.storageKey) {
+      // After the row, deliberately: a failure here leaves an unreferenced
+      // object, where the reverse order leaves a document that lists but
+      // cannot be opened.
+      await blobStore.delete(stored.storageKey).catch((e: unknown) => {
+        this.logger.warn(`Left an orphaned object ${stored.storageKey}: ${String(e)}`);
+      });
+    }
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -227,10 +256,13 @@ export class CompanyDocumentsService {
       // Scoped like the list: a document the caller cannot see listed is not
       // one they can open by pasting its id either.
       where: { id, organizationId: user.organizationId, ...this.scopeWhere(user) },
-      select: { fileName: true, mimeType: true, data: true },
+      select: { fileName: true, mimeType: true, storageKey: true, data: true },
     });
     if (!doc) throw Errors.notFound('Document');
-    return { ...doc, data: Buffer.from(doc.data) };
+    // Documents uploaded before the move still carry their bytes in the column.
+    const data = await readStoredBytes(doc);
+    if (!data) throw Errors.notFound('Document');
+    return { ...doc, data };
   }
 
   private async getMeta(user: AuthUser, id: string): Promise<DocumentMeta> {
