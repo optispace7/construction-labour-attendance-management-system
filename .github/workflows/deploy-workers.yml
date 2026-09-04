@@ -1,0 +1,155 @@
+name: Deploy Workers
+
+# Deploys the API and admin panel to Cloudflare Workers.
+#
+# Separate from deploy.yml, which still rolls the Azure Container Apps. The two
+# are deliberately not wired together: while both platforms are live, a change
+# should be able to reach one without silently reaching the other.
+#
+# Only the parts that changed are deployed, so an admin-only commit does not
+# rebuild and redeploy the API.
+#
+# Needs one repository secret:
+#   CLOUDFLARE_API_TOKEN  — a token with "Edit Cloudflare Workers", plus R2 and
+#                           Hyperdrive read, scoped to the CLAMS account.
+# The account id is not a secret and is set below.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "What to deploy"
+        required: true
+        default: "both"
+        type: choice
+        options: [both, api, admin]
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "admin/**"
+      - ".github/workflows/deploy-workers.yml"
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: 5e257702fff0c78733d4d3ded7530a33
+
+concurrency:
+  # A second push should not race the first to the same Worker.
+  group: deploy-workers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      admin: ${{ steps.filter.outputs.admin }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            api:
+              - 'backend/**'
+            admin:
+              - 'admin/**'
+
+  api:
+    needs: changes
+    # A manual run targets what the operator asked for; a push deploys what moved.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","api"]'), inputs.target)) ||
+      (github.event_name == 'push' && needs.changes.outputs.api == 'true')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      # The Prisma client has to exist before anything typechecks against it.
+      - run: npx prisma generate
+
+      # Guard rails, not ceremony: this deploys straight to production, so a
+      # broken build should fail here rather than at the first request.
+      - run: npx tsc --noEmit
+      - run: npm test -- --silent
+
+      # tsc first, deliberately. Nest injects by type, which needs
+      # design:paramtypes, and esbuild does not emit it — bundling the
+      # TypeScript directly produces a Worker whose guards have no Reflector.
+      - run: npm run build:workers
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: backend
+
+      - name: Check the deployed API answers
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /tmp/h.json -w "%{http_code}" \
+              https://clams-api.opticspace09.workers.dev/api/v1/health || true)
+            if [ "$code" = "200" ]; then
+              echo "healthy: $(cat /tmp/h.json)"
+              exit 0
+            fi
+            echo "attempt $i: HTTP $code"
+            sleep 15
+          done
+          echo "API did not report healthy after deploy"
+          exit 1
+
+  admin:
+    needs: changes
+    if: >-
+      (github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","admin"]'), inputs.target)) ||
+      (github.event_name == 'push' && needs.changes.outputs.admin == 'true')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+
+      # OpenNext adapts the Next build for the Workers runtime.
+      - run: npm run build:workers
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: admin
+
+      - name: Check the admin panel serves its login page
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" \
+              https://clams-admin.opticspace09.workers.dev/login || true)
+            if [ "$code" = "200" ]; then
+              echo "login page is up"
+              exit 0
+            fi
+            echo "attempt $i: HTTP $code"
+            sleep 15
+          done
+          echo "Admin panel did not serve /login after deploy"
+          exit 1

@@ -30,8 +30,28 @@ function browserLabel(ua: string | null): string {
   return `${browser} on ${os}`;
 }
 
+/** What the login form posts. */
+interface LoginBody {
+  email?: string;
+  identifier?: string;
+  password?: string;
+}
+
+/** What the backend returns on a successful login. */
+/** The device-registration reply, as much of it as this route reads. */
+interface DeviceRegistration {
+  status?: string;
+  deviceId?: string;
+}
+
+interface LoginResult {
+  accessToken: string;
+  refreshToken: string;
+  user?: { role?: string };
+}
+
 export async function POST(req: NextRequest) {
-  const { email, identifier, password } = await req.json();
+  const { email, identifier, password } = (await req.json()) as LoginBody;
   const res = await fetch(`${API_INTERNAL_BASE_URL}/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -44,8 +64,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(body, { status: res.status });
   }
 
-  const data = await res.json();
-  setAuthCookies(data.accessToken, data.refreshToken);
+  const data = (await res.json()) as LoginResult;
+  await setAuthCookies(data.accessToken, data.refreshToken);
 
   // Device approval: non-super-admin browsers must be approved before any
   // data is served. Register this browser and try to collect its token —
@@ -54,7 +74,7 @@ export async function POST(req: NextRequest) {
   if (data.user?.role && data.user.role !== 'SUPER_ADMIN') {
     deviceStatus = 'PENDING';
     try {
-      const uid = getOrCreateDeviceUid();
+      const uid = await getOrCreateDeviceUid();
       const reg = await fetch(`${API_INTERNAL_BASE_URL}/auth/device/register`, {
         method: 'POST',
         headers: {
@@ -68,9 +88,9 @@ export async function POST(req: NextRequest) {
         }),
         cache: 'no-store',
       });
-      const regBody = await reg.json();
+      const regBody = (await reg.json()) as DeviceRegistration;
       deviceStatus = regBody.status ?? 'PENDING';
-      if (reg.ok && regBody.status === 'AUTHORIZED') {
+      if (reg.ok && regBody.status === 'AUTHORIZED' && regBody.deviceId) {
         const tok = await fetch(`${API_INTERNAL_BASE_URL}/auth/device/token`, {
           method: 'POST',
           headers: {
@@ -81,8 +101,8 @@ export async function POST(req: NextRequest) {
           cache: 'no-store',
         });
         if (tok.ok) {
-          const tokBody = await tok.json();
-          setDeviceCredentials(regBody.deviceId, tokBody.deviceToken);
+          const tokBody = (await tok.json()) as { deviceToken: string };
+          await setDeviceCredentials(regBody.deviceId, tokBody.deviceToken);
         }
       }
     } catch {

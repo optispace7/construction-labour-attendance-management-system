@@ -1,4 +1,11 @@
 import { cookies } from 'next/headers';
+
+/**
+ * Every function here is async because `cookies()` became async in Next 15.
+ * Nothing about the cookie handling itself changed — the awaits are the whole
+ * migration, and they are load-bearing: a forgotten one yields a Promise where
+ * a token is expected, which reads as "not logged in" rather than as an error.
+ */
 import {
   ACCESS_MAX_AGE,
   COOKIE_ACCESS,
@@ -12,8 +19,8 @@ import {
 
 const secure = process.env.NODE_ENV === 'production';
 
-export function setAuthCookies(accessToken: string, refreshToken: string) {
-  const jar = cookies();
+export async function setAuthCookies(accessToken: string, refreshToken: string) {
+  const jar = await cookies();
   jar.set(COOKIE_ACCESS, accessToken, {
     httpOnly: true,
     secure,
@@ -30,18 +37,18 @@ export function setAuthCookies(accessToken: string, refreshToken: string) {
   });
 }
 
-export function clearAuthCookies() {
-  const jar = cookies();
+export async function clearAuthCookies() {
+  const jar = await cookies();
   jar.delete(COOKIE_ACCESS);
   jar.delete(COOKIE_REFRESH);
 }
 
-export function getAccessToken(): string | undefined {
-  return cookies().get(COOKIE_ACCESS)?.value;
+export async function getAccessToken(): Promise<string | undefined> {
+  return (await cookies()).get(COOKIE_ACCESS)?.value;
 }
 
-export function getRefreshToken(): string | undefined {
-  return cookies().get(COOKIE_REFRESH)?.value;
+export async function getRefreshToken(): Promise<string | undefined> {
+  return (await cookies()).get(COOKIE_REFRESH)?.value;
 }
 
 // ---- Browser device identity (device-approval flow) ----
@@ -55,8 +62,8 @@ const deviceCookieOpts = {
 };
 
 /** Stable per-browser UID; created on first login and kept across sessions. */
-export function getOrCreateDeviceUid(): string {
-  const jar = cookies();
+export async function getOrCreateDeviceUid(): Promise<string> {
+  const jar = await cookies();
   const existing = jar.get(COOKIE_DEVICE_UID)?.value;
   if (existing) return existing;
   const uid = `web-${crypto.randomUUID()}`;
@@ -64,18 +71,18 @@ export function getOrCreateDeviceUid(): string {
   return uid;
 }
 
-export function getDeviceUid(): string | undefined {
-  return cookies().get(COOKIE_DEVICE_UID)?.value;
+export async function getDeviceUid(): Promise<string | undefined> {
+  return (await cookies()).get(COOKIE_DEVICE_UID)?.value;
 }
 
-export function setDeviceCredentials(deviceId: string, deviceToken: string) {
-  const jar = cookies();
+export async function setDeviceCredentials(deviceId: string, deviceToken: string) {
+  const jar = await cookies();
   jar.set(COOKIE_DEVICE_ID, deviceId, deviceCookieOpts);
   jar.set(COOKIE_DEVICE_TOKEN, deviceToken, deviceCookieOpts);
 }
 
-export function getDeviceCredentials(): { deviceId?: string; deviceToken?: string } {
-  const jar = cookies();
+export async function getDeviceCredentials(): Promise<{ deviceId?: string; deviceToken?: string }> {
+  const jar = await cookies();
   return {
     deviceId: jar.get(COOKIE_DEVICE_ID)?.value,
     deviceToken: jar.get(COOKIE_DEVICE_TOKEN)?.value,

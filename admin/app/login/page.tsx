@@ -23,6 +23,19 @@ interface FormValues {
 
 type Mode = 'login' | 'forgot' | 'otp' | 'done';
 
+/** The problem+json shape the API returns, as much of it as this page reads. */
+interface ApiErrorBody {
+  detail?: string;
+  title?: string;
+  code?: string;
+  deviceStatus?: string;
+  // The forgot-password flow answers on the same reader.
+  emailSent?: boolean;
+  message?: string;
+  // Handed back by OTP verification and passed straight to the reset call.
+  resetToken?: string;
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const { register, handleSubmit } = useForm<FormValues>();
@@ -53,7 +66,7 @@ export default function LoginPage() {
         body: JSON.stringify(values),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
+        const body = ((await res.json().catch(() => ({}))) as ApiErrorBody) as ApiErrorBody;
         setError(body?.detail ?? body?.title ?? 'Invalid credentials');
         return;
       }
@@ -78,17 +91,17 @@ export default function LoginPage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ identifier: fpIdentifier.trim() }),
       });
-      const body = await res.json().catch(() => ({}));
+      const body = ((await res.json().catch(() => ({}))) as ApiErrorBody) as ApiErrorBody;
       if (!res.ok) {
         setError(body?.detail ?? body?.title ?? 'Could not start password reset');
         return;
       }
       if (body.emailSent) {
-        setInfo(body.message);
+        setInfo(body.message ?? null);
         setMode('otp');
       } else {
         // Watchman / no email on file → point them at their admin.
-        setError(body.message);
+        setError(body.message ?? null);
       }
     } finally {
       setLoading(false);
@@ -116,7 +129,7 @@ export default function LoginPage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ identifier: fpIdentifier.trim(), otp: otp.trim() }),
       });
-      const vBody = await verify.json().catch(() => ({}));
+      const vBody = (await verify.json().catch(() => ({}))) as ApiErrorBody;
       if (!verify.ok) {
         setError(vBody?.detail ?? vBody?.title ?? 'Invalid code');
         return;
@@ -127,7 +140,7 @@ export default function LoginPage() {
         body: JSON.stringify({ resetToken: vBody.resetToken, newPassword }),
       });
       if (!reset.ok) {
-        const rBody = await reset.json().catch(() => ({}));
+        const rBody = (await reset.json().catch(() => ({}))) as ApiErrorBody;
         setError(rBody?.detail ?? rBody?.title ?? 'Could not reset password');
         return;
       }

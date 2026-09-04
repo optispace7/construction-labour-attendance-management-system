@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      ...backendAuthHeaders(),
+      ...(await backendAuthHeaders()),
     },
     body: await req.text(),
     cache: 'no-store',

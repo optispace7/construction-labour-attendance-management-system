@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "clams-admin",
+  "main": ".open-next/worker.js",
+
+  // nodejs_compat is on by default from this date, which the Next server needs.
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+
+  // Holds the APK the /download route streams. The same bucket as the API's,
+  // so there is one place for large files rather than two.
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "clams-media" }],
+
+  "observability": { "enabled": true },
+
+  "vars": {
+    "NODE_ENV": "production",
+    // The browser's view of the API, and the server-to-server one. Both point
+    // at the deployed API Worker; from here that is an ordinary internet hop,
+    // where on Azure the two containers shared a network.
+    "NEXT_PUBLIC_API_BASE_URL": "https://clams-api.opticspace09.workers.dev/api/v1",
+    "API_INTERNAL_BASE_URL": "https://clams-api.opticspace09.workers.dev/api/v1"
+  }
+
+  // Set at deploy time, not here:
+  //   NEXT_PUBLIC_API_BASE_URL  — the browser's view of the API
+  //   API_INTERNAL_BASE_URL     — server-to-server, same origin from a Worker
+}

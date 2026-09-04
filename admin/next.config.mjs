@@ -7,26 +7,9 @@ const nextConfig = {
       transform: '@mui/icons-material/{{member}}',
     },
   },
-  async rewrites() {
-    return [{ source: '/download', destination: '/CLAMS.apk' }];
-  },
-  async headers() {
-    return [
-      {
-        source: '/download',
-        headers: [
-          {
-            key: 'Content-Disposition',
-            value: 'attachment; filename="CLAMS.apk"',
-          },
-          {
-            key: 'Content-Type',
-            value: 'application/vnd.android.package-archive',
-          },
-        ],
-      },
-    ];
-  },
+  // /download is a route handler now — see app/download/route.ts. The APK is
+  // 72 MB and static assets are capped at 25 MiB, so it is streamed from the
+  // media bucket instead of being served from public/.
 };
 
 export default nextConfig;

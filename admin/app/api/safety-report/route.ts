@@ -12,7 +12,7 @@ import { backendAuthHeaders } from '@/lib/server/api';
  */
 export async function GET(req: NextRequest) {
   const res = await fetch(`${API_INTERNAL_BASE_URL}/safety/stats/pdf${req.nextUrl.search}`, {
-    headers: backendAuthHeaders(),
+    headers: await backendAuthHeaders(),
     cache: 'no-store',
   });
   if (!res.ok || !res.body) return new NextResponse(null, { status: res.status });

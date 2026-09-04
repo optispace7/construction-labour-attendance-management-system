@@ -6,9 +6,10 @@ import { backendAuthHeaders } from '@/lib/server/api';
  * Streams a company document (PDF) from the backend using the httpOnly access
  * cookie — same reason as /api/photo: the JSON-only proxy can't carry binary.
  */
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
-  const res = await fetch(`${API_INTERNAL_BASE_URL}/company-documents/${params.id}/file`, {
-    headers: backendAuthHeaders(),
+export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const res = await fetch(`${API_INTERNAL_BASE_URL}/company-documents/${id}/file`, {
+    headers: await backendAuthHeaders(),
     cache: 'no-store',
   });
   if (!res.ok || !res.body) return new NextResponse(null, { status: res.status });

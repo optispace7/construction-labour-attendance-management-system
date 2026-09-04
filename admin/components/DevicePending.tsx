@@ -18,6 +18,12 @@ import LaptopIcon from '@mui/icons-material/Laptop';
  * Polls the BFF until an admin/super admin authorizes this device, then
  * reloads into the app.
  */
+/** What /api/auth/device answers while this screen polls. */
+interface DeviceStatusReply {
+  status?: string;
+  ready?: boolean;
+}
+
 export function DevicePending({ approverLabel }: { approverLabel: string }) {
   const router = useRouter();
   const [status, setStatus] = React.useState<string>('PENDING');
@@ -27,7 +33,7 @@ export function DevicePending({ approverLabel }: { approverLabel: string }) {
     const tick = async () => {
       try {
         const res = await fetch('/api/auth/device', { cache: 'no-store' });
-        const body = await res.json().catch(() => ({}));
+        const body = (await res.json().catch(() => ({}))) as DeviceStatusReply;
         if (stop) return;
         setStatus(body.status ?? 'PENDING');
         if (body.ready) {

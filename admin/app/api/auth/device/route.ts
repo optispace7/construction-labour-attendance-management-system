@@ -13,20 +13,20 @@ interface DeviceStatus {
  * next reload passes the API's device guard.
  */
 export async function GET() {
-  const uid = getDeviceUid();
+  const uid = await getDeviceUid();
   if (!uid) return NextResponse.json({ status: 'UNREGISTERED', ready: false });
 
   try {
     const st = await serverApi<DeviceStatus>(`/auth/device/status?uid=${encodeURIComponent(uid)}`);
     let ready = false;
     if (st.status === 'AUTHORIZED' && st.deviceId) {
-      const { deviceToken } = getDeviceCredentials();
+      const { deviceToken } = await getDeviceCredentials();
       if (!deviceToken) {
         const tok = await serverApi<{ deviceToken: string }>('/auth/device/token', {
           method: 'POST',
           body: { deviceId: st.deviceId },
         });
-        setDeviceCredentials(st.deviceId, tok.deviceToken);
+        await setDeviceCredentials(st.deviceId, tok.deviceToken);
       }
       ready = true;
     }

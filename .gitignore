@@ -83,3 +83,11 @@ backend/.wrangler/
 backend/worker-configuration.d.ts
 
 dist-workers/
+
+# Generated Worker secrets — local record only, never commit
+backend/.worker-secrets.local.json
+
+# APK kept out of the repo; it lives in R2 and is served by /download
+CLAMS.apk.local
+admin/.open-next/
+admin/worker-configuration.d.ts

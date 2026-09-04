@@ -19,7 +19,7 @@ interface ApiOptions {
  * non-2xx so server components / route handlers can map it.
  */
 export async function serverApi<T = unknown>(path: string, opts: ApiOptions = {}): Promise<T> {
-  const res = await rawCall(path, opts, getAccessToken());
+  const res = await rawCall(path, opts, await getAccessToken());
 
   if (res.status === 401 && opts.allowRefresh !== false) {
     const refreshed = await tryRefresh();
@@ -38,10 +38,13 @@ export async function serverApi<T = unknown>(path: string, opts: ApiOptions = {}
  * (the binary streams, which cannot go through the JSON proxy) must send these
  * too or it works only for the super admin.
  */
-export function backendAuthHeaders(token = getAccessToken()): Record<string, string> {
-  const { deviceId, deviceToken } = getDeviceCredentials();
+export async function backendAuthHeaders(token?: string): Promise<Record<string, string>> {
+  // Both reads hit the cookie jar, which is async from Next 15 onwards, so the
+  // default can no longer be an argument expression.
+  const accessToken = token ?? (await getAccessToken());
+  const { deviceId, deviceToken } = await getDeviceCredentials();
   return {
-    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
     ...(deviceId && deviceToken ? { 'x-device-id': deviceId, 'x-device-token': deviceToken } : {}),
   };
 }
@@ -51,7 +54,7 @@ async function rawCall(path: string, opts: ApiOptions, token?: string): Promise<
     method: opts.method ?? 'GET',
     headers: {
       'content-type': 'application/json',
-      ...backendAuthHeaders(token),
+      ...(await backendAuthHeaders(token)),
     },
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     cache: 'no-store',
@@ -59,7 +62,7 @@ async function rawCall(path: string, opts: ApiOptions, token?: string): Promise<
 }
 
 async function tryRefresh(): Promise<string | null> {
-  const refreshToken = getRefreshToken();
+  const refreshToken = await getRefreshToken();
   if (!refreshToken) return null;
   const res = await fetch(`${API_INTERNAL_BASE_URL}/auth/refresh`, {
     method: 'POST',
@@ -69,7 +72,7 @@ async function tryRefresh(): Promise<string | null> {
   });
   if (!res.ok) return null;
   const data = (await res.json()) as { accessToken: string; refreshToken: string };
-  setAuthCookies(data.accessToken, data.refreshToken);
+  await setAuthCookies(data.accessToken, data.refreshToken);
   return data.accessToken;
 }
 

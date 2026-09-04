@@ -27,8 +27,8 @@ export default async function DashboardLayout({ children }: { children: React.Re
   // approved (Admin PCs by the Super Admin; Safety Officers by an Admin).
   if (me.role !== 'SUPER_ADMIN') {
     const approver = me.role === 'SITE_ADMIN' ? 'the Super Admin' : 'an Admin';
-    const uid = getDeviceUid();
-    const { deviceToken } = getDeviceCredentials();
+    const uid = await getDeviceUid();
+    const { deviceToken } = await getDeviceCredentials();
     if (!uid) return <DevicePending approverLabel={approver} />;
     try {
       const st = await serverApi<DeviceStatus>(
@@ -45,7 +45,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
   // Route gate, against the role the API just reported rather than the one in
   // the cookie. The middleware turns most of these away before they reach here;
   // this is the copy that cannot be talked out of it with a hand-written token.
-  const pathname = headers().get(PATH_HEADER);
+  const pathname = (await headers()).get(PATH_HEADER);
   if (pathname && !canAccessPath(me.role, pathname)) {
     // landingPathForRole is null only for a Watchman, who has no page here.
     redirect(landingPathForRole(me.role) ?? '/login');
