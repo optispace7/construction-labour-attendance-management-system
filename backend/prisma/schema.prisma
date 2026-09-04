@@ -692,7 +692,17 @@ model PhotoBlob {
   id                String    @id @default(uuid()) @db.Uuid
   organizationId    String    @map("organization_id") @db.Uuid
   mimeType          String    @map("mime_type")
-  data              Bytes
+  // Where the bytes actually live.
+  //
+  // `storageKey` names an object in the media bucket and is how new images are
+  // stored. `data` is the old in-database column, kept nullable so rows written
+  // before the move still serve; nothing writes it any more.
+  //
+  // The row stays either way, and that is deliberate: it carries the
+  // organizationId that scopes access, and the sizes the storage report counts.
+  // Reading straight from the bucket by id would bypass both.
+  storageKey        String?   @map("storage_key")
+  data              Bytes?
   sizeBytes         Int       @map("size_bytes")
   // Storage-management metadata. `sizeBytes` is the stored (compressed +
   // possibly encrypted) length; `originalSizeBytes` is what the client sent.

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { CredentialKind, PersonCategory, Prisma } from '@prisma/client';
 import { DateTime } from 'luxon';
 import { PrismaService } from '../../infra/prisma/prisma.service';
@@ -6,6 +6,8 @@ import { CryptoService } from '../../common/crypto/crypto.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
+import { readStoredBytes } from '../files/read-blob';
+import { blobStore } from '../files/blob-store';
 import {
   AssignSiteDto,
   BindCredentialDto,
@@ -48,6 +50,8 @@ function extensionFor(mimeType: string): string {
 
 @Injectable()
 export class WorkersService {
+  private readonly logger = new Logger(WorkersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
@@ -295,9 +299,12 @@ export class WorkersService {
         });
         // A dangling id is not worth failing the whole export over.
         if (!blob) continue;
-        const data = blob.isEncrypted
-          ? this.crypto.decryptBuffer(Buffer.from(blob.data))
-          : Buffer.from(blob.data);
+        // Bytes may be in object storage or, for rows written before that move,
+        // still in the column — readStoredBytes covers both. A missing object
+        // is treated like a dangling id: skipped, not fatal.
+        const stored = await readStoredBytes(blob);
+        if (!stored) continue;
+        const data = blob.isEncrypted ? this.crypto.decryptBuffer(stored) : stored;
         yield { path: `${folder}/${name}${extensionFor(blob.mimeType)}`, data };
       }
     }
@@ -596,18 +603,33 @@ export class WorkersService {
     const blobId = url.slice('/files/'.length);
     const stillUsed = await this.prisma.worker.count({ where: { photoUrl: url } });
     if (stillUsed === 0) {
-      await this.prisma.photoBlob
-        .deleteMany({ where: { id: blobId, organizationId } })
-        .catch(() => undefined);
+      await this.deletePhotoBlobById(organizationId, blobId);
     }
   }
 
-  /** Deletes an Aadhaar image blob (referenced 1:1 by id, not URL). */
+  /**
+   * Deletes a photo blob: the row, then the stored object.
+   *
+   * That order matters. Removing the object first would leave a row pointing at
+   * nothing, which reads as a corrupt image; this way a failure leaves an
+   * unreferenced object instead — wasted space, which is recoverable, rather
+   * than a broken record, which is not.
+   */
   private async deletePhotoBlobById(organizationId: string, blobId: string | null) {
     if (!blobId) return;
+    const blob = await this.prisma.photoBlob
+      .findFirst({ where: { id: blobId, organizationId }, select: { storageKey: true } })
+      .catch(() => null);
     await this.prisma.photoBlob
       .deleteMany({ where: { id: blobId, organizationId } })
       .catch(() => undefined);
+    if (blob?.storageKey) {
+      await blobStore.delete(blob.storageKey).catch((e: unknown) => {
+        // Deliberately not fatal: the record is already gone, and an orphaned
+        // object costs storage, not correctness.
+        this.logger.warn(`Left an orphaned object ${blob.storageKey}: ${String(e)}`);
+      });
+    }
   }
 
   /** Bind a credential (UID/QR), revoking any prior active of the same kind. */

@@ -23,6 +23,9 @@
     "class-transformer/storage": "./node_modules/class-transformer/cjs/storage.js",
     // sharp is a native addon. The Images binding does the same job here.
     "./image-compressor": "./dist-workers/modules/files/image-compressor.workers.js",
+    // The Node store reaches R2 over the S3 API and needs credentials; the
+    // binding needs none and keeps the SDK out of the bundle.
+    "./blob-store": "./dist-workers/modules/files/blob-store.workers.js",
     // iconv-lite's lazy stream require breaks when bundled, and body-parser
     // drags it in through @nestjs/platform-express whether or not it is used.
     "iconv-lite": "./dist-workers/workers-stubs/iconv-lite.js"
@@ -48,13 +51,14 @@
   //   DATA_ENCRYPTION_KEY, GMAIL_USER, GMAIL_APP_PASSWORD,
   //   FIREBASE_SERVICE_ACCOUNT
 
-  // Postgres connection pooling and edge-side connection setup. Fill in the id
-  // from `wrangler hyperdrive create clams-db --connection-string=...`.
-  // "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<id>" }],
+  // Postgres connection pooling and edge-side connection setup, in front of
+  // Supabase (ap-south-1). The Worker never sees the real credentials — the
+  // binding hands out a connection string valid only inside it.
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "60c96c9a2e4249c8b105d8a499ac8d5c" }],
 
   // Worker and Aadhaar photos, and the APK the admin panel serves. The APK
   // cannot be a static asset: those are capped at 25 MiB and it is 72 MB.
-  // "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "clams-media" }],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "clams-media" }],
 
   // Replaces sharp for photo compression.
   // "images": { "binding": "IMAGES" }

@@ -6,6 +6,7 @@ import { CryptoService } from '../../common/crypto/crypto.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
+import { blobStore } from '../files/blob-store';
 
 export const STORAGE_WARN_PCT = 0.8;
 export const STORAGE_CRITICAL_PCT = 0.9;
@@ -319,6 +320,19 @@ export class StorageService {
     }
 
     const blobIds = await this.exclusiveSiteBlobIds(user.organizationId, siteId);
+    // Read the object keys before the rows are deleted — afterwards there is
+    // nothing left to say where the images were, and they would sit in the
+    // bucket for ever, still holding this site's Aadhaar photos.
+    const storageKeys = blobIds.length
+      ? (
+          await this.prisma.photoBlob.findMany({
+            where: { organizationId: user.organizationId, id: { in: blobIds } },
+            select: { storageKey: true },
+          })
+        )
+          .map((b) => b.storageKey)
+          .filter((k): k is string => Boolean(k))
+      : [];
     const before = await this.usedBytes();
 
     const [taps, sessions, blobs] = await this.prisma.$transaction([
@@ -336,6 +350,16 @@ export class StorageService {
             where: { id: '00000000-0000-0000-0000-000000000000' },
           }),
     ]);
+
+    // The rows are gone; now the objects. Failures here are logged rather than
+    // raised: the purge has already happened and its audit entry is about to be
+    // written, so aborting now would misreport what actually took place. What
+    // is left behind is storage, not data.
+    for (const key of storageKeys) {
+      await blobStore.delete(key).catch((e: unknown) => {
+        this.logger.warn(`Left an orphaned object ${key} after purge: ${String(e)}`);
+      });
+    }
 
     // Null out worker photo references whose blobs we just removed.
     if (blobIds.length) {

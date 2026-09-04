@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { PhotoKind } from '@prisma/client';
 import { compressImage } from './image-compressor';
+import { blobStore, blobStoreConfigured } from './blob-store';
+import { readStoredBytes, StoredBlobRef } from './read-blob';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CryptoService } from '../../common/crypto/crypto.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
@@ -14,8 +17,8 @@ const MAX_EDGE = 1600; // longest side, px
 const JPEG_QUALITY = 80;
 // Aadhaar cards are the only images we ever machine-read, so they get a little
 // headroom over a portrait: JPEG ringing around the Secure QR's modules is what
-// defeats a decoder. Kept modest — a 1600px/q80 card still decodes, and these
-// blobs live in the database against the storage budget.
+// defeats a decoder. Kept modest — a 1600px/q80 card still decodes, and every
+// extra pixel is paid for on every read.
 const AADHAAR_MAX_EDGE = 1800;
 const AADHAAR_JPEG_QUALITY = 85;
 
@@ -61,11 +64,26 @@ export class FilesService {
     const encrypt = kind === 'AADHAAR_FRONT' || kind === 'AADHAAR_BACK' || kind === 'ID_PROOF';
     const stored = encrypt ? this.crypto.encryptBuffer(compressed) : compressed;
 
+    // 3) The bytes go to object storage and the row keeps only metadata — the
+    //    organizationId that scopes every read, and the sizes the storage
+    //    report counts. Where no bucket is configured they stay in the column,
+    //    so an existing deployment is unaffected until it is given one.
+    const id = randomUUID();
+    const useStore = blobStoreConfigured();
+    if (useStore) {
+      // Written before the row, so a failure here leaves nothing behind. The
+      // reverse order can leave a row pointing at an object that never landed,
+      // which reads as a corrupt photo rather than a failed upload.
+      await blobStore.put(this.storageKey(user.organizationId, id, kind), stored, mimeType);
+    }
+
     const blob = await this.prisma.photoBlob.create({
       data: {
+        id,
         organizationId: user.organizationId,
         mimeType,
-        data: stored,
+        storageKey: useStore ? this.storageKey(user.organizationId, id, kind) : null,
+        data: useStore ? null : stored,
         sizeBytes: stored.length,
         originalSizeBytes,
         kind,
@@ -79,18 +97,45 @@ export class FilesService {
   }
 
   /**
+   * Object key for a blob.
+   *
+   * Scoped by organization so a bucket listing stays legible and a whole
+   * tenant's images can be found without consulting the database, and by kind
+   * so the sensitive ones are obvious at a glance.
+   */
+  private storageKey(organizationId: string, id: string, kind: PhotoKind): string {
+    return `org/${organizationId}/${kind.toLowerCase()}/${id}`;
+  }
+
+  /**
    * Returns a blob with `data` already decrypted back to its viewable image
    * bytes so the caller can stream it directly.
+   *
+   * The organizationId in the lookup is what stops one tenant reading
+   * another's images; it is why the row is still consulted rather than the
+   * bucket being addressed by id directly.
    */
   async get(user: AuthUser, id: string) {
     const blob = await this.prisma.photoBlob.findFirst({
       where: { id, organizationId: user.organizationId },
     });
     if (!blob) throw Errors.notFound('File');
-    const data = blob.isEncrypted
-      ? this.crypto.decryptBuffer(Buffer.from(blob.data))
-      : Buffer.from(blob.data);
+    const stored = await this.readBytes(blob);
+    const data = blob.isEncrypted ? this.crypto.decryptBuffer(stored) : stored;
     return { ...blob, data };
+  }
+
+  /**
+   * The stored bytes, from wherever this particular row keeps them.
+   *
+   * Rows written before the move still carry their bytes in the column, so both
+   * are read for as long as any remain. A row with neither is a dangling
+   * reference — worth failing loudly rather than serving an empty image.
+   */
+  private async readBytes(blob: StoredBlobRef): Promise<Buffer> {
+    const bytes = await readStoredBytes(blob);
+    if (!bytes) throw Errors.notFound('File');
+    return bytes;
   }
 
   private async compress(
