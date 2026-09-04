@@ -81,3 +81,5 @@ DEMO-DATA-*.md
 # Wrangler build output
 backend/.wrangler/
 backend/worker-configuration.d.ts
+
+dist-workers/

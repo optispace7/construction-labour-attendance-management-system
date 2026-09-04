@@ -1,3 +1,4 @@
+import { BadRequestException, PayloadTooLargeException } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
 
 /**
@@ -28,12 +29,14 @@ export function jsonBody(limitBytes: number) {
     let size = 0;
     let finished = false;
 
-    const fail = (status: number, message: string) => {
+    // HttpException, not a plain Error with a status field — the exception
+    // filter maps HttpException to problem+json and turns anything else into a
+    // 500, so a hand-rolled error shape is reported as a server fault when it
+    // is really the client's.
+    const fail = (error: Error) => {
       if (finished) return;
       finished = true;
-      // Match the shape the exception filter already understands.
-      const err = Object.assign(new Error(message), { status, statusCode: status });
-      next(err);
+      next(error);
     };
 
     req.on('data', (chunk: Buffer) => {
@@ -43,7 +46,7 @@ export function jsonBody(limitBytes: number) {
         // Stop reading rather than buffering a body we have already rejected —
         // memory here is capped for the whole request, not just the body.
         req.pause();
-        fail(413, `Request body larger than ${limitBytes} bytes`);
+        fail(new PayloadTooLargeException(`Request body larger than ${limitBytes} bytes`));
         return;
       }
       chunks.push(chunk);
@@ -61,11 +64,7 @@ export function jsonBody(limitBytes: number) {
         req.body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         next();
       } catch {
-        const err = Object.assign(new Error('Invalid JSON body'), {
-          status: 400,
-          statusCode: 400,
-        });
-        next(err);
+        next(new BadRequestException('Invalid JSON body'));
       }
     });
 

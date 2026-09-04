@@ -3,19 +3,25 @@
   "compilerOptions": {
     "module": "esnext",
     "moduleResolution": "bundler",
-    "noEmit": true,
-    "types": [
-      "node"
-    ]
+    "target": "ES2022",
+    "outDir": "./dist-workers",
+    "rootDir": "./src",
+    "noEmit": false,
+    "declaration": false,
+    "sourceMap": true,
+    "incremental": false,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true
   },
   "include": [
-    "src/workers-entry.ts",
-    "src/workers-stubs/**/*",
-    "src/modules/files/image-compressor.workers.ts",
+    "src/**/*.ts",
     "worker-configuration.d.ts"
   ],
   "exclude": [
     "node_modules",
-    "dist"
+    "dist",
+    "dist-workers",
+    "**/*.spec.ts",
+    "test"
   ]
 }

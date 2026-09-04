@@ -1,7 +1,10 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "clams-api",
-  "main": "src/workers-entry.ts",
+  // Points at the tsc output, not src: tsc emits the decorator metadata Nest
+  // needs to inject by type, and esbuild does not. Run `npm run build:workers`
+  // before deploying.
+  "main": "dist-workers/workers-entry.js",
 
   // 2026-08-04 and later turns on nodejs_compat and nodejs_compat_v2 by
   // default, which is what makes node:crypto, node:stream and the node:http
@@ -14,15 +17,15 @@
   // class-transformer's storage subpath is not listed in its package exports.
   // Neither resolves in a bundler; both are pointed somewhere real here.
   "alias": {
-    "@nestjs/microservices": "./src/workers-stubs/nest-optional.ts",
-    "@nestjs/microservices/microservices-module": "./src/workers-stubs/nest-optional.ts",
-    "@nestjs/websockets/socket-module": "./src/workers-stubs/nest-optional.ts",
+    "@nestjs/microservices": "./dist-workers/workers-stubs/nest-optional.js",
+    "@nestjs/microservices/microservices-module": "./dist-workers/workers-stubs/nest-optional.js",
+    "@nestjs/websockets/socket-module": "./dist-workers/workers-stubs/nest-optional.js",
     "class-transformer/storage": "./node_modules/class-transformer/cjs/storage.js",
     // sharp is a native addon. The Images binding does the same job here.
-    "./image-compressor": "./src/modules/files/image-compressor.workers.ts",
+    "./image-compressor": "./dist-workers/modules/files/image-compressor.workers.js",
     // iconv-lite's lazy stream require breaks when bundled, and body-parser
     // drags it in through @nestjs/platform-express whether or not it is used.
-    "iconv-lite": "./src/workers-stubs/iconv-lite.ts"
+    "iconv-lite": "./dist-workers/workers-stubs/iconv-lite.js"
   },
 
   // The three background monitors cannot use setInterval here — a timer set

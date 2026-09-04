@@ -35,8 +35,11 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       if (!connectionString) {
         throw new Error('DATABASE_URL is not configured');
       }
-      const pool = new Pool({ connectionString, max: POOL_MAX });
-      super({ adapter: new PrismaPg(pool) } as never);
+      // The adapter version must match @prisma/client: the client calls
+      // adapter.transactionContext() directly, and a newer adapter is a factory
+      // whose adapter comes back from connect() instead. Mismatched, the client
+      // reads an undefined method off it and the whole app fails to construct.
+      super({ adapter: new PrismaPg(new Pool({ connectionString, max: POOL_MAX })) } as never);
     } else {
       super();
     }

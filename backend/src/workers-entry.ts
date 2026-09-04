@@ -8,8 +8,8 @@
  *
  * The two differ in what they can assume, so the differences live here rather
  * than as branches inside `main.ts`:
- *   - the app is built once at module scope, because a Worker has no process
- *     asynchronous I/O while the module is still being evaluated;
+ *   - the app is built lazily on the first request, because this runtime
+ *     forbids asynchronous I/O while the module is still being evaluated;
  *   - Swagger is left out — it is several hundred KB of bundle for a page
  *     nobody opens in production, and bundle size is capped here.
  */
@@ -18,6 +18,7 @@ import { INestApplication, ValidationPipe, VersioningType } from '@nestjs/common
 import { ExpressAdapter } from '@nestjs/platform-express';
 import express from 'express';
 import { httpServerHandler } from 'cloudflare:node';
+import { env } from 'cloudflare:workers';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter';
 import { RequestIdMiddleware } from './common/errors/request-id.middleware';
@@ -32,7 +33,28 @@ import { DocumentExpiryMonitor } from './modules/company-documents/document-expi
  */
 const PORT = 8080;
 
+/**
+ * Point DATABASE_URL at Hyperdrive.
+ *
+ * Hyperdrive hands out a connection string that is only valid inside this
+ * Worker; it terminates at a pool kept warm next to the database, so the
+ * driver skips a TLS and auth handshake it would otherwise pay on every cold
+ * connection. Injecting it into the environment — rather than teaching
+ * PrismaService about bindings — keeps that service identical on both runtimes.
+ *
+ * Without the binding the app falls back to DATABASE_URL as given, which is
+ * what local development uses.
+ */
+function useHyperdriveIfBound(): void {
+  const hyperdrive = (env as unknown as { HYPERDRIVE?: { connectionString?: string } }).HYPERDRIVE;
+  if (hyperdrive?.connectionString) {
+    process.env.DATABASE_URL = hyperdrive.connectionString;
+  }
+}
+
 async function bootstrap() {
+  useHyperdriveIfBound();
+
   // The adapter is passed in rather than discovered. NestFactory otherwise
   // resolves @nestjs/platform-express through a runtime require that a bundler
   // cannot follow, and the resulting undefined surfaces only at boot.

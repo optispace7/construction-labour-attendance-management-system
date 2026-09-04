@@ -18,7 +18,9 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
-    "worker": "node dist/worker.js"
+    "worker": "node dist/worker.js",
+    "build:workers": "tsc -p tsconfig.workers.json",
+    "deploy:workers": "npm run build:workers && wrangler deploy"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
@@ -32,7 +34,7 @@
     "@nestjs/platform-express": "^10.4.0",
     "@nestjs/swagger": "^7.4.0",
     "@nestjs/throttler": "^6.2.1",
-    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/adapter-pg": "^5.22.0",
     "@prisma/client": "^5.19.0",
     "archiver": "^7.0.1",
     "bullmq": "^5.12.0",
