@@ -2,6 +2,11 @@
 generator client {
   provider      = "prisma-client-js"
   binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  // Lets the client talk to Postgres through a plain JS driver instead of the
+  // Rust query engine. The engine is a native binary, so it cannot run on a
+  // runtime that only loads JS and WebAssembly; the adapter is what makes the
+  // same code work both on a normal Node server and on that kind of runtime.
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {

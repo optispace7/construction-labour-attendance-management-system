@@ -65,3 +65,11 @@ outputs/
 
 # Local DB backups — contain worker PII, never commit
 backups/
+
+# Client-facing documents & scratch artifacts (not part of the app)
+*.docx
+*.xlsx
+*.ndjson
+CLAMS-Project-Context.md
+DEMO-DATA-*.md
+.codex-tmp/

@@ -1,6 +1,28 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
-import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'crypto';
-import * as argon2 from 'argon2';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
+import { argon2id, argon2Verify } from 'hash-wasm';
+
+/**
+ * Argon2id cost. Deliberately below the `argon2` npm package's old defaults
+ * (m=65536, t=3, p=4): the runtime caps a request at 128 MB, and a 64 MB hash
+ * plus the rest of a request is too close to that ceiling to be safe. These are
+ * the OWASP-recommended argon2id parameters — 19 MiB is still memory-hard, and
+ * memory-hardness is the property that matters against GPU cracking.
+ *
+ * Existing hashes are unaffected: the cost parameters are written into the hash
+ * string itself, so a hash made with the old settings still verifies with them.
+ */
+const ARGON2_MEMORY_KIB = 19456;
+const ARGON2_ITERATIONS = 2;
+const ARGON2_PARALLELISM = 1;
+const ARGON2_SALT_BYTES = 16;
+const ARGON2_HASH_BYTES = 32;
 
 /**
  * Field-level encryption for sensitive data (e.g. Aadhaar) using AES-256-GCM.
@@ -59,13 +81,31 @@ export class CryptoService {
     return Buffer.concat([decipher.update(data), decipher.final()]);
   }
 
+  /**
+   * Argon2id, via WebAssembly rather than a native addon, so the same code runs
+   * on a plain Node server and on a runtime that cannot load `.node` binaries.
+   * The output is the standard PHC string (`$argon2id$v=19$m=...`), which is
+   * what makes hashes portable between the two.
+   */
+  private async argon2Hash(secret: string): Promise<string> {
+    return argon2id({
+      password: secret,
+      salt: randomBytes(ARGON2_SALT_BYTES),
+      parallelism: ARGON2_PARALLELISM,
+      iterations: ARGON2_ITERATIONS,
+      memorySize: ARGON2_MEMORY_KIB,
+      hashLength: ARGON2_HASH_BYTES,
+      outputType: 'encoded',
+    });
+  }
+
   async hashPassword(password: string): Promise<string> {
-    return argon2.hash(password, { type: argon2.argon2id });
+    return this.argon2Hash(password);
   }
 
   async verifyPassword(hash: string, password: string): Promise<boolean> {
     try {
-      return await argon2.verify(hash, password);
+      return await argon2Verify({ password, hash });
     } catch {
       return false;
     }
@@ -77,7 +117,7 @@ export class CryptoService {
    * running through the candidates expensive.
    */
   async hashToken(token: string): Promise<string> {
-    return argon2.hash(token, { type: argon2.argon2id });
+    return this.argon2Hash(token);
   }
 
   /**
@@ -108,7 +148,7 @@ export class CryptoService {
    */
   async verifyToken(hash: string, token: string): Promise<boolean> {
     try {
-      if (this.isLegacyTokenHash(hash)) return await argon2.verify(hash, token);
+      if (this.isLegacyTokenHash(hash)) return await argon2Verify({ password: token, hash });
       const expected = Buffer.from(hash, 'hex');
       const actual = createHash('sha256').update(token).digest();
       // Constant-time: timingSafeEqual throws on a length mismatch, so guard it.
