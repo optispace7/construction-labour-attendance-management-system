@@ -20,8 +20,16 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "paths": {
-      "src/*": ["src/*"]
+      "src/*": [
+        "src/*"
+      ]
     }
   },
-  "exclude": ["node_modules", "dist"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/workers-entry.ts",
+    "src/workers-stubs/**/*",
+    "src/modules/files/image-compressor.workers.ts"
+  ]
 }

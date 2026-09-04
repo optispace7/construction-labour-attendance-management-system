@@ -1,0 +1,58 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "clams-api",
+  "main": "src/workers-entry.ts",
+
+  // 2026-08-04 and later turns on nodejs_compat and nodejs_compat_v2 by
+  // default, which is what makes node:crypto, node:stream and the node:http
+  // server modules available. Express and Nest need all three.
+  "compatibility_date": "2026-09-01",
+
+  "observability": { "enabled": true },
+
+  // @nestjs/core lazily requires its optional transport packages, and
+  // class-transformer's storage subpath is not listed in its package exports.
+  // Neither resolves in a bundler; both are pointed somewhere real here.
+  "alias": {
+    "@nestjs/microservices": "./src/workers-stubs/nest-optional.ts",
+    "@nestjs/microservices/microservices-module": "./src/workers-stubs/nest-optional.ts",
+    "@nestjs/websockets/socket-module": "./src/workers-stubs/nest-optional.ts",
+    "class-transformer/storage": "./node_modules/class-transformer/cjs/storage.js",
+    // sharp is a native addon. The Images binding does the same job here.
+    "./image-compressor": "./src/modules/files/image-compressor.workers.ts",
+    // iconv-lite's lazy stream require breaks when bundled, and body-parser
+    // drags it in through @nestjs/platform-express whether or not it is used.
+    "iconv-lite": "./src/workers-stubs/iconv-lite.ts"
+  },
+
+  // The three background monitors cannot use setInterval here — a timer set
+  // during module evaluation belongs to no request and the runtime refuses it.
+  // These schedules drive the same checks through the scheduled() handler.
+  "triggers": {
+    "crons": ["*/10 * * * *", "*/30 * * * *", "0 3 * * *"]
+  },
+
+  "vars": {
+    "NODE_ENV": "production",
+    "DISABLE_INTERVAL_MONITORS": "1",
+    // Reaches Postgres through the pg driver rather than Prisma's Rust query
+    // engine, which cannot be loaded here.
+    "DATABASE_DRIVER_ADAPTER": "1"
+  },
+
+  // Secrets are NOT set here — they go in via `wrangler secret put`:
+  //   DATABASE_URL, JWT_ACCESS_SECRET, JWT_REFRESH_SECRET,
+  //   DATA_ENCRYPTION_KEY, GMAIL_USER, GMAIL_APP_PASSWORD,
+  //   FIREBASE_SERVICE_ACCOUNT
+
+  // Postgres connection pooling and edge-side connection setup. Fill in the id
+  // from `wrangler hyperdrive create clams-db --connection-string=...`.
+  // "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<id>" }],
+
+  // Worker and Aadhaar photos, and the APK the admin panel serves. The APK
+  // cannot be a static asset: those are capped at 25 MiB and it is 72 MB.
+  // "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "clams-media" }],
+
+  // Replaces sharp for photo compression.
+  // "images": { "binding": "IMAGES" }
+}

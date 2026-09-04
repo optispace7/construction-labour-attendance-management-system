@@ -5,6 +5,7 @@ import { MailService } from '../../common/mail/mail.service';
 import { PushService } from '../../common/push/push.service';
 import { businessDate } from '../../common/time/time.util';
 import { NotificationsService } from './notifications.service';
+import { intervalMonitorsEnabled } from '../../common/scheduling/interval-monitors';
 
 const CHECK_INTERVAL_MS = 10 * 60 * 1000; // every 10 minutes
 const NOTIFICATION_RETENTION_DAYS = 30;
@@ -38,6 +39,9 @@ export class ForgotLogoutMonitor implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
+    // Where there is no process between requests, the platform scheduler calls
+    // check() instead — see interval-monitors.ts.
+    if (!intervalMonitorsEnabled()) return;
     this.timer = setInterval(() => void this.check(), CHECK_INTERVAL_MS);
     // First pass shortly after boot.
     setTimeout(() => void this.check(), 30_000);

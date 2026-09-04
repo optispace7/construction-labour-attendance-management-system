@@ -4,6 +4,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { MailService } from '../../common/mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { daysUntil, formatDay } from './company-documents.service';
+import { intervalMonitorsEnabled } from '../../common/scheduling/interval-monitors';
 
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
 // Super Admins only. Renewing a licence is not a site's job, and the company's
@@ -42,6 +43,9 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
+    // Where there is no process between requests, the platform scheduler calls
+    // check() instead — see interval-monitors.ts.
+    if (!intervalMonitorsEnabled()) return;
     this.timer = setInterval(() => void this.check(), CHECK_INTERVAL_MS);
     setTimeout(() => void this.check(), 90_000);
   }

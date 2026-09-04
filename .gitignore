@@ -73,3 +73,11 @@ backups/
 CLAMS-Project-Context.md
 DEMO-DATA-*.md
 .codex-tmp/
+
+# Wrangler local secrets — never commit
+.dev.vars
+.wrangler/
+
+# Wrangler build output
+backend/.wrangler/
+backend/worker-configuration.d.ts

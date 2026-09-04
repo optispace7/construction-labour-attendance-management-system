@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import sharp from 'sharp';
 import { PhotoKind } from '@prisma/client';
+import { compressImage } from './image-compressor';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CryptoService } from '../../common/crypto/crypto.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
@@ -99,20 +99,12 @@ export class FilesService {
     kind: PhotoKind = 'PROFILE',
   ): Promise<{ buffer: Buffer; mimeType: string; compressed: boolean }> {
     const isAadhaar = AADHAAR_KINDS.includes(kind);
-    const edge = isAadhaar ? AADHAAR_MAX_EDGE : MAX_EDGE;
-    const quality = isAadhaar ? AADHAAR_JPEG_QUALITY : JPEG_QUALITY;
-    try {
-      const buffer = await sharp(raw)
-        .rotate() // honour EXIF orientation before stripping metadata
-        .resize({ width: edge, height: edge, fit: 'inside', withoutEnlargement: true })
-        .jpeg({ quality, mozjpeg: true })
-        .toBuffer();
-      return { buffer, mimeType: 'image/jpeg', compressed: true };
-    } catch (e) {
-      // If sharp can't decode it (corrupt/unsupported), fall back to the raw
-      // bytes + original mime rather than failing the upload outright.
-      this.logger.warn(`Image compression failed, storing original: ${String(e)}`);
-      return { buffer: raw, mimeType: originalMime, compressed: false };
-    }
+    // Which implementation runs is decided at build time — see
+    // image-compressor.ts. A corrupt image falls back to the raw bytes there
+    // rather than failing the upload.
+    return compressImage(raw, originalMime, {
+      edge: isAadhaar ? AADHAAR_MAX_EDGE : MAX_EDGE,
+      quality: isAadhaar ? AADHAAR_JPEG_QUALITY : JPEG_QUALITY,
+    });
   }
 }

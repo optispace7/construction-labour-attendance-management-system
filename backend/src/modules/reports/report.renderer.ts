@@ -1,10 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-
 import * as ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 
 import { Cell, isNightTime } from './report.builder';
+import { logoBytes } from '../../assets/logo.embedded';
 
 type Row = Cell[];
 
@@ -343,16 +341,11 @@ const ACCENT = SERIES[0];
 
 type Doc = PDFKit.PDFDocument;
 
-/** Optispace wordmark, ~2.58:1. Copied into dist by the nest-cli assets glob. */
-const LOGO_PATH = join(__dirname, '../../assets/logo.png');
+/** Optispace wordmark, ~2.58:1. Embedded — see logo.embedded.ts for why. */
 const LOGO_RATIO = 1129 / 437;
-let logoBuf: Buffer | null | undefined;
 
 function loadLogo(): Buffer | null {
-  if (logoBuf === undefined) {
-    logoBuf = existsSync(LOGO_PATH) ? readFileSync(LOGO_PATH) : null;
-  }
-  return logoBuf;
+  return logoBytes();
 }
 
 /**

@@ -3,6 +3,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { MailService } from '../../common/mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService, STORAGE_WARN_PCT, STORAGE_CRITICAL_PCT } from './storage.service';
+import { intervalMonitorsEnabled } from '../../common/scheduling/interval-monitors';
 
 const CHECK_INTERVAL_MS = 30 * 60 * 1000; // every 30 minutes
 // Don't re-alert the same level more than once per this window (anti-spam).
@@ -27,6 +28,9 @@ export class StorageMonitor implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
+    // Where there is no process between requests, the platform scheduler calls
+    // check() instead — see interval-monitors.ts.
+    if (!intervalMonitorsEnabled()) return;
     this.timer = setInterval(() => void this.check(), CHECK_INTERVAL_MS);
     setTimeout(() => void this.check(), 60_000);
   }
