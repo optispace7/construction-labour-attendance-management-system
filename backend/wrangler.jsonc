@@ -28,7 +28,11 @@
     "./blob-store": "./dist-workers/modules/files/blob-store.workers.js",
     // iconv-lite's lazy stream require breaks when bundled, and body-parser
     // drags it in through @nestjs/platform-express whether or not it is used.
-    "iconv-lite": "./dist-workers/workers-stubs/iconv-lite.js"
+    "iconv-lite": "./dist-workers/workers-stubs/iconv-lite.js",
+    // SMTP needs a raw TCP socket; this runtime sends over Cloudflare Email.
+    "./mail-transport": "./dist-workers/common/mail/mail-transport.workers.js",
+    // firebase-admin speaks gRPC; this one signs its own JWT and posts to FCM.
+    "./push-sender": "./dist-workers/common/push/push-sender.workers.js"
   },
 
   // The three background monitors cannot use setInterval here — a timer set

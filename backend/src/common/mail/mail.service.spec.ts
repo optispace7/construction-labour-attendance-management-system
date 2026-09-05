@@ -7,7 +7,16 @@ import { EMAIL_FAILING, MailService } from './mail.service';
  * the admin panel and the caller has to be told the mail did not go.
  */
 
-type Sent = { transporter: { sendMail: jest.Mock; verify: jest.Mock } };
+/**
+ * Mirrors the SMTP transport's own rule: a 4.x.x reply is "later", a 5.x.x is
+ * "no". Kept here so the retry tests still exercise the real policy after the
+ * transport moved behind an interface.
+ */
+function isDeferral(e: unknown): boolean {
+  const code = (e as { responseCode?: number }).responseCode;
+  if (typeof code === 'number') return code >= 400 && code < 500;
+  return /\b4\d\d[- ]?4\.\d+\.\d+/.test((e as Error)?.message ?? '');
+}
 
 function build(sendMail: jest.Mock, verify = jest.fn().mockResolvedValue(true)) {
   const notifications: jest.Mock = jest.fn().mockResolvedValue({});
@@ -17,9 +26,19 @@ function build(sendMail: jest.Mock, verify = jest.fn().mockResolvedValue(true)) 
     notification: { create: notifications, updateMany: cleared },
   };
   const svc = new MailService(prisma);
-  // Swap the real transporter for the double; the constructor built one only
-  // if the env happened to carry credentials.
-  Object.defineProperty(svc, 'transporter', { value: { sendMail, verify }, writable: true });
+  // Swap the real transport for a double. MailService owns the policy — the
+  // deferral retry and the admin-panel alarm — and that is what these tests
+  // are about; how bytes leave the process is the transport's business and
+  // differs per runtime.
+  Object.defineProperty(svc, 'transport', {
+    value: {
+      configured: true,
+      verify,
+      send: sendMail,
+      isDeferral,
+    },
+    writable: true,
+  });
   Object.defineProperty(svc, 'logger', {
     value: { log: jest.fn(), warn: jest.fn(), error: jest.fn() },
   });
@@ -197,5 +216,3 @@ describe('MailService', () => {
   });
 });
 
-// Keeps the unused-type checker quiet about the helper's shape.
-export type _Sent = Sent;

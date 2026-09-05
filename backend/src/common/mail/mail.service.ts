@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import * as nodemailer from 'nodemailer';
+import { mailTransport, mailTransportName, MailMessage } from './mail-transport';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 
 /** Notification type the admin panel watches for a broken mailer. */
@@ -21,19 +21,6 @@ const RETRY_DELAY_MS = 5000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Whether the server said "later" rather than "no".
- *
- * A 4.x.x reply is a deferral and a 5.x.x is a refusal; retrying a revoked app
- * password just fails twice as slowly. Gmail deferred one message on a cold
- * start with 421-4.3.0 and the missed-logout alert it carried was simply
- * dropped, because a send that fails is never tried again.
- */
-function deferred(e: unknown): boolean {
-  const code = (e as { responseCode?: number }).responseCode;
-  if (typeof code === 'number') return code >= 400 && code < 500;
-  return /\b4\d\d[- ]?4\.\d+\.\d+/.test((e as Error)?.message ?? '');
-}
 
 /**
  * Gmail SMTP mailer. Configure with:
@@ -51,7 +38,7 @@ function deferred(e: unknown): boolean {
 @Injectable()
 export class MailService implements OnModuleInit {
   private readonly logger = new Logger(MailService.name);
-  private readonly transporter: nodemailer.Transporter | null;
+  private readonly transport = mailTransport;
   private lastAlarmAt = 0;
   /** The reason sending last failed, or null while the mailer is healthy. */
   private lastError: string | null = null;
@@ -59,13 +46,8 @@ export class MailService implements OnModuleInit {
   private readonly retryDelayMs = RETRY_DELAY_MS;
 
   constructor(private readonly prisma: PrismaService) {
-    const user = process.env.GMAIL_USER;
-    const pass = process.env.GMAIL_APP_PASSWORD;
-    if (user && pass) {
-      this.transporter = nodemailer.createTransport({ service: 'gmail', auth: { user, pass } });
-    } else {
-      this.transporter = null;
-      this.logger.warn('GMAIL_USER / GMAIL_APP_PASSWORD not set — email notifications disabled');
+    if (!this.transport.configured) {
+      this.logger.warn(`Email is not configured (${mailTransportName}) — notifications disabled`);
     }
   }
 
@@ -74,10 +56,10 @@ export class MailService implements OnModuleInit {
    * A revoked password is otherwise discovered by whoever did not get the mail.
    */
   async onModuleInit() {
-    if (!this.transporter) return;
+    if (!this.transport.configured) return;
     try {
-      await this.transporter.verify();
-      this.logger.log('SMTP credentials accepted');
+      await this.transport.verify();
+      this.logger.log(`${mailTransportName} accepted`);
       // A working credential settles any alarm still standing from before this
       // container started — that is how the revoked-password banner outlived
       // the revoked password by days.
@@ -88,7 +70,7 @@ export class MailService implements OnModuleInit {
   }
 
   get enabled(): boolean {
-    return this.transporter !== null;
+    return this.transport.configured;
   }
 
   /** Whether the last attempt failed, and why — null when healthy. */
@@ -102,14 +84,9 @@ export class MailService implements OnModuleInit {
    * not lose the message can retry it later rather than assume it was sent.
    */
   async send(to: string[], subject: string, text: string): Promise<boolean> {
-    if (!this.transporter || to.length === 0) return false;
+    if (!this.transport.configured || to.length === 0) return false;
     try {
-      await this.deliver({
-        from: process.env.GMAIL_USER,
-        bcc: to.join(','),
-        subject,
-        text,
-      });
+      await this.deliver({ bcc: to.join(','), subject, text });
       await this.clearAlarm();
       return true;
     } catch (e) {
@@ -124,15 +101,15 @@ export class MailService implements OnModuleInit {
    * whole policy: a deferral that outlasts a five-second pause is an outage
    * worth a banner, not something to keep quietly grinding at.
    */
-  private async deliver(message: nodemailer.SendMailOptions): Promise<void> {
+  private async deliver(message: MailMessage): Promise<void> {
     try {
-      await this.transporter!.sendMail(message);
+      await this.transport.send(message);
     } catch (e) {
-      if (!deferred(e)) throw e;
+      if (!this.transport.isDeferral(e)) throw e;
       const reason = (e as Error).message.split('\n')[0].trim();
       this.logger.warn(`Deferred by the mail server, retrying once: ${reason}`);
       await sleep(this.retryDelayMs);
-      await this.transporter!.sendMail(message);
+      await this.transport.send(message);
     }
   }
 
