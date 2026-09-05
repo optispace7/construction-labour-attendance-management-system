@@ -36,6 +36,7 @@
     "@nestjs/platform-express": "^10.4.0",
     "@nestjs/swagger": "^7.4.0",
     "@nestjs/throttler": "^6.2.1",
+    "@noble/hashes": "^1.8.0",
     "@prisma/adapter-pg": "^5.22.0",
     "@prisma/client": "^5.19.0",
     "archiver": "^7.0.1",
@@ -108,6 +109,9 @@
     "testEnvironment": "node",
     "moduleNameMapper": {
       "^src/(.*)$": "<rootDir>/$1"
-    }
+    },
+    "setupFiles": [
+      "<rootDir>/../jest.setup.js"
+    ]
   }
 }

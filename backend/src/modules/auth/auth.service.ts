@@ -51,6 +51,23 @@ export class AuthService {
     const valid = await this.crypto.verifyPassword(user.passwordHash, password);
     if (!valid) throw Errors.unauthenticated('Invalid credentials');
 
+    // Rewrite an inherited hash at the current cost, now that we know the
+    // password. Those were written at m=64MiB/t=3/p=4 and take seconds to
+    // verify; this trades one slow login for fast ones thereafter. Failure is
+    // swallowed on purpose — the user has authenticated, and a housekeeping
+    // write must not turn a good login into a bad one.
+    if (this.crypto.passwordNeedsRehash(user.passwordHash)) {
+      try {
+        const rehashed = await this.crypto.hashPassword(password);
+        await this.prisma.user.update({
+          where: { id: user.id },
+          data: { passwordHash: rehashed },
+        });
+      } catch {
+        /* keep the old hash; it still works, just slowly */
+      }
+    }
+
     const scopes = user.siteScopes.map((s) => s.siteId);
     const tokens = await this.issueTokens(
       user.id,

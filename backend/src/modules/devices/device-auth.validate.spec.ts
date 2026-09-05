@@ -65,7 +65,18 @@ describe('DeviceAuthService.validateToken', () => {
 
   it('rewrites a legacy hash the first time it is used', async () => {
     const argon2 = await import('argon2');
-    const legacy = await argon2.hash(TOKEN, { type: argon2.argon2id });
+    // Cheap on purpose. The addon's own defaults (m=64MiB, t=3, p=4) are what
+    // production carries, but verifying one of those in plain JavaScript costs
+    // over two minutes under Jest. What this test is about is the rewrite, not
+    // the cost, and the parameters still differ from the current ones — so the
+    // legacy path is genuinely exercised. The production figure is pinned once,
+    // in argon2-legacy.spec.ts, which is the right place to pay for it.
+    const legacy = await argon2.hash(TOKEN, {
+      type: argon2.argon2id,
+      memoryCost: 1024,
+      timeCost: 2,
+      parallelism: 4,
+    });
     const { svc, update } = build(authorized({ tokenHash: legacy, lastSeenAt: new Date() }));
 
     await expect(svc.validateToken(DEVICE_ID, TOKEN)).resolves.toBe(true);
