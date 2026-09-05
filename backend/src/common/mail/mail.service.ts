@@ -21,6 +21,14 @@ const RETRY_DELAY_MS = 5000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * The useful line of a mail-server refusal.
+ *
+ * Gmail's run to several lines of URLs and message ids that mean nothing on a
+ * dashboard or in a log.
+ */
+const firstLine = (message: string): string => message.split('\n')[0].trim();
+
 
 /**
  * Gmail SMTP mailer. Configure with:
@@ -150,6 +158,11 @@ export class MailService implements OnModuleInit {
    */
   private async raiseAlarm(message: string) {
     this.lastError = message;
+    // The reason belongs in the log as well as on the dashboard. Without it an
+    // operator sees "email is failing" and has to guess between a revoked
+    // password, a blocked port and a DNS failure — which are three different
+    // problems with three different fixes.
+    this.logger.error(`Email delivery failed: ${firstLine(message)}`);
     const now = Date.now();
     if (now - this.lastAlarmAt < RENOTIFY_AFTER_MS) return;
     this.lastAlarmAt = now;

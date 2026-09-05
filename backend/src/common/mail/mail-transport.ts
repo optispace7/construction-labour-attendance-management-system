@@ -5,13 +5,20 @@ import * as nodemailer from 'nodemailer';
  *
  * `MailService` owns the policy — one retry on a deferral, the admin-panel
  * alarm, whether a caller should treat a message as lost — and this owns only
- * the transport. There is a second implementation of this interface in
- * `mail-transport.workers.ts`; the Workers bundle is aliased onto it, because
- * SMTP needs a raw TCP socket and that runtime has none.
+ * the transport.
  *
- * Splitting it this way keeps the parts that were learned the hard way — the
- * deferral retry, the banner that clears itself — in one place rather than
- * duplicated per runtime.
+ * There is deliberately only one implementation. SMTP was expected to need a
+ * second one for the serverless runtime, on the assumption it could not open a
+ * raw socket; it can. Only port 25 is blocked there, and Gmail submission is on
+ * 465, so the same Gmail credentials work on both. That was checked against the
+ * real thing rather than assumed: Gmail answered
+ * `535-5.7.8 Username and Password not accepted` to a deliberately wrong
+ * password, which is a reply that can only come back over a connection that
+ * worked.
+ *
+ * The seam is still worth having — it is what let that be tested, and what
+ * keeps the hard-won parts (the deferral retry, the self-clearing banner) out
+ * of the transport.
  */
 
 export interface MailMessage {
@@ -45,29 +52,43 @@ function smtpDeferred(e: unknown): boolean {
 }
 
 class SmtpTransport implements MailTransport {
-  private readonly transporter: nodemailer.Transporter | null;
-  private readonly from?: string;
+  private transporter?: nodemailer.Transporter | null;
 
-  constructor() {
-    const user = process.env.GMAIL_USER;
-    const pass = process.env.GMAIL_APP_PASSWORD;
-    this.from = user;
-    this.transporter =
-      user && pass ? nodemailer.createTransport({ service: 'gmail', auth: { user, pass } }) : null;
+  /**
+   * Built on first use, not in the constructor.
+   *
+   * `createTransport` generates random bytes for its connection ids, and a
+   * serverless runtime forbids that while a module is still being evaluated —
+   * there is no request to attribute it to, so the whole Worker fails to start.
+   * Deferring it also means the credentials are read when they are needed
+   * rather than whenever this module happened to be imported.
+   */
+  private get mailer(): nodemailer.Transporter | null {
+    if (this.transporter === undefined) {
+      const user = process.env.GMAIL_USER;
+      const pass = process.env.GMAIL_APP_PASSWORD;
+      this.transporter =
+        user && pass
+          ? nodemailer.createTransport({ service: 'gmail', auth: { user, pass } })
+          : null;
+    }
+    return this.transporter;
   }
 
   get configured(): boolean {
-    return this.transporter !== null;
+    // Answered from the environment rather than by building the transport:
+    // `enabled` is read during bootstrap, which is still global scope.
+    return Boolean(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
   }
 
   async verify(): Promise<void> {
-    if (!this.transporter) return;
-    await this.transporter.verify();
+    await this.mailer?.verify();
   }
 
   async send(message: MailMessage): Promise<void> {
-    if (!this.transporter) return;
-    await this.transporter.sendMail({ from: this.from, ...message });
+    const mailer = this.mailer;
+    if (!mailer) return;
+    await mailer.sendMail({ from: process.env.GMAIL_USER, ...message });
   }
 
   isDeferral(error: unknown): boolean {
