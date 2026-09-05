@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { API_INTERNAL_BASE_URL } from '@/lib/config';
+import { apiFetch } from '@/lib/server/api-fetch';
 import { backendAuthHeaders } from '@/lib/server/api';
 
 /**
@@ -8,7 +8,7 @@ import { backendAuthHeaders } from '@/lib/server/api';
  */
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const res = await fetch(`${API_INTERNAL_BASE_URL}/company-documents/${id}/file`, {
+  const res = await apiFetch(`/company-documents/${id}/file`, {
     headers: await backendAuthHeaders(),
     cache: 'no-store',
   });

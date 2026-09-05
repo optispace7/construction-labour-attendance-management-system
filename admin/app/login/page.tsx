@@ -67,7 +67,17 @@ export default function LoginPage() {
       });
       if (!res.ok) {
         const body = ((await res.json().catch(() => ({}))) as ApiErrorBody) as ApiErrorBody;
-        setError(body?.detail ?? body?.title ?? 'Invalid credentials');
+        // Only 401 means the credentials were wrong. Everything else — the API
+        // unreachable, a route missing, a 500 — used to be reported as
+        // "Invalid credentials" too, which sent people to reset a password
+        // that was never the problem. Say what actually happened instead.
+        const detail = body?.detail ?? body?.title;
+        setError(
+          detail ??
+            (res.status === 401
+              ? 'Invalid credentials'
+              : `Could not reach the server (error ${res.status}). Please try again, or tell your administrator if it continues.`),
+        );
         return;
       }
       router.replace('/');

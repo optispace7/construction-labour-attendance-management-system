@@ -1,6 +1,26 @@
-// Backend base URL used server-side (inside Docker network) and public (browser).
-export const API_INTERNAL_BASE_URL =
-  process.env.API_INTERNAL_BASE_URL ?? 'http://localhost:3000/api/v1';
+/**
+ * Backend base URL for server-to-server calls.
+ *
+ * A function, not a constant, and that is the whole point. On the serverless
+ * runtime the variables declared in wrangler.jsonc are handed to the Worker
+ * per request; they are not in `process.env` at the moment a module is first
+ * evaluated. Read at module scope this was therefore always undefined, fell
+ * through to the localhost default, and every server-side call went nowhere —
+ * which surfaced as the login page reporting "Invalid credentials", because a
+ * 404 from the wrong host has no `detail` field for it to show.
+ *
+ * The middle fallback matters too. Next inlines NEXT_PUBLIC_* at build time,
+ * so it is a literal in the bundle and cannot be missing at runtime. Both
+ * point at the same API, so if the server-side variable is ever absent again
+ * the panel keeps working instead of failing in a way nobody can read.
+ */
+export function apiInternalBaseUrl(): string {
+  return (
+    process.env.API_INTERNAL_BASE_URL ??
+    process.env.NEXT_PUBLIC_API_BASE_URL ??
+    'http://localhost:3000/api/v1'
+  );
+}
 
 export const COOKIE_ACCESS = 'clams_at';
 export const COOKIE_REFRESH = 'clams_rt';

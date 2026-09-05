@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
-import { API_INTERNAL_BASE_URL } from '@/lib/config';
+import { apiFetch } from '@/lib/server/api-fetch';
 import { clearAuthCookies, getRefreshToken } from '@/lib/server/session';
 
 export async function POST() {
   const refreshToken = await getRefreshToken();
   if (refreshToken) {
-    await fetch(`${API_INTERNAL_BASE_URL}/auth/logout`, {
+    await apiFetch(`/auth/logout`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ refreshToken }),

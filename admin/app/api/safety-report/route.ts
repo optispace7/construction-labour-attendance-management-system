@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { API_INTERNAL_BASE_URL } from '@/lib/config';
+import { apiFetch } from '@/lib/server/api-fetch';
 import { backendAuthHeaders } from '@/lib/server/api';
 
 /**
@@ -11,7 +11,7 @@ import { backendAuthHeaders } from '@/lib/server/api';
  * even when the report had rendered perfectly.
  */
 export async function GET(req: NextRequest) {
-  const res = await fetch(`${API_INTERNAL_BASE_URL}/safety/stats/pdf${req.nextUrl.search}`, {
+  const res = await apiFetch(`/safety/stats/pdf${req.nextUrl.search}`, {
     headers: await backendAuthHeaders(),
     cache: 'no-store',
   });

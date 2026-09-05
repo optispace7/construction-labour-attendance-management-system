@@ -16,6 +16,16 @@
   // so there is one place for large files rather than two.
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "clams-media" }],
 
+  // The API, reached directly rather than over the internet.
+  //
+  // This is not an optimisation, it is the only thing that works. A Worker
+  // calling another Worker on the same workers.dev zone by URL is refused by
+  // the platform with "error code: 1042", which arrives as a 404 carrying a
+  // plain-text body — so it reads, from inside the panel, as though the login
+  // route simply did not exist. A service binding is the supported route and
+  // skips the public hop entirely.
+  "services": [{ "binding": "API", "service": "clams-api" }],
+
   "observability": { "enabled": true },
 
   "vars": {

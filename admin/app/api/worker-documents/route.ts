@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { API_INTERNAL_BASE_URL } from '@/lib/config';
+import { apiFetch } from '@/lib/server/api-fetch';
 import { backendAuthHeaders } from '@/lib/server/api';
 
 /**
@@ -10,7 +10,7 @@ import { backendAuthHeaders } from '@/lib/server/api';
  * few hundred people is a large download.
  */
 export async function POST(req: NextRequest) {
-  const res = await fetch(`${API_INTERNAL_BASE_URL}/workers/documents`, {
+  const res = await apiFetch(`/workers/documents`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',

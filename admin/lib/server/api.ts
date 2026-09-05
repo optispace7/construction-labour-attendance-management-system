@@ -1,4 +1,4 @@
-import { API_INTERNAL_BASE_URL } from '../config';
+import { apiFetch } from './api-fetch';
 import {
   getAccessToken,
   getDeviceCredentials,
@@ -50,7 +50,7 @@ export async function backendAuthHeaders(token?: string): Promise<Record<string,
 }
 
 async function rawCall(path: string, opts: ApiOptions, token?: string): Promise<Response> {
-  return fetch(`${API_INTERNAL_BASE_URL}${path}`, {
+  return apiFetch(`${path}`, {
     method: opts.method ?? 'GET',
     headers: {
       'content-type': 'application/json',
@@ -64,7 +64,7 @@ async function rawCall(path: string, opts: ApiOptions, token?: string): Promise<
 async function tryRefresh(): Promise<string | null> {
   const refreshToken = await getRefreshToken();
   if (!refreshToken) return null;
-  const res = await fetch(`${API_INTERNAL_BASE_URL}/auth/refresh`, {
+  const res = await apiFetch(`/auth/refresh`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ refreshToken }),

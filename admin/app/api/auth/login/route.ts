@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { API_INTERNAL_BASE_URL } from '@/lib/config';
+import { apiFetch } from '@/lib/server/api-fetch';
 import {
   getOrCreateDeviceUid,
   setAuthCookies,
@@ -52,7 +52,7 @@ interface LoginResult {
 
 export async function POST(req: NextRequest) {
   const { email, identifier, password } = (await req.json()) as LoginBody;
-  const res = await fetch(`${API_INTERNAL_BASE_URL}/auth/login`, {
+  const res = await apiFetch(`/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ identifier: identifier ?? email, password }),
@@ -60,7 +60,17 @@ export async function POST(req: NextRequest) {
   });
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
+    // Read as text first. A failure from the platform rather than the API —
+    // the 1042 that a Worker-to-Worker URL fetch used to produce — is not
+    // JSON, and parsing it blind turned a diagnosable error into an empty
+    // object and a misleading "Invalid credentials" on the screen.
+    const raw = await res.text();
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = { title: 'Server error', detail: raw.slice(0, 200) || 'The server could not be reached.' };
+    }
     return NextResponse.json(body, { status: res.status });
   }
 
@@ -75,7 +85,7 @@ export async function POST(req: NextRequest) {
     deviceStatus = 'PENDING';
     try {
       const uid = await getOrCreateDeviceUid();
-      const reg = await fetch(`${API_INTERNAL_BASE_URL}/auth/device/register`, {
+      const reg = await apiFetch(`/auth/device/register`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -91,7 +101,7 @@ export async function POST(req: NextRequest) {
       const regBody = (await reg.json()) as DeviceRegistration;
       deviceStatus = regBody.status ?? 'PENDING';
       if (reg.ok && regBody.status === 'AUTHORIZED' && regBody.deviceId) {
-        const tok = await fetch(`${API_INTERNAL_BASE_URL}/auth/device/token`, {
+        const tok = await apiFetch(`/auth/device/token`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
