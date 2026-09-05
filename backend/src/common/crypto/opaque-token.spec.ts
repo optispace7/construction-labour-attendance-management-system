@@ -1,21 +1,14 @@
-import * as argon2 from 'argon2';
-
 /**
- * A hash in the old Argon2id format, cheap to verify.
+ * A hash in the old Argon2id format.
  *
- * These tests are about the *format* — that verifyToken still recognises a
- * `$argon2id$` string and reads its cost from the hash itself. The real-world
- * 64 MiB cost is pinned once, in argon2-legacy.spec, against a hash captured
- * from production; repeating it here would add minutes for no extra coverage,
- * now that verification is plain JavaScript rather than a native addon.
+ * A literal rather than something minted by the native library: nothing
+ * verifies these any more, so all a test needs is a string of the right
+ * shape, and the suite no longer has to depend on the addon to make one.
  */
-const LEGACY_FORMAT_CHEAP = {
-  type: argon2.argon2id,
-  memoryCost: 1024,
-  // The native library's floors: 1 MiB and 2 passes.
-  timeCost: 2,
-  parallelism: 1,
-} as const;
+const LEGACY_ARGON2_HASH =
+  '$argon2id$v=19$m=65536,t=3,p=4$UTg6kAR/MrwAPGs1zW33Bg$' +
+  'SG030NtdTI5tLGE4KXfl1VtXtsCRPDtqmUI+k0NC4A0';
+
 import { CryptoService } from './crypto.service';
 
 /**
@@ -45,13 +38,16 @@ describe('CryptoService opaque tokens', () => {
     await expect(svc.verifyToken(hash, `${token}x`)).resolves.toBe(false);
   });
 
-  it('still verifies a hash stored in the old Argon2id format', async () => {
-    // Exactly what is sitting in the devices table for every phone already
-    // registered — logging them all out would not have been an acceptable fix.
-    const legacy = await argon2.hash(token, LEGACY_FORMAT_CHEAP);
-    expect(svc.isLegacyTokenHash(legacy)).toBe(true);
-    await expect(svc.verifyToken(legacy, token)).resolves.toBe(true);
-    await expect(svc.verifyToken(legacy, 'wrong')).resolves.toBe(false);
+  it('refuses a hash stored in the old Argon2id format, rather than checking it', async () => {
+    // These used to be verified, and were, for exactly as long as there was a
+    // machine with spare CPU to do it on. Verifying one costs 64 MiB and three
+    // passes, which the serverless runtime kills outright — so attempting it
+    // turns a stale token into a 500 rather than the 401 that tells the client
+    // to authenticate again. Refusing is self-healing: the client re-registers
+    // and is written back as SHA-256.
+    expect(svc.isLegacyTokenHash(LEGACY_ARGON2_HASH)).toBe(true);
+    await expect(svc.verifyToken(LEGACY_ARGON2_HASH, token)).resolves.toBe(false);
+    await expect(svc.verifyToken(LEGACY_ARGON2_HASH, 'wrong')).resolves.toBe(false);
   });
 
   it('knows which format it is looking at', () => {
@@ -66,21 +62,4 @@ describe('CryptoService opaque tokens', () => {
     await expect(svc.verifyToken('abcd', token)).resolves.toBe(false);
   });
 
-  it('is dramatically cheaper than the hash it replaced', async () => {
-    const legacy = await argon2.hash(token, LEGACY_FORMAT_CHEAP);
-
-    const t0 = process.hrtime.bigint();
-    await svc.verifyToken(legacy, token);
-    const argonNs = Number(process.hrtime.bigint() - t0);
-
-    const fast = svc.hashOpaqueToken(token);
-    const t1 = process.hrtime.bigint();
-    await svc.verifyToken(fast, token);
-    const shaNs = Number(process.hrtime.bigint() - t1);
-
-    // Measured at ~26,000x on a fast multi-core machine and worse on the
-    // half-core container. A very loose bound, so this asserts the property
-    // without being a flaky benchmark.
-    expect(shaNs * 20).toBeLessThan(argonNs);
-  });
 });

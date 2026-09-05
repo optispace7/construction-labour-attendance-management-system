@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { randomInt, randomUUID } from 'crypto';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CryptoService } from '../../common/crypto/crypto.service';
+import { PasswordHashService } from '../../common/crypto/password-hash.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { MailService } from '../../common/mail/mail.service';
 import { Errors } from '../../common/errors/app.exception';
@@ -22,6 +23,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly crypto: CryptoService,
+    private readonly passwords: PasswordHashService,
     private readonly audit: AuditService,
     private readonly mail: MailService,
   ) {}
@@ -48,7 +50,7 @@ export class AuthService {
     const user = await this.findByIdentifier(identifier);
     if (!user || !user.isActive) throw Errors.unauthenticated('Invalid credentials');
 
-    const valid = await this.crypto.verifyPassword(user.passwordHash, password);
+    const valid = await this.passwords.verify(user.passwordHash, password);
     if (!valid) throw Errors.unauthenticated('Invalid credentials');
 
     // Rewrite an inherited hash at the current cost, now that we know the
@@ -56,9 +58,9 @@ export class AuthService {
     // verify; this trades one slow login for fast ones thereafter. Failure is
     // swallowed on purpose — the user has authenticated, and a housekeeping
     // write must not turn a good login into a bad one.
-    if (this.crypto.passwordNeedsRehash(user.passwordHash)) {
+    if (this.passwords.needsRehash(user.passwordHash)) {
       try {
-        const rehashed = await this.crypto.hashPassword(password);
+        const rehashed = await this.passwords.hash(password);
         await this.prisma.user.update({
           where: { id: user.id },
           data: { passwordHash: rehashed },
@@ -240,7 +242,7 @@ export class AuthService {
     }
 
     const otp = String(randomInt(0, 1_000_000)).padStart(6, '0');
-    const otpHash = await this.crypto.hashToken(otp);
+    const otpHash = await this.passwords.hash(otp);
     // Invalidate earlier outstanding OTPs so only the latest one works.
     await this.prisma.passwordReset.updateMany({
       where: { userId: user.id, usedAt: null },
@@ -272,7 +274,7 @@ export class AuthService {
       throw Errors.unauthenticated('Code expired — request a new one');
     }
 
-    const ok = await this.crypto.verifyToken(reset.otpHash, otp);
+    const ok = await this.passwords.verify(reset.otpHash, otp);
     if (!ok) {
       await this.prisma.passwordReset.update({
         where: { id: reset.id },
@@ -281,10 +283,13 @@ export class AuthService {
       throw Errors.unauthenticated('Incorrect code');
     }
 
+    // A random UUID, not something anyone guesses, so it belongs on the same
+    // SHA-256 path as the refresh tokens rather than on a deliberately slow
+    // hash. The six-digit OTP just above is the opposite case and keeps one.
     const resetToken = `${reset.id}.${randomUUID()}`;
     await this.prisma.passwordReset.update({
       where: { id: reset.id },
-      data: { resetTokenHash: await this.crypto.hashToken(resetToken) },
+      data: { resetTokenHash: this.crypto.hashOpaqueToken(resetToken) },
     });
     return { resetToken };
   }
@@ -308,7 +313,7 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({ where: { id: reset.userId } });
     if (!user || !user.isActive || user.deletedAt) throw Errors.unauthenticated('User inactive');
 
-    const passwordHash = await this.crypto.hashPassword(newPassword);
+    const passwordHash = await this.passwords.hash(newPassword);
     await this.prisma.$transaction([
       this.prisma.user.update({ where: { id: user.id }, data: { passwordHash } }),
       this.prisma.passwordReset.update({

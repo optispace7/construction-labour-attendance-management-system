@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../../infra/prisma/prisma.service';
-import { CryptoService } from '../../common/crypto/crypto.service';
+import { PasswordHashService } from '../../common/crypto/password-hash.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
@@ -38,7 +38,7 @@ const MANAGEABLE: Record<UserRole, UserRole[]> = {
 export class UsersService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly crypto: CryptoService,
+    private readonly passwords: PasswordHashService,
     private readonly audit: AuditService,
   ) {}
 
@@ -97,7 +97,7 @@ export class UsersService {
     if (dto.role !== 'WATCHMAN' && !dto.email?.trim()) {
       throw Errors.businessRule('Email is required for this role (used for password reset).');
     }
-    const passwordHash = await this.crypto.hashPassword(dto.password);
+    const passwordHash = await this.passwords.hash(dto.password);
     const created = await this.prisma.user.create({
       data: {
         organizationId: user.organizationId,
@@ -167,7 +167,7 @@ export class UsersService {
       isActive: dto.isActive,
       canApplyCorrections: dto.canApplyCorrections,
     };
-    if (dto.password) data.passwordHash = await this.crypto.hashPassword(dto.password);
+    if (dto.password) data.passwordHash = await this.passwords.hash(dto.password);
 
     const updated = await this.prisma.user.update({
       where: { id },

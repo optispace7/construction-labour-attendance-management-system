@@ -17,10 +17,11 @@ describe('AuthService refresh reuse detection', () => {
   };
   const jwt: any = { signAsync: jest.fn().mockResolvedValue('jwt') };
   const crypto: any = { hashToken: jest.fn(), verifyToken: jest.fn() };
+  const passwords: any = { hash: jest.fn(), verify: jest.fn(), needsRehash: jest.fn() };
   const audit: any = { record: jest.fn() };
   const mail: any = { send: jest.fn() };
 
-  const svc = new AuthService(prisma, jwt, crypto, audit, mail);
+  const svc = new AuthService(prisma, jwt, crypto, passwords, audit, mail);
 
   beforeEach(() => jest.clearAllMocks());
 

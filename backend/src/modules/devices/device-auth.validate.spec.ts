@@ -63,28 +63,19 @@ describe('DeviceAuthService.validateToken', () => {
     );
   });
 
-  it('rewrites a legacy hash the first time it is used', async () => {
-    const argon2 = await import('argon2');
-    // Cheap on purpose. The addon's own defaults (m=64MiB, t=3, p=4) are what
-    // production carries, but verifying one of those in plain JavaScript costs
-    // over two minutes under Jest. What this test is about is the rewrite, not
-    // the cost, and the parameters still differ from the current ones — so the
-    // legacy path is genuinely exercised. The production figure is pinned once,
-    // in argon2-legacy.spec.ts, which is the right place to pay for it.
-    const legacy = await argon2.hash(TOKEN, {
-      type: argon2.argon2id,
-      memoryCost: 1024,
-      timeCost: 2,
-      parallelism: 4,
-    });
+  it('refuses a legacy hash instead of trying to verify it', async () => {
+    // This used to verify the old hash and rewrite it in place. It cannot any
+    // more: verifying an Argon2 hash costs 64 MiB and three passes, which the
+    // serverless runtime kills outright, so the attempt would turn a stale
+    // token into a 500 rather than the 401 that tells the phone to register
+    // again. There are no legacy hashes left in the devices table, and a phone
+    // that presents one re-registers and is written back as SHA-256.
+    const legacy =
+      '$argon2id$v=19$m=65536,t=3,p=4$UTg6kAR/MrwAPGs1zW33Bg$' +
+      'SG030NtdTI5tLGE4KXfl1VtXtsCRPDtqmUI+k0NC4A0';
     const { svc, update } = build(authorized({ tokenHash: legacy, lastSeenAt: new Date() }));
 
-    await expect(svc.validateToken(DEVICE_ID, TOKEN)).resolves.toBe(true);
-
-    // Upgraded in place, so the expensive hash is paid once per device rather
-    // than once per request — and the phone never has to re-register.
-    const written = update.mock.calls[0][0].data.tokenHash as string;
-    expect(crypto.isLegacyTokenHash(written)).toBe(false);
-    await expect(crypto.verifyToken(written, TOKEN)).resolves.toBe(true);
+    await expect(svc.validateToken(DEVICE_ID, TOKEN)).resolves.toBe(false);
+    expect(update).not.toHaveBeenCalled();
   });
 });

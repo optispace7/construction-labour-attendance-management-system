@@ -39,7 +39,32 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       // adapter.transactionContext() directly, and a newer adapter is a factory
       // whose adapter comes back from connect() instead. Mismatched, the client
       // reads an undefined method off it and the whole app fails to construct.
-      super({ adapter: new PrismaPg(new Pool({ connectionString, max: POOL_MAX })) } as never);
+      super({
+        adapter: new PrismaPg(
+          new Pool({
+            connectionString,
+            max: POOL_MAX,
+            // Retire every connection after a single checkout.
+            //
+            // This looks wasteful and is not. The driver adapter is what runs
+            // on the serverless runtime, and there a TCP socket does not
+            // survive between requests — the isolate is frozen and its
+            // connections are torn down underneath it. A pool that keeps
+            // connections then hands a dead socket to the next request, which
+            // waits on a reply that can never come until the request is killed
+            // at sixty seconds. It presented as logins alternating between
+            // fast and a hard timeout, depending on whether the isolate was
+            // warm.
+            //
+            // Timers cannot fix this — a frozen isolate does not run them, so
+            // idleTimeoutMillis never fires. Retiring by use count is
+            // deterministic and does not depend on the isolate being awake.
+            // The cost is a connection setup per checkout, which is what
+            // Hyperdrive is in front of the database to absorb.
+            maxUses: 1,
+          }),
+        ),
+      } as never);
     } else {
       super();
     }

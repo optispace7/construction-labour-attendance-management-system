@@ -6,12 +6,13 @@ import {
   randomBytes,
   timingSafeEqual,
 } from 'node:crypto';
-import { hashArgon2id, needsRehash, verifyArgon2id } from './argon2';
 
 /**
  * Field-level encryption for sensitive data (e.g. Aadhaar) using AES-256-GCM.
  * Stored blob layout: [12-byte IV][16-byte auth tag][ciphertext].
- * Password hashing uses Argon2id.
+ *
+ * Passwords are not hashed here — see PasswordHashService, which has Postgres
+ * do it, because no password KDF fits the CPU budget this now deploys under.
  */
 @Injectable()
 export class CryptoService {
@@ -67,40 +68,6 @@ export class CryptoService {
     return Buffer.concat([decipher.update(data), decipher.final()]);
   }
 
-  async hashPassword(password: string): Promise<string> {
-    return hashArgon2id(password);
-  }
-
-  /**
-   * Whether this hash should be rewritten at the current cost after it next
-   * verifies. See needsRehash — inherited hashes are several seconds to check.
-   */
-  passwordNeedsRehash(hash: string): boolean {
-    return needsRehash(hash);
-  }
-
-  async verifyPassword(hash: string, password: string): Promise<boolean> {
-    try {
-      return verifyArgon2id(hash, password);
-    } catch (e) {
-      // A malformed stored hash and a broken hashing library both end up here,
-      // and they look identical from outside: every login is refused. Silence
-      // made that indistinguishable from a wrong password, so the reason is
-      // logged — never the password or the hash.
-      this.logger.error(`Password verification failed to run: ${(e as Error).message}`);
-      return false;
-    }
-  }
-
-  /**
-   * Argon2id hash for a secret somebody could *guess* — a password, or the
-   * six-digit reset OTP. The cost is the whole point there: it is what makes
-   * running through the candidates expensive.
-   */
-  async hashToken(token: string): Promise<string> {
-    return hashArgon2id(token);
-  }
-
   /**
    * Hash for an opaque token the server itself generated — a device token, a
    * refresh token. These carry 122 bits of randomness, so there is no candidate
@@ -129,7 +96,13 @@ export class CryptoService {
    */
   async verifyToken(hash: string, token: string): Promise<boolean> {
     try {
-      if (this.isLegacyTokenHash(hash)) return verifyArgon2id(hash, token);
+      // Argon2-era token hashes are refused rather than checked. Verifying one
+      // costs m=64MiB and three passes, which the serverless runtime kills
+      // outright — so attempting it turns a stale token into a 500 instead of
+      // the 401 that tells the client to authenticate again. Refusing is also
+      // self-healing: the client re-registers and is written back in the
+      // current format. See hashOpaqueToken for why that format is SHA-256.
+      if (this.isLegacyTokenHash(hash)) return false;
       const expected = Buffer.from(hash, 'hex');
       const actual = createHash('sha256').update(token).digest();
       // Constant-time: timingSafeEqual throws on a length mismatch, so guard it.

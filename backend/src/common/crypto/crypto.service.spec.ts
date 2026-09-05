@@ -27,12 +27,6 @@ describe('CryptoService', () => {
     expect(() => svc.decrypt(blob)).toThrow();
   });
 
-  it('hashes and verifies a password', async () => {
-    const hash = await svc.hashPassword('S3cret!pw');
-    expect(await svc.verifyPassword(hash, 'S3cret!pw')).toBe(true);
-    expect(await svc.verifyPassword(hash, 'wrong')).toBe(false);
-  });
-
   it('rejects a key that is not 32 bytes', () => {
     process.env.DATA_ENCRYPTION_KEY = Buffer.alloc(16, 1).toString('base64');
     expect(() => new CryptoService()).toThrow();
