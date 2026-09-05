@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import Redis from 'ioredis';
+import { createRedisClient, type RedisLike } from './redis-client';
 
 /** How often a continuing Redis outage is allowed to write to the log. */
 const WARN_EVERY_MS = 60_000;
@@ -17,29 +17,15 @@ export class RedisService implements OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
   private lastWarnAt = 0;
 
-  readonly client: Redis;
+  readonly client: RedisLike;
 
   constructor() {
-    this.client = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
-      // Fail a command instead of parking it. The gate takes a lock from here
-      // before it records anything, and the old settings (unlimited retries
-      // plus ioredis's offline queue) meant an unreachable Redis did not fail
-      // a scan — it queued it for ever, so the watchman's tap simply hung until
-      // the phone gave up twenty seconds later and the worker never appeared.
-      // Redis being down must cost a scan milliseconds, not the whole gate.
-      maxRetriesPerRequest: 1,
-      enableOfflineQueue: false,
-      connectTimeout: 3000,
-      commandTimeout: 2000,
-      // Keep trying to get back, with a ceiling, so a blip heals itself rather
-      // than needing the container restarted.
-      retryStrategy: (times) => Math.min(times * 200, 5000),
-    });
+    this.client = createRedisClient();
 
     // ioredis emits 'error' on every failed reconnect. Without a listener Node
     // reports each one as an unhandled error event, which is what filled the
     // container log during the outage and told nobody anything useful.
-    this.client.on('error', (e: Error) => this.warn('connection', e));
+    this.client.on('error', (e?: Error) => this.warn('connection', e));
     this.client.on('ready', () => {
       this.lastWarnAt = 0;
       this.logger.log('Redis connected');

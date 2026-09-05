@@ -30,7 +30,11 @@
     // drags it in through @nestjs/platform-express whether or not it is used.
     "iconv-lite": "./dist-workers/workers-stubs/iconv-lite.js",
     // firebase-admin speaks gRPC; this one signs its own JWT and posts to FCM.
-    "./push-sender": "./dist-workers/common/push/push-sender.workers.js"
+    "./push-sender": "./dist-workers/common/push/push-sender.workers.js",
+    // ioredis holds a TCP connection open and heals itself on timers. Neither
+    // survives an isolate that is frozen between requests, so this one issues
+    // each command as an ordinary HTTPS call to Upstash's REST endpoint.
+    "./redis-client": "./dist-workers/infra/redis/redis-client.workers.js"
   },
 
   // The three background monitors cannot use setInterval here — a timer set
