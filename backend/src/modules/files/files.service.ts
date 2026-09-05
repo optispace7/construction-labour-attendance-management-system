@@ -24,6 +24,21 @@ const AADHAAR_JPEG_QUALITY = 85;
 
 const AADHAAR_KINDS: PhotoKind[] = ['AADHAAR_FRONT', 'AADHAAR_BACK'];
 
+/**
+ * The only image kinds stored in the clear.
+ *
+ * Deliberately an exception list rather than a list of what to encrypt. A
+ * profile photo is shown to many people and cached on devices, so encrypting it
+ * buys nothing; everything else is identity material.
+ *
+ * Stated this way round because the failure modes are not symmetric. Add a kind
+ * to the enum and forget to list it here and it is encrypted — safe, and the
+ * worst case is someone wondering why. Under the old rule, which named the
+ * kinds to encrypt, the same oversight wrote PAN cards to storage in the clear
+ * and nothing would have said so.
+ */
+const UNENCRYPTED_KINDS: PhotoKind[] = ['PROFILE'];
+
 @Injectable()
 export class FilesService {
   private readonly logger = new Logger(FilesService.name);
@@ -58,10 +73,9 @@ export class FilesService {
       compressed: didCompress,
     } = await this.compress(raw, dto.mimeType, kind);
 
-    // 2) Aadhaar and ID-proof images are encrypted at rest; profile photos are
-    //    not (they are streamed to many viewers / cached on devices, so we
-    //    keep them cheap).
-    const encrypt = kind === 'AADHAAR_FRONT' || kind === 'AADHAAR_BACK' || kind === 'ID_PROOF';
+    // 2) Everything is encrypted at rest except the kinds listed as public —
+    //    see UNENCRYPTED_KINDS for why it is written that way round.
+    const encrypt = !UNENCRYPTED_KINDS.includes(kind);
     const stored = encrypt ? this.crypto.encryptBuffer(compressed) : compressed;
 
     // 3) The bytes go to object storage and the row keeps only metadata — the
