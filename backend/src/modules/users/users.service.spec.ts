@@ -54,9 +54,15 @@ describe('UsersService.update — email/username clearing', () => {
       },
       refreshToken: { updateMany: jest.fn() },
     };
-    const crypto = { hashPassword: jest.fn().mockResolvedValue('hashed') };
+    // Identity lives in Better Auth's tables now; the service keeps them in
+    // step with every profile change, so the double has to accept those calls.
+    const identity = {
+      create: jest.fn().mockResolvedValue(undefined),
+      update: jest.fn().mockResolvedValue(undefined),
+      revokeSessions: jest.fn().mockResolvedValue(undefined),
+    };
     const audit = { record: jest.fn() };
-    service = new UsersService(prisma as never, crypto as never, audit as never);
+    service = new UsersService(prisma as never, identity as never, audit as never);
   };
 
   const dataSentToPrisma = () => prisma.user.update.mock.calls[0][0].data;

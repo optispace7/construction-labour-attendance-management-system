@@ -1,19 +1,8 @@
-import { Body, Controller, Get, HttpCode, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
 import { AuthService } from './auth.service';
 import { DeviceAuthService } from '../devices/device-auth.service';
-import {
-  DeviceRegisterDto,
-  DeviceTokenDto,
-  ForgotPasswordDto,
-  LoginDto,
-  LogoutDto,
-  RefreshDto,
-  ResetPasswordDto,
-  VerifyOtpDto,
-} from './dto/auth.dto';
-import { Errors } from '../../common/errors/app.exception';
+import { DeviceRegisterDto, DeviceTokenDto } from './dto/auth.dto';
 import { DeviceExempt, Public } from '../../common/rbac/rbac.decorators';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import { AuthUser } from '../../common/auth/auth-user.interface';
@@ -29,48 +18,13 @@ export class AuthController {
     private readonly deviceAuth: DeviceAuthService,
   ) {}
 
-  @Public()
-  @Post('login')
-  @HttpCode(200)
-  login(@Body() dto: LoginDto, @Req() req: Request) {
-    const identifier = (dto.identifier ?? dto.email)?.trim();
-    if (!identifier) throw Errors.validation({ identifier: 'required' });
-    return this.auth.login(identifier, dto.password, req.ip);
-  }
-
-  @Public()
-  @Post('forgot-password')
-  @HttpCode(200)
-  forgotPassword(@Body() dto: ForgotPasswordDto) {
-    return this.auth.forgotPassword(dto.identifier.trim());
-  }
-
-  @Public()
-  @Post('forgot-password/verify')
-  @HttpCode(200)
-  verifyOtp(@Body() dto: VerifyOtpDto) {
-    return this.auth.verifyOtp(dto.identifier.trim(), dto.otp);
-  }
-
-  @Public()
-  @Post('reset-password')
-  @HttpCode(204)
-  async resetPassword(@Body() dto: ResetPasswordDto) {
-    await this.auth.resetPassword(dto.resetToken, dto.newPassword);
-  }
-
-  @Public()
-  @Post('refresh')
-  @HttpCode(200)
-  refresh(@Body() dto: RefreshDto) {
-    return this.auth.refresh(dto.refreshToken);
-  }
-
-  @Post('logout')
-  @HttpCode(204)
-  async logout(@Body() dto: LogoutDto) {
-    await this.auth.logout(dto.refreshToken);
-  }
+  // Signing in, refreshing, signing out and resetting a password are Better
+  // Auth's now, under /api/better-auth. They are gone from here rather than
+  // left as a second way in: two login endpoints against one set of accounts
+  // is how one of them quietly keeps working after the other is secured.
+  //
+  // What remains is what Better Auth has no opinion about — who this person is
+  // to CLAMS, and whether the device they are on has been approved.
 
   @ApiBearerAuth()
   @Get('me')

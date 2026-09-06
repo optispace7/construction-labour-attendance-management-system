@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../../infra/prisma/prisma.service';
-import { PasswordHashService } from '../../common/crypto/password-hash.service';
+import { IdentityService } from '../../common/better-auth/identity.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
@@ -38,7 +38,7 @@ const MANAGEABLE: Record<UserRole, UserRole[]> = {
 export class UsersService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly passwords: PasswordHashService,
+    private readonly identity: IdentityService,
     private readonly audit: AuditService,
   ) {}
 
@@ -97,7 +97,6 @@ export class UsersService {
     if (dto.role !== 'WATCHMAN' && !dto.email?.trim()) {
       throw Errors.businessRule('Email is required for this role (used for password reset).');
     }
-    const passwordHash = await this.passwords.hash(dto.password);
     const created = await this.prisma.user.create({
       data: {
         organizationId: user.organizationId,
@@ -106,13 +105,21 @@ export class UsersService {
         email: dto.email?.trim() || null,
         username: dto.username?.trim() || null,
         phone: dto.phone,
-        passwordHash,
         canApplyCorrections: dto.canApplyCorrections ?? false,
         siteScopes: dto.siteIds?.length
           ? { create: dto.siteIds.map((siteId) => ({ siteId })) }
           : undefined,
       },
       select: PUBLIC_SELECT,
+    });
+    // The account is not usable until Better Auth knows about it: the user row
+    // carries what they may do, and the identity rows are what a login reads.
+    await this.identity.create({
+      id: created.id,
+      fullName: dto.fullName,
+      email: dto.email?.trim() || null,
+      username: dto.username?.trim() || null,
+      password: dto.password,
     });
     await this.audit.record({
       organizationId: user.organizationId,
@@ -167,13 +174,24 @@ export class UsersService {
       isActive: dto.isActive,
       canApplyCorrections: dto.canApplyCorrections,
     };
-    if (dto.password) data.passwordHash = await this.passwords.hash(dto.password);
 
     const updated = await this.prisma.user.update({
       where: { id },
       data,
       select: PUBLIC_SELECT,
     });
+    // Keep the identity half in step: a name, a user ID or a new password all
+    // live on Better Auth's rows, not on the one just written.
+    await this.identity.update({
+      id,
+      fullName: dto.fullName,
+      email: dto.email !== undefined ? dto.email?.trim() || null : undefined,
+      username: dto.username !== undefined ? username : undefined,
+      password: dto.password,
+    });
+    // Deactivating somebody should log them out, not wait for their session to
+    // expire on its own.
+    if (dto.isActive === false) await this.identity.revokeSessions(id);
     // A password set by an admin invalidates existing sessions.
     if (dto.password && id !== user.userId) {
       await this.prisma.refreshToken.updateMany({

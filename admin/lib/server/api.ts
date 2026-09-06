@@ -2,8 +2,6 @@ import { apiFetch } from './api-fetch';
 import {
   getAccessToken,
   getDeviceCredentials,
-  getRefreshToken,
-  setAuthCookies,
 } from './session';
 
 interface ApiOptions {
@@ -15,19 +13,15 @@ interface ApiOptions {
 
 /**
  * Server-side fetch to the backend using the access cookie. On 401 it attempts
- * a single refresh (rotating the cookies) and retries. Throws ApiError on
+ * Throws ApiError on
  * non-2xx so server components / route handlers can map it.
  */
 export async function serverApi<T = unknown>(path: string, opts: ApiOptions = {}): Promise<T> {
+  // No retry on 401. A Better Auth session is extended by the server as it is
+  // used and has no refresh token to present, so a 401 means the session is
+  // genuinely over — retrying the same request with the same cookie can only
+  // produce the same 401, one round trip later.
   const res = await rawCall(path, opts, await getAccessToken());
-
-  if (res.status === 401 && opts.allowRefresh !== false) {
-    const refreshed = await tryRefresh();
-    if (refreshed) {
-      const retry = await rawCall(path, opts, refreshed);
-      return handle<T>(retry);
-    }
-  }
   return handle<T>(res);
 }
 
@@ -61,20 +55,6 @@ async function rawCall(path: string, opts: ApiOptions, token?: string): Promise<
   });
 }
 
-async function tryRefresh(): Promise<string | null> {
-  const refreshToken = await getRefreshToken();
-  if (!refreshToken) return null;
-  const res = await apiFetch(`/auth/refresh`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ refreshToken }),
-    cache: 'no-store',
-  });
-  if (!res.ok) return null;
-  const data = (await res.json()) as { accessToken: string; refreshToken: string };
-  await setAuthCookies(data.accessToken, data.refreshToken);
-  return data.accessToken;
-}
 
 export class ApiError extends Error {
   constructor(

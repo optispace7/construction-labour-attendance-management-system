@@ -223,7 +223,11 @@ model User {
   // login can resolve it without an org context.
   username            String?   @unique
   phone               String?
-  passwordHash        String    @map("password_hash")
+  /// Vestigial. Passwords live on Better Auth's account row now; nothing
+  /// reads this. Kept, and made nullable, rather than dropped: it still
+  /// holds the bcrypt hashes that are the way back if Better Auth is
+  /// abandoned, and dropping a column of credentials is not undoable.
+  passwordHash        String?   @map("password_hash")
   isActive            Boolean   @default(true) @map("is_active")
   /// Attendance corrections this person files are applied on the spot instead
   /// of waiting for an approver. Granted per person by the Super Admin, never

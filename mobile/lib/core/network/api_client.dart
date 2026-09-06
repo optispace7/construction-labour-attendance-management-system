@@ -33,16 +33,12 @@ class ApiClient {
           if (deviceToken != null) options.headers['x-device-token'] = deviceToken;
           handler.next(options);
         },
-        onError: (e, handler) async {
-          if (e.response?.statusCode == 401 && !_isRefreshCall(e.requestOptions)) {
-            final refreshed = await _tryRefresh();
-            if (refreshed) {
-              final clone = await _retry(e.requestOptions);
-              return handler.resolve(clone);
-            }
-          }
-          handler.next(e);
-        },
+        // No retry on 401. A Better Auth session is extended by the server as
+        // it is used and carries no refresh token to present, so a 401 means
+        // the session is genuinely over. Retrying the same request with the
+        // same credential can only produce the same 401 — and at a gate, a
+        // silent retry loop is worse than being asked to sign in.
+        onError: (e, handler) => handler.next(e),
       ),
     );
   }
@@ -64,39 +60,6 @@ class ApiClient {
     }
   }
 
-  bool _isRefreshCall(RequestOptions o) => o.path.contains('/auth/refresh');
 
-  /// Renew the credential after a 401.
-  ///
-  /// Only the old scheme can be renewed. A Better Auth session carries no
-  /// refresh token — the server extends it as it is used — so there is nothing
-  /// to present here and a 401 means the session is genuinely finished. The
-  /// absent refresh token is the signal, and the honest answer is to fail and
-  /// let the app ask for a sign-in rather than retry something that cannot
-  /// work.
-  Future<bool> _tryRefresh() async {
-    final refresh = await _store.refreshToken;
-    if (refresh == null) return false;
-    try {
-      final res =
-          await Dio(_baseOptions).post('/auth/refresh', data: {'refreshToken': refresh});
-      await _store.saveTokens(
-        res.data['accessToken'] as String,
-        res.data['refreshToken'] as String,
-      );
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
 
-  Future<Response<dynamic>> _retry(RequestOptions o) async {
-    final token = await _store.accessToken;
-    return _dio.request(
-      o.path,
-      data: o.data,
-      queryParameters: o.queryParameters,
-      options: Options(method: o.method, headers: {...o.headers, 'authorization': 'Bearer $token'}),
-    );
-  }
 }

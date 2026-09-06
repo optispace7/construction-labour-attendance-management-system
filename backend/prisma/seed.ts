@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
-import * as argon2 from 'argon2';
+import { randomUUID } from 'node:crypto';
+import { hashPassword } from '@better-auth/utils/password';
 
 const prisma = new PrismaClient();
 
@@ -17,9 +18,11 @@ async function main() {
 
   const email = process.env.SEED_SUPERADMIN_EMAIL ?? 'admin@clams.local';
   const password = process.env.SEED_SUPERADMIN_PASSWORD ?? 'ChangeMe123!';
-  const passwordHash = await argon2.hash(password, { type: argon2.argon2id });
-
-  await prisma.user.upsert({
+  // A seeded account needs both halves: the user row says what it may do, the
+  // Better Auth rows are what a sign-in actually reads. Creating only the first
+  // produces an account that exists, appears in the admin panel, and cannot log
+  // in — which is a confusing thing to hand somebody on a fresh install.
+  const user = await prisma.user.upsert({
     where: { email },
     update: {},
     create: {
@@ -27,9 +30,38 @@ async function main() {
       role: 'SUPER_ADMIN',
       fullName: 'Super Admin',
       email,
-      passwordHash,
     },
   });
+
+  const now = new Date();
+  await prisma.auth_user.upsert({
+    where: { id: user.id },
+    update: {},
+    create: {
+      id: user.id,
+      name: 'Super Admin',
+      email,
+      emailVerified: false,
+      createdAt: now,
+      updatedAt: now,
+    },
+  });
+  const credential = await prisma.auth_account.findFirst({
+    where: { userId: user.id, providerId: 'credential' },
+  });
+  if (!credential) {
+    await prisma.auth_account.create({
+      data: {
+        id: randomUUID(),
+        accountId: user.id,
+        providerId: 'credential',
+        userId: user.id,
+        password: await hashPassword(password),
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+  }
 
   // eslint-disable-next-line no-console
   console.log(`Seeded org "${org.code}" and super admin "${email}"`);

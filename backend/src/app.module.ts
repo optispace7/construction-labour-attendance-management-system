@@ -11,7 +11,7 @@ import { AuditModule } from './common/audit/audit.module';
 import { MailModule } from './common/mail/mail.module';
 import { PushModule } from './common/push/push.module';
 import { AuditInterceptor } from './common/audit/audit.interceptor';
-import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
+import { SessionGuard } from './common/auth/session.guard';
 import { DeviceGuard } from './common/auth/device.guard';
 import { PolicyGuard } from './common/rbac/policy.guard';
 
@@ -73,7 +73,7 @@ import { StorageModule } from './modules/storage/storage.module';
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
-    { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: SessionGuard },
     { provide: APP_GUARD, useClass: DeviceGuard },
     { provide: APP_GUARD, useClass: PolicyGuard },
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
