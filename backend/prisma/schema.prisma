@@ -961,46 +961,46 @@ model ReportJob {
 // reference users.id keep working untouched.
 // ============================================================================
 
-model AuthUser {
-  id              String        @id @db.Uuid
+model auth_user {
+  id              String         @id @db.Uuid
   name            String
   email           String
-  emailVerified   Boolean       @default(false) @map("email_verified")
+  emailVerified   Boolean        @default(false) @map("email_verified")
   image           String?
   username        String?
-  displayUsername String?       @map("display_username")
-  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz
-  sessions        AuthSession[]
-  accounts        AuthAccount[]
+  displayUsername String?        @map("display_username")
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+  sessions        auth_session[]
+  accounts        auth_account[]
 
   @@unique([email])
   @@unique([username])
   @@map("auth_user")
 }
 
-model AuthSession {
-  id        String   @id @db.Uuid
+model auth_session {
+  id        String    @id @db.Uuid
   token     String
-  expiresAt DateTime @map("expires_at") @db.Timestamptz
-  ipAddress String?  @map("ip_address")
-  userAgent String?  @map("user_agent")
-  userId    String   @map("user_id") @db.Uuid
-  user      AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz
+  ipAddress String?   @map("ip_address")
+  userAgent String?   @map("user_agent")
+  userId    String    @map("user_id") @db.Uuid
+  user      auth_user @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
   @@unique([token])
   @@index([userId])
   @@map("auth_session")
 }
 
-model AuthAccount {
+model auth_account {
   id                    String    @id @db.Uuid
   accountId             String    @map("account_id")
   providerId            String    @map("provider_id")
   userId                String    @map("user_id") @db.Uuid
-  user                  AuthUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                  auth_user @relation(fields: [userId], references: [id], onDelete: Cascade)
   // The password hash lives here, not on the user. This is what a credential
   // login actually reads; users.password_hash is not consulted.
   password              String?
@@ -1017,7 +1017,7 @@ model AuthAccount {
   @@map("auth_account")
 }
 
-model AuthVerification {
+model auth_verification {
   id         String   @id @db.Uuid
   identifier String
   value      String

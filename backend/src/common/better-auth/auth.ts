@@ -2,6 +2,8 @@ import { betterAuth } from 'better-auth';
 import { prismaAdapter } from 'better-auth/adapters/prisma';
 import { bearer, username } from 'better-auth/plugins';
 import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -11,17 +13,39 @@ import { randomUUID } from 'node:crypto';
  * works today stops working while this is being evaluated. Nothing routes to
  * it until the flag in the module turns it on.
  *
- * Its own PrismaClient rather than the injected PrismaService: the schema
- * generator has to be able to read this file from the command line, where the
- * Nest container does not exist.
+ * Built on first use, not at import. Constructing a PrismaClient at module
+ * scope fails on the serverless runtime before a request is ever served —
+ * "PrismaClient failed to initialize because it wasn't configured to run in
+ * this environment" — because the client needs the driver adapter there and
+ * the deploy validates the module by loading it.
+ *
+ * It builds its own client rather than taking PrismaService: the schema
+ * generator has to read this file from the command line, where the Nest
+ * container does not exist. The adapter branch mirrors PrismaService's, for
+ * the same reason it exists there — a native query engine cannot load on a
+ * runtime that only runs JS and WebAssembly.
  */
-const prisma = new PrismaClient();
+function createPrisma(): PrismaClient {
+  if (process.env.DATABASE_DRIVER_ADAPTER !== '1') return new PrismaClient();
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) throw new Error('DATABASE_URL is not configured');
+  // maxUses: 1 for the reason given in PrismaService: a socket does not
+  // survive between requests here, and a pooled one is a dead one.
+  return new PrismaClient({
+    adapter: new PrismaPg(new Pool({ connectionString, max: 5, maxUses: 1 })),
+  } as never);
+}
 
-export const auth = betterAuth({
-  database: prismaAdapter(prisma, { provider: 'postgresql' }),
+export function createAuth() {
+  return betterAuth({
+  database: prismaAdapter(createPrisma(), { provider: 'postgresql' }),
 
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: process.env.BETTER_AUTH_URL,
+  // Must match where the controller is mounted. Better Auth builds every
+  // path it hands out — reset links, callbacks — from these two, so a
+  // mismatch produces URLs that route nowhere.
+  basePath: '/api/better-auth',
 
   // Better Auth's own tables, named so they cannot collide with ours.
   //
@@ -44,21 +68,32 @@ export const auth = betterAuth({
     },
   },
 
-  user: { modelName: 'AuthUser' },
-  session: { modelName: 'AuthSession' },
-  account: { modelName: 'AuthAccount' },
-  verification: { modelName: 'AuthVerification' },
+  // These three have to be the same string, which is not obvious and is not
+  // documented: Better Auth indexes the Prisma client with the model name
+  // (db[model]), and its schema check compares that same name against real
+  // table names. So the Prisma model, the Prisma client property and the
+  // physical table must all read `auth_user`. Naming the model AuthUser and
+  // mapping it to auth_user fails twice over — the check reports the table
+  // missing, and the adapter cannot find db['AuthUser'].
+  user: { modelName: 'auth_user' },
+  session: { modelName: 'auth_session' },
+  account: { modelName: 'auth_account' },
+  verification: { modelName: 'auth_verification' },
 
   emailAndPassword: {
     enabled: true,
     // Password reset stays on the mail path that already works from a Worker:
     // Gmail over SMTP. Only the flow around it is Better Auth's.
     sendResetPassword: async ({ user, url }) => {
-      const { mailer } = await import('../mail/mail-transport');
-      await mailer.sendMail({
-        to: user.email,
+      const { mailTransport } = await import('../mail/mail-transport');
+      // bcc rather than to: the shared transport addresses everything that
+      // way, so one recipient never sees the others.
+      await mailTransport.send({
+        bcc: user.email,
         subject: 'Reset your CLAMS password',
-        text: `Open this link to set a new password:\n\n${url}\n\nIf you did not ask for this, ignore this message.`,
+        text:
+          `Open this link to set a new password:\n\n${url}\n\n` +
+          'If you did not ask for this, ignore this message.',
       });
     },
   },
@@ -78,4 +113,12 @@ export const auth = betterAuth({
     // offline stretch is not something to rely on at a site gate.
     bearer(),
   ],
-});
+  });
+}
+
+/** Memoised, so one Worker isolate builds it once. */
+let cached: ReturnType<typeof createAuth> | null = null;
+export function getAuth() {
+  cached ??= createAuth();
+  return cached;
+}

@@ -6,6 +6,7 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { PrismaModule } from './infra/prisma/prisma.module';
 import { RedisModule } from './infra/redis/redis.module';
 import { CryptoModule } from './common/crypto/crypto.module';
+import { BetterAuthModule } from './common/better-auth/better-auth.module';
 import { AuditModule } from './common/audit/audit.module';
 import { MailModule } from './common/mail/mail.module';
 import { PushModule } from './common/push/push.module';
@@ -44,6 +45,8 @@ import { StorageModule } from './modules/storage/storage.module';
     PrismaModule,
     RedisModule,
     CryptoModule,
+    // Evaluation only; registers no routes unless BETTER_AUTH_ENABLED=1.
+    BetterAuthModule,
     AuditModule,
     PushModule,
     AuthModule,

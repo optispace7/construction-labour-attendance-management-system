@@ -49,7 +49,11 @@
     "DISABLE_INTERVAL_MONITORS": "1",
     // Reaches Postgres through the pg driver rather than Prisma's Rust query
     // engine, which cannot be loaded here.
-    "DATABASE_DRIVER_ADAPTER": "1"
+    "DATABASE_DRIVER_ADAPTER": "1",
+    // Evaluation only. With this unset the Better Auth routes do not exist
+    // and the existing /api/v1/auth/* is the only way in.
+    "BETTER_AUTH_ENABLED": "1",
+    "BETTER_AUTH_URL": "https://clams-api.opticspace09.workers.dev"
   },
 
   // Secrets are NOT set here — they go in via `wrangler secret put`:
