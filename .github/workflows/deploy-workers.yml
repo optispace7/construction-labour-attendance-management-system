@@ -263,9 +263,21 @@ jobs:
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
 
+      - name: Note what is currently published
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          echo "new build: $(stat -c%s build/app/outputs/flutter-apk/app-release.apk) bytes"
+          echo "sha256:    $(sha256sum build/app/outputs/flutter-apk/app-release.apk | cut -d' ' -f1)"
+
       # Publishing is what actually reaches a phone. /download streams this
       # exact key out of R2, so without this step the workflow builds a new APK
       # and every site goes on installing the previous one.
+      #
+      # A put to an existing key replaces it, so the previous APK is gone once
+      # this succeeds and no old copies accumulate. Deliberately not a delete
+      # followed by an upload: that leaves a window with no APK at all, and if
+      # the upload then failed, /download would serve nothing rather than the
+      # older-but-working build.
       #
       # Only a signed build is published. An unsigned one cannot upgrade an
       # existing install, and would strand every phone that already has the app.
@@ -281,6 +293,28 @@ jobs:
             --file build/app/outputs/flutter-apk/app-release.apk
             --content-type application/vnd.android.package-archive
             --remote
+
+      # Prove the replacement, rather than trusting that the upload meant it.
+      # Downloading through /download also checks the path a site actually uses,
+      # not just the bucket.
+      - name: Verify /download serves the new build
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          built=$(sha256sum build/app/outputs/flutter-apk/app-release.apk | cut -d' ' -f1)
+          for i in $(seq 1 6); do
+            curl -fsSL -o /tmp/published.apk               https://clams-admin.opticspace09.workers.dev/download || true
+            if [ -f /tmp/published.apk ]; then
+              live=$(sha256sum /tmp/published.apk | cut -d' ' -f1)
+              if [ "$live" = "$built" ]; then
+                echo "/download is serving this build ($(stat -c%s /tmp/published.apk) bytes)"
+                exit 0
+              fi
+              echo "attempt $i: still serving a different build"
+            fi
+            sleep 10
+          done
+          echo "The APK was uploaded but /download is not serving it."
+          exit 1
 
       - name: Say what was published
         run: |
