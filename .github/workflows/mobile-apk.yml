@@ -1,14 +1,18 @@
 name: Build Android APK
 
-# Manual-only: the Deploy workflow already builds the APK on every push to
-# main, so a push trigger here would build it twice.
+# Manual-only, and for one-off builds: pointing a test APK at a different
+# backend, or producing an artifact without publishing it.
+#
+# The routine build lives in deploy-workers.yml, which fires on any change
+# under mobile/ and also uploads to R2 so /download serves it. This one only
+# ever produces an artifact — nothing here reaches a phone in the field.
 on:
   workflow_dispatch:
     inputs:
       api_base_url:
         description: "Backend API base URL to bake into the app"
         required: false
-        default: "https://clams-api.lemoncoast-b230ecb6.centralindia.azurecontainerapps.io/api/v1"
+        default: "https://clams-api.opticspace09.workers.dev/api/v1"
 
 jobs:
   apk:
@@ -17,7 +21,7 @@ jobs:
       run:
         working-directory: mobile
     env:
-      API_URL: ${{ github.event.inputs.api_base_url || 'https://clams-api.lemoncoast-b230ecb6.centralindia.azurecontainerapps.io/api/v1' }}
+      API_URL: ${{ github.event.inputs.api_base_url || 'https://clams-api.opticspace09.workers.dev/api/v1' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4

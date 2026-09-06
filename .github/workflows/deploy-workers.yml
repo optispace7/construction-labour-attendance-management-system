@@ -7,11 +7,27 @@ name: Deploy Workers
 # should be able to reach one without silently reaching the other.
 #
 # Only the parts that changed are deployed, so an admin-only commit does not
-# rebuild and redeploy the API.
+# rebuild and redeploy the API, and a change under mobile/ does neither but
+# builds the app instead.
+#
+# Note that deploy.yml builds an APK too, pointing at the Azure API and baked
+# into the Azure admin image. That is not a duplicate to be removed while both
+# platforms are live: each one serves an app that talks to itself. When Azure
+# goes, that job goes with it.
 #
 # Needs one repository secret:
-#   CLOUDFLARE_API_TOKEN  — a token with "Edit Cloudflare Workers", plus R2 and
-#                           Hyperdrive read, scoped to the CLAMS account.
+#   CLOUDFLARE_API_TOKEN  — "Edit Cloudflare Workers", plus Hyperdrive read and
+#                           R2 **write**, scoped to the CLAMS account. Write, not
+#                           read: the APK is published by uploading it to the
+#                           media bucket, which /download then streams.
+#
+# Release signing for the APK is optional and separate:
+#   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
+#   ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+# Without them the build still runs and produces an artifact, but nothing is
+# published — a debug-signed APK cannot upgrade an existing install, and
+# publishing one would strand every phone that already has the app.
+#
 # The account id is not a secret and is set below.
 
 on:
@@ -20,14 +36,15 @@ on:
       target:
         description: "What to deploy"
         required: true
-        default: "both"
+        default: "all"
         type: choice
-        options: [both, api, admin]
+        options: [all, api, admin, apk]
   push:
     branches: [main]
     paths:
       - "backend/**"
       - "admin/**"
+      - "mobile/**"
       - ".github/workflows/deploy-workers.yml"
 
 env:
@@ -44,6 +61,7 @@ jobs:
     outputs:
       api: ${{ steps.filter.outputs.api }}
       admin: ${{ steps.filter.outputs.admin }}
+      apk: ${{ steps.filter.outputs.apk }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -54,12 +72,14 @@ jobs:
               - 'backend/**'
             admin:
               - 'admin/**'
+            apk:
+              - 'mobile/**'
 
   api:
     needs: changes
     # A manual run targets what the operator asked for; a push deploys what moved.
     if: >-
-      (github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","api"]'), inputs.target)) ||
+      (github.event_name == 'workflow_dispatch' && contains(fromJSON('["all","api"]'), inputs.target)) ||
       (github.event_name == 'push' && needs.changes.outputs.api == 'true')
     runs-on: ubuntu-latest
     defaults:
@@ -112,7 +132,7 @@ jobs:
   admin:
     needs: changes
     if: >-
-      (github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","admin"]'), inputs.target)) ||
+      (github.event_name == 'workflow_dispatch' && contains(fromJSON('["all","admin"]'), inputs.target)) ||
       (github.event_name == 'push' && needs.changes.outputs.admin == 'true')
     runs-on: ubuntu-latest
     defaults:
@@ -131,13 +151,36 @@ jobs:
       - run: npx vitest run
 
       # OpenNext adapts the Next build for the Workers runtime.
+      #
+      # The API URL is set here as well as in wrangler.jsonc because Next
+      # inlines NEXT_PUBLIC_* at build time: a value absent now cannot be
+      # supplied later by a Worker variable. Setting it in the environment also
+      # beats any .env file, which is what stops a developer's .env.local
+      # pointing a production build at a dead host.
       - run: npm run build:workers
+        env:
+          API_INTERNAL_BASE_URL: https://clams-api.opticspace09.workers.dev/api/v1
+          NEXT_PUBLIC_API_BASE_URL: https://clams-api.opticspace09.workers.dev/api/v1
 
       - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: admin
+
+      - name: Check the panel serves its login page
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w "%{http_code}"               https://clams-admin.opticspace09.workers.dev/login || true)
+            if [ "$code" = "200" ]; then
+              echo "panel is up"
+              exit 0
+            fi
+            echo "attempt $i: HTTP $code"
+            sleep 15
+          done
+          echo "panel did not answer after deploy"
+          exit 1
 
       - name: Check the admin panel serves its login page
         run: |
@@ -153,3 +196,97 @@ jobs:
           done
           echo "Admin panel did not serve /login after deploy"
           exit 1
+
+  apk:
+    needs: changes
+    if: >-
+      (github.event_name == 'workflow_dispatch' && contains(fromJSON('["all","apk"]'), inputs.target)) ||
+      (github.event_name == 'push' && needs.changes.outputs.apk == 'true')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      # Baked into the binary at build time, so this is the one place that
+      # decides which backend every phone in the field talks to. Better Auth's
+      # own base is derived from it in Env, rather than being a second value
+      # that could disagree with this one.
+      API_URL: https://clams-api.opticspace09.workers.dev/api/v1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+      # Release signing, when the keystore secrets exist. Without them this
+      # builds debug-signed, which installs but cannot upgrade an existing
+      # release install — so a debug APK must never reach /download.
+      - name: Configure release signing
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No ANDROID_KEYSTORE_BASE64 secret — building debug-signed."
+            exit 0
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > android/clams-release.jks
+          cat > android/key.properties <<EOF
+          storeFile=clams-release.jks
+          storePassword=$STORE_PASS
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASS
+          EOF
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build release APK
+        run: flutter build apk --release --dart-define=API_BASE_URL=$API_URL
+
+      # Always keep the artifact: it is how a build is inspected or installed
+      # by hand when something looks wrong with the published one.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clams-apk
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+      # Publishing is what actually reaches a phone. /download streams this
+      # exact key out of R2, so without this step the workflow builds a new APK
+      # and every site goes on installing the previous one.
+      #
+      # Only a signed build is published. An unsigned one cannot upgrade an
+      # existing install, and would strand every phone that already has the app.
+      - name: Publish the APK to R2
+        if: steps.signing.outputs.signed == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: mobile
+          command: >-
+            r2 object put clams-media/apk/CLAMS.apk
+            --file build/app/outputs/flutter-apk/app-release.apk
+            --content-type application/vnd.android.package-archive
+            --remote
+
+      - name: Say what was published
+        run: |
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            echo "Published to /download, pointing at $API_URL"
+          else
+            echo "Debug-signed build — artifact only, /download unchanged."
+            echo "Set ANDROID_KEYSTORE_BASE64 and friends to publish."
+          fi
