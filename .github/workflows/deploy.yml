@@ -1,5 +1,19 @@
-name: Deploy
+name: Deploy (Azure — retired)
 
+# RETIRED. Runs only when somebody deliberately starts it.
+#
+# CLAMS is served from Cloudflare Workers now — see deploy-workers.yml, which
+# is what a push to main triggers. This one is kept rather than deleted because
+# it is the only way back to Azure if the Workers deployment has to be
+# abandoned, and because its migration ordering notes below are the reason
+# anyone knows the rules.
+#
+# Do not simply re-enable the push trigger. The code on main no longer verifies
+# the Argon2 password hashes that Azure's database still holds — hashing moved
+# into Postgres — so rolling this out as-is would leave nobody able to log in
+# there. Going back to Azure means restoring Argon2 verification first, or
+# repeating the bcrypt migration against that database.
+#
 # Migrates the database, builds the images in ACR and rolls the Azure Container
 # Apps. Needs the AZURE_CREDENTIALS repo secret (service principal with
 # Contributor on the clams-rg resource group).
@@ -27,14 +41,10 @@ name: Deploy
 # ---------------------------------------------------------------------------
 
 on:
+  # Manual only. The push trigger was removed when Cloudflare took over; leaving
+  # it would mean every merge deploying two incompatible versions of the auth
+  # system to two different databases.
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "backend/**"
-      - "admin/**"
-      - "mobile/**"
-      - ".github/workflows/deploy.yml"
 
 env:
   ACR: clamsacr8ca7
