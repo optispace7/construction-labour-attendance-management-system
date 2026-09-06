@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { apiFetch } from '@/lib/server/api-fetch';
 import {
   getOrCreateDeviceUid,
-  setAuthCookies,
+  setBetterAuthSession,
   setDeviceCredentials,
 } from '@/lib/server/session';
 
@@ -44,20 +44,28 @@ interface DeviceRegistration {
   deviceId?: string;
 }
 
+/** Better Auth's sign-in reply, as much of it as this route reads. */
 interface LoginResult {
-  accessToken: string;
-  refreshToken: string;
-  user?: { role?: string };
+  token?: string;
+  user?: { id?: string; email?: string; name?: string; role?: string };
 }
+
+/** How long the session cookie lives. Better Auth's default is seven days. */
+const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
 
 export async function POST(req: NextRequest) {
   const { email, identifier, password } = (await req.json()) as LoginBody;
-  const res = await apiFetch(`/auth/login`, {
+  // An e-mail address or a user ID: site staff have no mailbox, so the user ID
+  // is the only way in for them, and Better Auth splits those across two
+  // endpoints rather than accepting either at one.
+  const id = (identifier ?? email ?? '').trim();
+  const byEmail = id.includes('@');
+  const res = await apiFetch(byEmail ? '/sign-in/email' : '/sign-in/username', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ identifier: identifier ?? email, password }),
+    body: JSON.stringify(byEmail ? { email: id, password } : { username: id, password }),
     cache: 'no-store',
-  });
+  }, { betterAuth: true });
 
   if (!res.ok) {
     // Read as text first. A failure from the platform rather than the API —
@@ -75,13 +83,36 @@ export async function POST(req: NextRequest) {
   }
 
   const data = (await res.json()) as LoginResult;
-  await setAuthCookies(data.accessToken, data.refreshToken);
+  // Better Auth returns the session token in a header for non-browser clients
+  // and in the body for browsers; take whichever arrived.
+  const token = res.headers.get('set-auth-token') ?? data.token;
+  if (!token) {
+    return NextResponse.json(
+      { title: 'Sign-in failed', detail: 'The server did not return a session.' },
+      { status: 502 },
+    );
+  }
+  await setBetterAuthSession(token, SESSION_MAX_AGE);
+
+  // The role has to be asked for. Better Auth's user carries identity and
+  // nothing else — no role, no organization — because authorization lives in
+  // our users table, not in a table a library owns. Reading `role` off its
+  // reply silently yields undefined, which would make the check below false
+  // for everybody and skip device approval for every Supervisor and Watchman
+  // on the web, while looking like it worked.
+  const me = await apiFetch('/auth/me', {
+    method: 'GET',
+    headers: { authorization: `Bearer ${token}` },
+    cache: 'no-store',
+  });
+  const profile = me.ok ? ((await me.json()) as { role?: string; fullName?: string }) : null;
+  const role = profile?.role;
 
   // Device approval: non-super-admin browsers must be approved before any
   // data is served. Register this browser and try to collect its token —
   // that succeeds only once an admin/super admin has authorized it.
   let deviceStatus: string | null = null;
-  if (data.user?.role && data.user.role !== 'SUPER_ADMIN') {
+  if (role && role !== 'SUPER_ADMIN') {
     deviceStatus = 'PENDING';
     try {
       const uid = await getOrCreateDeviceUid();
@@ -89,7 +120,7 @@ export async function POST(req: NextRequest) {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          authorization: `Bearer ${data.accessToken}`,
+          authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           deviceUid: uid,
@@ -105,7 +136,7 @@ export async function POST(req: NextRequest) {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            authorization: `Bearer ${data.accessToken}`,
+            authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({ deviceId: regBody.deviceId }),
           cache: 'no-store',
@@ -120,5 +151,6 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ user: data.user, deviceStatus });
+  // The panel keys its navigation off role, so return the profile that has one.
+  return NextResponse.json({ user: profile ?? data.user, deviceStatus });
 }

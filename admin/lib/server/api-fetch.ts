@@ -39,11 +39,30 @@ async function serviceBinding(): Promise<ApiEnv['API'] | null> {
 }
 
 /**
+ * Better Auth is mounted outside the versioned API.
+ *
+ * It builds its own paths from its basePath and knows nothing about our URI
+ * versioning, so its routes live at /api/better-auth rather than under /api/v1.
+ * Rather than keep a second base URL in configuration — one more thing to set
+ * correctly in three places — the version suffix is swapped off the one we
+ * already have.
+ */
+function betterAuthBase(): string {
+  return apiInternalBaseUrl().replace(/\/api\/v\d+$/, '/api/better-auth');
+}
+
+/**
  * `path` is relative to the API base, and must start with a slash —
  * `apiFetch('/auth/login', { method: 'POST', ... })`.
+ *
+ * Pass `{ betterAuth: true }` to address Better Auth's routes instead.
  */
-export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  const url = `${apiInternalBaseUrl()}${path}`;
+export async function apiFetch(
+  path: string,
+  init?: RequestInit,
+  opts?: { betterAuth?: boolean },
+): Promise<Response> {
+  const url = `${opts?.betterAuth ? betterAuthBase() : apiInternalBaseUrl()}${path}`;
   const api = await serviceBinding();
   if (api) {
     // The hostname is ignored once the binding routes it, but a Request still

@@ -37,6 +37,34 @@ export async function setAuthCookies(accessToken: string, refreshToken: string) 
   });
 }
 
+/**
+ * Store a Better Auth session token as the credential the panel sends.
+ *
+ * It goes in the same cookie the access token used, because everything that
+ * talks to the API reads that one cookie and sends it as a bearer token — and
+ * the API now accepts either format. Swapping what goes in leaves the rest of
+ * the panel untouched.
+ *
+ * The lifetime is the session's own, not ACCESS_MAX_AGE. That fifteen minutes
+ * belonged to a short-lived JWT that a refresh token silently renewed; a Better
+ * Auth session lasts a week and renews itself, so a fifteen-minute cookie would
+ * log people out every quarter of an hour while their session was still valid.
+ *
+ * No refresh cookie is written: there is nothing to refresh with, and leaving a
+ * stale one would send the panel down a refresh path that cannot work.
+ */
+export async function setBetterAuthSession(token: string, maxAgeSeconds: number) {
+  const jar = await cookies();
+  jar.set(COOKIE_ACCESS, token, {
+    httpOnly: true,
+    secure,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: maxAgeSeconds,
+  });
+  jar.delete(COOKIE_REFRESH);
+}
+
 export async function clearAuthCookies() {
   const jar = await cookies();
   jar.delete(COOKIE_ACCESS);
