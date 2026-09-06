@@ -1,7 +1,7 @@
 // CLAMS Prisma schema — implements docs/02-database-schema.md
 generator client {
-  provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  provider        = "prisma-client-js"
+  binaryTargets   = ["native", "linux-musl-openssl-3.0.x"]
   // Lets the client talk to Postgres through a plain JS driver instead of the
   // Rust query engine. The engine is a native binary, so it cannot run on a
   // runtime that only loads JS and WebAssembly; the adapter is what makes the
@@ -214,26 +214,26 @@ model Designation {
 }
 
 model User {
-  id             String    @id @default(uuid()) @db.Uuid
-  organizationId String    @map("organization_id") @db.Uuid
-  role           UserRole
-  fullName       String    @map("full_name")
-  email          String?   @unique
+  id                  String    @id @default(uuid()) @db.Uuid
+  organizationId      String    @map("organization_id") @db.Uuid
+  role                UserRole
+  fullName            String    @map("full_name")
+  email               String?   @unique
   // Login handle for users without an email (watchmen). Globally unique so
   // login can resolve it without an org context.
-  username       String?   @unique
-  phone          String?
-  passwordHash   String    @map("password_hash")
-  isActive       Boolean   @default(true) @map("is_active")
+  username            String?   @unique
+  phone               String?
+  passwordHash        String    @map("password_hash")
+  isActive            Boolean   @default(true) @map("is_active")
   /// Attendance corrections this person files are applied on the spot instead
   /// of waiting for an approver. Granted per person by the Super Admin, never
   /// by role: the exemption belongs to the individual who was trusted with it,
   /// so the next holder of the same job does not inherit it silently.
-  canApplyCorrections Boolean @default(false) @map("can_apply_corrections")
-  lastLoginAt    DateTime? @map("last_login_at") @db.Timestamptz
-  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz
-  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz
+  canApplyCorrections Boolean   @default(false) @map("can_apply_corrections")
+  lastLoginAt         DateTime? @map("last_login_at") @db.Timestamptz
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt           DateTime? @map("deleted_at") @db.Timestamptz
 
   organization   Organization    @relation(fields: [organizationId], references: [id])
   siteScopes     UserSiteScope[]
@@ -890,23 +890,23 @@ model DailyWasteEntry {
 /// no second storage account to keep in sync), and watched for expiry so the
 /// renewal is chased by email rather than remembered.
 model CompanyDocument {
-  id             String @id @default(uuid()) @db.Uuid
-  organizationId String @map("organization_id") @db.Uuid
+  id             String  @id @default(uuid()) @db.Uuid
+  organizationId String  @map("organization_id") @db.Uuid
   /// The site this document belongs to. A licence is granted for a particular
   /// project, so it expires against that project and is chased for it.
-  siteId         String @map("site_id") @db.Uuid
+  siteId         String  @map("site_id") @db.Uuid
   /// Display name. Seeded from the uploaded file's name; the client renames it.
   name           String
   /// The name of the file as uploaded — kept so a download reads as the
   /// original document even after the display name is changed.
-  fileName       String @map("file_name")
-  mimeType       String @map("mime_type")
+  fileName       String  @map("file_name")
+  mimeType       String  @map("mime_type")
   /// Where the PDF itself lives. `storageKey` names an object in the media
   /// bucket; `data` is the old in-database column, nullable so documents
   /// uploaded before the move still open. Nothing writes it any more.
   storageKey     String? @map("storage_key")
   data           Bytes?
-  sizeBytes      Int    @map("size_bytes")
+  sizeBytes      Int     @map("size_bytes")
 
   /// The day the document stops being valid. Null = nothing to expire.
   validUntil       DateTime? @map("valid_until") @db.Date
@@ -944,4 +944,87 @@ model ReportJob {
   completedAt    DateTime? @map("completed_at") @db.Timestamptz
 
   @@map("report_jobs")
+}
+
+// ============================================================================
+// Better Auth (spike)
+//
+// Identity only. Authorization — organization, role, site scopes, the
+// direct-apply flag — stays on User, which these rows share an id with.
+//
+// Deliberately not merged into User: Better Auth never writes organization_id,
+// role or full_name, and its generator refuses a table that requires columns
+// it does not populate. Its suggestion is to make them optional, which would
+// leave every permission check reading a nullable column owned by a library.
+//
+// Nothing here alters an existing table, so all four foreign keys that
+// reference users.id keep working untouched.
+// ============================================================================
+
+model AuthUser {
+  id              String        @id @db.Uuid
+  name            String
+  email           String
+  emailVerified   Boolean       @default(false) @map("email_verified")
+  image           String?
+  username        String?
+  displayUsername String?       @map("display_username")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+  sessions        AuthSession[]
+  accounts        AuthAccount[]
+
+  @@unique([email])
+  @@unique([username])
+  @@map("auth_user")
+}
+
+model AuthSession {
+  id        String   @id @db.Uuid
+  token     String
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  userId    String   @map("user_id") @db.Uuid
+  user      AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@unique([token])
+  @@index([userId])
+  @@map("auth_session")
+}
+
+model AuthAccount {
+  id                    String    @id @db.Uuid
+  accountId             String    @map("account_id")
+  providerId            String    @map("provider_id")
+  userId                String    @map("user_id") @db.Uuid
+  user                  AuthUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // The password hash lives here, not on the user. This is what a credential
+  // login actually reads; users.password_hash is not consulted.
+  password              String?
+  accessToken           String?   @map("access_token")
+  refreshToken          String?   @map("refresh_token")
+  idToken               String?   @map("id_token")
+  accessTokenExpiresAt  DateTime? @map("access_token_expires_at") @db.Timestamptz
+  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at") @db.Timestamptz
+  scope                 String?
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([userId])
+  @@map("auth_account")
+}
+
+model AuthVerification {
+  id         String   @id @db.Uuid
+  identifier String
+  value      String
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([identifier])
+  @@map("auth_verification")
 }

@@ -2,6 +2,7 @@ import { betterAuth } from 'better-auth';
 import { prismaAdapter } from 'better-auth/adapters/prisma';
 import { bearer, username } from 'better-auth/plugins';
 import { PrismaClient } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 
 /**
  * Better Auth configuration — spike.
@@ -33,6 +34,16 @@ export const auth = betterAuth({
   // So identity lives in auth_user and authorization stays in users, joined on
   // the same id. Nothing existing is altered, which is the point: every
   // foreign key that references users.id keeps referencing it.
+  advanced: {
+    database: {
+      // Better Auth's own ids are a 32-character random string, not a UUID.
+      // Every other id in this database is a UUID, and these rows are joined
+      // to users on the id, so a text column here would mean a cast on the
+      // join and two id shapes in one schema for no reason.
+      generateId: () => randomUUID(),
+    },
+  },
+
   user: { modelName: 'AuthUser' },
   session: { modelName: 'AuthSession' },
   account: { modelName: 'AuthAccount' },
