@@ -66,6 +66,14 @@ class ApiClient {
 
   bool _isRefreshCall(RequestOptions o) => o.path.contains('/auth/refresh');
 
+  /// Renew the credential after a 401.
+  ///
+  /// Only the old scheme can be renewed. A Better Auth session carries no
+  /// refresh token — the server extends it as it is used — so there is nothing
+  /// to present here and a 401 means the session is genuinely finished. The
+  /// absent refresh token is the signal, and the honest answer is to fail and
+  /// let the app ask for a sign-in rather than retry something that cannot
+  /// work.
   Future<bool> _tryRefresh() async {
     final refresh = await _store.refreshToken;
     if (refresh == null) return false;

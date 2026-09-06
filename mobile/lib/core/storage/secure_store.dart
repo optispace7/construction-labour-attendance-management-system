@@ -51,6 +51,18 @@ class SecureStore {
     await _write(_refreshKey, refresh);
   }
 
+  /// Store a Better Auth session token.
+  ///
+  /// There is no second token to keep. A session is renewed by the server as
+  /// it is used, so any refresh token still on the device is left over from
+  /// the old scheme and is deleted rather than kept — a stale one would send
+  /// the client down a refresh path that cannot succeed, and turn an expired
+  /// session into a silent failure instead of a sign-in prompt.
+  Future<void> saveSession(String token) async {
+    await _write(_accessKey, token);
+    await _delete(_refreshKey);
+  }
+
   Future<String?> get accessToken => _read(_accessKey);
   Future<String?> get refreshToken => _read(_refreshKey);
 

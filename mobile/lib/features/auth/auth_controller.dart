@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/config/env.dart';
 import '../../core/providers.dart';
 import '../../core/push/push_service.dart';
 import '../../core/storage/secure_store.dart';
@@ -117,13 +118,26 @@ class AuthController extends StateNotifier<AuthState> {
       // Android: on a captive-portal/blocked network the request future can
       // hang with nothing ever thrown, leaving the button on "Signing in…"
       // forever. This outer bound guarantees the screen always comes back.
-      final res = await _dio
-          .post('/auth/login', data: {'identifier': identifier, 'password': password})
+      // Better Auth splits sign-in across two endpoints rather than accepting
+      // either credential at one. Watchmen have no mailbox — a user ID is the
+      // only way in for them — so which one to call is decided here.
+      final byEmail = identifier.contains('@');
+      final res = await Dio(BaseOptions(baseUrl: Env.betterAuthBaseUrl))
+          .post(
+            byEmail ? '/sign-in/email' : '/sign-in/username',
+            data: byEmail
+                ? {'email': identifier, 'password': password}
+                : {'username': identifier, 'password': password},
+          )
           .timeout(const Duration(seconds: 30));
 
-      final access = res.data['accessToken'] as String?;
-      final refresh = res.data['refreshToken'] as String?;
-      if (access == null || refresh == null) {
+      // The session token comes back in a header for clients that do not keep
+      // cookies, which is this one: cookie handling across an app restart and
+      // a long offline stretch is not something to depend on at a site gate.
+      final session = (res.headers.value('set-auth-token') ??
+              res.data['token'] as String?)
+          ?.trim();
+      if (session == null || session.isEmpty) {
         state = state.copyWith(
           loading: false,
           error: 'Server did not return a session token — try again.',
@@ -134,17 +148,36 @@ class AuthController extends StateNotifier<AuthState> {
       // Secure storage lives behind a platform channel and can stall or throw
       // (keystore trouble on some Android builds). Bound it, so a broken
       // keystore surfaces as a message instead of an endless spinner.
-      await _store
-          .saveTokens(access, refresh)
-          .timeout(const Duration(seconds: 10));
+      await _store.saveSession(session).timeout(const Duration(seconds: 10));
+
+      // Who they are comes from Better Auth; what they may do does not. Role
+      // and site scopes live in our own users table, so they are read from the
+      // API with the session just obtained. Reading `role` off the sign-in
+      // reply yields null and would leave the app with no idea which screens
+      // to show.
+      Map<String, dynamic>? me;
+      try {
+        final profile = await _dio
+            .get(
+              '/auth/me',
+              options: Options(headers: {'authorization': 'Bearer $session'}),
+            )
+            .timeout(const Duration(seconds: 15));
+        me = (profile.data as Map).cast<String, dynamic>();
+      } catch (_) {
+        // Signed in, but the profile call failed. Better to continue with what
+        // is known than to refuse a login that actually succeeded; the guarded
+        // screens re-check the role against the API anyway.
+        me = null;
+      }
 
       state = state.copyWith(
         initialized: true,
         loading: false,
         authenticated: true,
-        role: res.data['user']?['role'] as String?,
-        fullName: res.data['user']?['fullName'] as String?,
-        email: (res.data['user']?['email'] as String?) ?? identifier,
+        role: me?['role'] as String?,
+        fullName: me?['fullName'] as String?,
+        email: (me?['email'] as String?) ?? identifier,
       );
       unawaited(_registerPush());
       return true;
