@@ -23,6 +23,24 @@ interface FormValues {
 
 type Mode = 'login' | 'forgot' | 'otp' | 'done';
 
+/**
+ * The reset token, from whatever the person actually has to hand.
+ *
+ * Opening the emailed link puts it in the query string. Some mail clients
+ * mangle a link badly enough that people copy the whole URL and paste it
+ * instead, so a pasted URL is accepted as well as a bare token — the
+ * alternative is telling somebody their link is invalid when it is not.
+ */
+function extractToken(input: string): string | null {
+  const value = input.trim();
+  if (!value) return null;
+  try {
+    return new URL(value).searchParams.get('token');
+  } catch {
+    return value;
+  }
+}
+
 /** The problem+json shape the API returns, as much of it as this page reads. */
 interface ApiErrorBody {
   detail?: string;
@@ -46,9 +64,23 @@ export default function LoginPage() {
 
   // Forgot-password state
   const [fpIdentifier, setFpIdentifier] = React.useState('');
+  const [resetToken, setResetToken] = React.useState<string | null>(null);
   const [otp, setOtp] = React.useState('');
   const [newPassword, setNewPassword] = React.useState('');
   const [confirmPassword, setConfirmPassword] = React.useState('');
+
+  // Arriving from a reset link: go straight to setting a new password rather
+  // than showing a sign-in form the person cannot yet use.
+  React.useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get('token');
+    if (!token) return;
+    setResetToken(token);
+    setMode('otp');
+    setInfo('Choose a new password.');
+    // Take the token out of the address bar: it is a credential until it is
+    // used, and it would otherwise sit in history and in any screenshot.
+    window.history.replaceState({}, '', window.location.pathname);
+  }, []);
 
   function switchMode(next: Mode) {
     setMode(next);
@@ -96,7 +128,7 @@ export default function LoginPage() {
     setError(null);
     setInfo(null);
     try {
-      const res = await fetch('/api/proxy/auth/forgot-password', {
+      const res = await fetch('/api/auth/forgot-password', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ identifier: fpIdentifier.trim() }),
@@ -119,8 +151,12 @@ export default function LoginPage() {
   }
 
   async function submitReset() {
-    if (otp.trim().length !== 6) {
-      setError('Enter the 6-digit code from your email.');
+    // The code is gone: Better Auth emails a link, and the token that used to
+    // be six digits typed by hand now arrives in the URL. The field is kept
+    // for the case where somebody pastes the whole link rather than opening it.
+    const token = resetToken ?? extractToken(otp);
+    if (!token) {
+      setError('Open the link from your email, or paste it here.');
       return;
     }
     if (newPassword.length < 8) {
@@ -134,20 +170,10 @@ export default function LoginPage() {
     setLoading(true);
     setError(null);
     try {
-      const verify = await fetch('/api/proxy/auth/forgot-password/verify', {
+      const reset = await fetch('/api/auth/reset-password', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ identifier: fpIdentifier.trim(), otp: otp.trim() }),
-      });
-      const vBody = (await verify.json().catch(() => ({}))) as ApiErrorBody;
-      if (!verify.ok) {
-        setError(vBody?.detail ?? vBody?.title ?? 'Invalid code');
-        return;
-      }
-      const reset = await fetch('/api/proxy/auth/reset-password', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ resetToken: vBody.resetToken, newPassword }),
+        body: JSON.stringify({ token, newPassword }),
       });
       if (!reset.ok) {
         const rBody = (await reset.json().catch(() => ({}))) as ApiErrorBody;
@@ -243,18 +269,25 @@ export default function LoginPage() {
           {mode === 'otp' && (
             <>
               <Typography variant="h6" gutterBottom>
-                Enter the code
+                Set a new password
               </Typography>
               <Stack spacing={2}>
                 {info && <Alert severity="success">{info}</Alert>}
                 {error && <Alert severity="error">{error}</Alert>}
-                <TextField
-                  label="6-digit code"
-                  fullWidth
-                  inputProps={{ inputMode: 'numeric', maxLength: 6 }}
-                  value={otp}
-                  onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-                />
+                {/* Hidden once the link has been opened, because the token is
+                    already in hand and asking for it again only invites
+                    somebody to paste the wrong thing. */}
+                {!resetToken && (
+                  <TextField
+                    label="Paste the link from your email"
+                    fullWidth
+                    value={otp}
+                    // No digits-only filter here any more: what goes in is a
+                    // URL now, and stripping everything but numbers turned a
+                    // valid link into nonsense.
+                    onChange={(e) => setOtp(e.target.value)}
+                  />
+                )}
                 <TextField
                   label="New password"
                   type="password"

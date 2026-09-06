@@ -47,6 +47,18 @@ export function createAuth() {
   // mismatch produces URLs that route nowhere.
   basePath: '/api/better-auth',
 
+  // Where a reset link is allowed to send somebody.
+  //
+  // Not optional: without it every password-reset request is refused with
+  // INVALID_REDIRECT_URL, which reads like a broken endpoint rather than a
+  // missing setting. It is a allowlist on purpose — the reset link carries a
+  // token, and an unchecked redirect would let anyone who could craft the
+  // request have that token delivered to a host of their choosing.
+  trustedOrigins: (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean),
+
   // Better Auth's own tables, named so they cannot collide with ours.
   //
   // Left at its defaults it wants a model called `User`, and we already have
