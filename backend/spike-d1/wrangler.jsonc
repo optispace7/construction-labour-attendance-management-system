@@ -1,0 +1,10 @@
+{
+  "name": "clams-d1-spike",
+  "main": "worker.ts",
+  "compatibility_date": "2026-08-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "d1_databases": [
+    { "binding": "DB", "database_name": "clams-spike", "database_id": "af8969ba-6a38-4425-a0b8-44bd4a2be15b" }
+  ]
+}
