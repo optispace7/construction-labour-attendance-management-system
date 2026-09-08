@@ -909,6 +909,10 @@ export class ReportsService {
     // stretch and overstate the day (10:00-12:00 plus 13:00-15:00 is four hours
     // worked, not five), so each shift keeps its own IN/Out and lands in its
     // own block of the sheet.
+    // Joined to the same worker filter rather than given the ids it selected:
+    // D1 allows 100 bound parameters per query, and a month's sheet for a real
+    // workforce is several hundred ids. The join asks the same question and
+    // binds a handful of values.
     const sessions = workerList.length
       ? await this.d1.db
           .select({
@@ -921,13 +925,11 @@ export class ReportsService {
             overtimeMinutes: attendanceSessions.overtimeMinutes,
           })
           .from(attendanceSessions)
+          .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
           .where(
             and(
               eq(attendanceSessions.organizationId, orgId),
-              inArray(
-                attendanceSessions.workerId,
-                workerList.map((w) => w.id),
-              ),
+              ...workerFilters,
               gte(attendanceSessions.workDate, day(periodStart)),
               lt(attendanceSessions.workDate, day(periodEnd)),
             ),

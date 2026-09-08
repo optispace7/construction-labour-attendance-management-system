@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { and, desc, eq, gte, inArray, lt, lte, notInArray, type SQL } from 'drizzle-orm';
 import { D1Service } from '../../infra/d1/d1.service';
+import { chunked } from '../../infra/d1/chunked';
 import {
   auditLogs,
   correctionRequests,
@@ -96,33 +97,36 @@ export class AuditQueryService {
     const shiftIds = idsOf('Shift');
 
     const db = this.d1.db;
-    const pick = <T>(ids: string[], run: () => Promise<T[]>) => (ids.length ? run() : []);
+    // Each list is as long as the page of audit rows it came from, so the
+    // reads are chunked — D1 binds at most 100 parameters per query.
+    const pick = <T>(ids: string[], run: (batch: string[]) => Promise<T[]>) =>
+      chunked(ids, run);
 
     const [
       userRows, workerRows, siteRows, vendorRows,
       designationRows, deviceRows, correctionRows, shiftRows,
     ] = await Promise.all([
-      pick(userIds, () =>
+      pick(userIds, (batch) =>
         db.select({ id: users.id, fullName: users.fullName }).from(users)
-          .where(inArray(users.id, userIds))),
-      pick(workerIds, () =>
+          .where(inArray(users.id, batch))),
+      pick(workerIds, (batch) =>
         db.select({ id: workers.id, fullName: workers.fullName, workerCode: workers.workerCode })
-          .from(workers).where(inArray(workers.id, workerIds))),
-      pick(siteIds, () =>
+          .from(workers).where(inArray(workers.id, batch))),
+      pick(siteIds, (batch) =>
         db.select({ id: sites.id, name: sites.name }).from(sites)
-          .where(inArray(sites.id, siteIds))),
-      pick(vendorIds, () =>
+          .where(inArray(sites.id, batch))),
+      pick(vendorIds, (batch) =>
         db.select({ id: vendors.id, name: vendors.name }).from(vendors)
-          .where(inArray(vendors.id, vendorIds))),
-      pick(designationIds, () =>
+          .where(inArray(vendors.id, batch))),
+      pick(designationIds, (batch) =>
         db.select({ id: designations.id, name: designations.name }).from(designations)
-          .where(inArray(designations.id, designationIds))),
-      pick(deviceIds, () =>
+          .where(inArray(designations.id, batch))),
+      pick(deviceIds, (batch) =>
         db.select({ id: devices.id, label: devices.label, deviceUid: devices.deviceUid })
-          .from(devices).where(inArray(devices.id, deviceIds))),
+          .from(devices).where(inArray(devices.id, batch))),
       // Prisma fetched the worker through the relation. There is no relation
       // loader here, so it is a join — one query either way.
-      pick(correctionIds, () =>
+      pick(correctionIds, (batch) =>
         db.select({
             id: correctionRequests.id,
             fullName: workers.fullName,
@@ -130,10 +134,10 @@ export class AuditQueryService {
           })
           .from(correctionRequests)
           .innerJoin(workers, eq(workers.id, correctionRequests.workerId))
-          .where(inArray(correctionRequests.id, correctionIds))),
-      pick(shiftIds, () =>
+          .where(inArray(correctionRequests.id, batch))),
+      pick(shiftIds, (batch) =>
         db.select({ id: shifts.id, name: shifts.name }).from(shifts)
-          .where(inArray(shifts.id, shiftIds))),
+          .where(inArray(shifts.id, batch))),
     ]);
 
     return {

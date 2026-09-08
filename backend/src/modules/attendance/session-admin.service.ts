@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { DateTime } from 'luxon';
-import { and, asc, eq, inArray, isNull, ne, notInArray, type SQL } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, ne, type SQL } from 'drizzle-orm';
 import { D1Service } from '../../infra/d1/d1.service';
+import { chunked } from '../../infra/d1/chunked';
 import {
   attendanceSessions,
   designations,
@@ -540,38 +541,47 @@ export class SessionAdminService {
    * whole batch. `dryRun` returns the same shape without writing.
    */
   async bulkReopen(user: AuthUser, dto: BulkReopenDto) {
-    const sessionRows = await this.sessionQuery()
-      .where(
+    // The panel names the sessions, so the list is as long as the day it was
+    // selected from — chunked for D1's 100-parameter cap, then ordered once
+    // the pieces are together.
+    const sessionRows = await chunked(dto.sessionIds, (batch) =>
+      this.sessionQuery().where(
         and(
-          inArray(attendanceSessions.id, dto.sessionIds),
+          inArray(attendanceSessions.id, batch),
           eq(attendanceSessions.organizationId, user.organizationId),
           ...this.scope(user),
         ),
-      )
-      .orderBy(asc(workers.workerCode));
-    const sessions = sessionRows.map(nestSession);
+      ),
+    );
+    const sessions = sessionRows
+      .map(nestSession)
+      .sort((a, b) => a.worker.workerCode.localeCompare(b.worker.workerCode));
     if (!sessions.length) return { dryRun: dto.dryRun ?? false, reopened: [], skipped: [] };
 
     // Everyone who already holds an open session — they cannot take another.
-    const openAlready = await this.d1.db
-      .select({
-        workerId: attendanceSessions.workerId,
-        workDate: attendanceSessions.workDate,
-      })
-      .from(attendanceSessions)
-      .where(
-        and(
-          inArray(
-            attendanceSessions.workerId,
-            sessions.map((s) => s.workerId),
-          ),
-          eq(attendanceSessions.state, 'OPEN'),
-          notInArray(
-            attendanceSessions.id,
-            sessions.map((s) => s.id),
-          ),
-        ),
-      );
+    // The "not one of these" half is applied in code rather than as a second
+    // bound list: two lists of the same length would double the parameters,
+    // and the rows being excluded are the ones already in hand.
+    const chosenIds = new Set(sessions.map((s) => s.id));
+    const openAlready = (
+      await chunked(
+        sessions.map((s) => s.workerId),
+        (batch) =>
+          this.d1.db
+            .select({
+              id: attendanceSessions.id,
+              workerId: attendanceSessions.workerId,
+              workDate: attendanceSessions.workDate,
+            })
+            .from(attendanceSessions)
+            .where(
+              and(
+                inArray(attendanceSessions.workerId, batch),
+                eq(attendanceSessions.state, 'OPEN'),
+              ),
+            ),
+      )
+    ).filter((s) => !chosenIds.has(s.id));
     const blocked = new Map(openAlready.map((s) => [s.workerId, s.workDate]));
 
     const reopened: Array<{

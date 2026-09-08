@@ -3,6 +3,7 @@ import { DateTime } from 'luxon';
 import { and, asc, count, desc, eq, gte, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { D1Service } from '../../infra/d1/d1.service';
+import { chunked } from '../../infra/d1/chunked';
 import {
   designations,
   organizations,
@@ -322,21 +323,25 @@ export class WorkersService {
   /** Current (open) site name per worker, for a page of rows. */
   private async currentSiteNames(ids: string[]): Promise<Map<string, string>> {
     if (!ids.length) return new Map();
-    const rows = await this.d1.db
-      .select({
-        workerId: workerSiteAssignments.workerId,
-        siteName: sites.name,
-        startDate: workerSiteAssignments.startDate,
-      })
-      .from(workerSiteAssignments)
-      .innerJoin(sites, eq(sites.id, workerSiteAssignments.siteId))
-      .where(
-        and(
-          inArray(workerSiteAssignments.workerId, ids),
-          isNull(workerSiteAssignments.endDate),
-        ),
-      )
-      .orderBy(desc(workerSiteAssignments.startDate));
+    // Chunked: this list is a whole page of workers, and D1 binds at most 100
+    // parameters per query.
+    const rows = await chunked(ids, (batch) =>
+      this.d1.db
+        .select({
+          workerId: workerSiteAssignments.workerId,
+          siteName: sites.name,
+          startDate: workerSiteAssignments.startDate,
+        })
+        .from(workerSiteAssignments)
+        .innerJoin(sites, eq(sites.id, workerSiteAssignments.siteId))
+        .where(
+          and(
+            inArray(workerSiteAssignments.workerId, batch),
+            isNull(workerSiteAssignments.endDate),
+          ),
+        )
+        .orderBy(desc(workerSiteAssignments.startDate)),
+    );
     const byWorker = new Map<string, string>();
     // First wins, and the ordering above makes that the most recent one.
     for (const r of rows) if (!byWorker.has(r.workerId)) byWorker.set(r.workerId, r.siteName);
@@ -447,25 +452,30 @@ export class WorkersService {
     user: AuthUser,
     ids: string[],
   ): AsyncGenerator<{ path: string; data: Buffer }> {
-    const people = await this.d1.db
-      .select({
-        id: workers.id,
-        fullName: workers.fullName,
-        workerCode: workers.workerCode,
-        photoUrl: workers.photoUrl,
-        aadhaarFrontPhotoId: workers.aadhaarFrontPhotoId,
-        aadhaarBackPhotoId: workers.aadhaarBackPhotoId,
-        idProofPhotoId: workers.idProofPhotoId,
-      })
-      .from(workers)
-      .where(
-        and(
-          inArray(workers.id, ids),
-          eq(workers.organizationId, user.organizationId),
-          isNull(workers.deletedAt),
-        ),
+    // The caller names the workers, so the list is theirs to size — chunked
+    // for D1's 100-parameter cap, then ordered once the pieces are together.
+    const people = (
+      await chunked(ids, (batch) =>
+        this.d1.db
+          .select({
+            id: workers.id,
+            fullName: workers.fullName,
+            workerCode: workers.workerCode,
+            photoUrl: workers.photoUrl,
+            aadhaarFrontPhotoId: workers.aadhaarFrontPhotoId,
+            aadhaarBackPhotoId: workers.aadhaarBackPhotoId,
+            idProofPhotoId: workers.idProofPhotoId,
+          })
+          .from(workers)
+          .where(
+            and(
+              inArray(workers.id, batch),
+              eq(workers.organizationId, user.organizationId),
+              isNull(workers.deletedAt),
+            ),
+          ),
       )
-      .orderBy(asc(workers.fullName), asc(workers.id));
+    ).sort((a, b) => a.fullName.localeCompare(b.fullName) || a.id.localeCompare(b.id));
     if (people.length === 0) throw Errors.notFound('Worker');
 
     for (const p of people) {

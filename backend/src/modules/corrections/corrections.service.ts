@@ -11,6 +11,7 @@ import {
   workers,
 } from '../../infra/d1/schema.generated';
 import { applyCorrectionOnD1 } from '../../infra/d1/correction-apply.d1';
+import { chunked } from '../../infra/d1/chunked';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
@@ -176,18 +177,14 @@ export class CorrectionsService {
       .where(and(...filters))
       .orderBy(desc(correctionRequests.createdAt));
 
-    // The items for the whole page in one query, rather than one per row.
-    const items = rows.length
-      ? await this.d1.db
-          .select()
-          .from(correctionItems)
-          .where(
-            inArray(
-              correctionItems.requestId,
-              rows.map((r) => r.request.id),
-            ),
-          )
-      : [];
+    // The items for the whole page, rather than one query per row — read in
+    // chunks because D1 binds at most 100 parameters and this list is as long
+    // as the page.
+    const items = await chunked(
+      rows.map((r) => r.request.id),
+      (ids) =>
+        this.d1.db.select().from(correctionItems).where(inArray(correctionItems.requestId, ids)),
+    );
     const itemsFor = new Map<string, ReturnType<typeof parseItem>[]>();
     for (const i of items) {
       const list = itemsFor.get(i.requestId) ?? [];
@@ -204,12 +201,12 @@ export class CorrectionsService {
           .filter(Boolean) as string[],
       ),
     ];
-    const people = userIds.length
-      ? await this.d1.db
-          .select({ id: users.id, fullName: users.fullName, role: users.role })
-          .from(users)
-          .where(inArray(users.id, userIds))
-      : [];
+    const people = await chunked(userIds, (ids) =>
+      this.d1.db
+        .select({ id: users.id, fullName: users.fullName, role: users.role })
+        .from(users)
+        .where(inArray(users.id, ids)),
+    );
     const nameOf = new Map(people.map((u) => [u.id, u.fullName]));
 
     return rows.map((r) => ({

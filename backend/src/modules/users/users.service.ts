@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { D1Service } from '../../infra/d1/d1.service';
+import { chunked } from '../../infra/d1/chunked';
 import { devices, userSiteScopes, users } from '../../infra/d1/schema.generated';
 import { IdentityService } from '../../common/better-auth/identity.service';
 import { AuditService } from '../../common/audit/audit.service';
@@ -82,10 +83,14 @@ export class UsersService {
    */
   private async withScopes<T extends { id: string }>(rows: T[]) {
     if (!rows.length) return [] as (T & { siteScopes: { siteId: string }[] })[];
-    const scopes = await this.d1.db
-      .select({ userId: userSiteScopes.userId, siteId: userSiteScopes.siteId })
-      .from(userSiteScopes)
-      .where(inArray(userSiteScopes.userId, rows.map((r) => r.id)));
+    const scopes = await chunked(
+      rows.map((r) => r.id),
+      (ids) =>
+        this.d1.db
+          .select({ userId: userSiteScopes.userId, siteId: userSiteScopes.siteId })
+          .from(userSiteScopes)
+          .where(inArray(userSiteScopes.userId, ids)),
+    );
     const byUser = new Map<string, { siteId: string }[]>();
     for (const s of scopes) {
       const list = byUser.get(s.userId) ?? [];

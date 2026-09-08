@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { and, desc, eq, gt, inArray, isNotNull, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { D1Service } from '../../infra/d1/d1.service';
+import { chunkedWrite } from '../../infra/d1/chunked';
 import { notifications, pushTokens, users } from '../../infra/d1/schema.generated';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
@@ -125,7 +126,11 @@ export class NotificationsService {
   /** Drop tokens FCM reported as no longer valid. */
   async pruneTokens(tokens: string[]) {
     if (tokens.length === 0) return;
-    await this.d1.db.delete(pushTokens).where(inArray(pushTokens.token, tokens));
+    // However many FCM reported — in chunks, because D1 binds at most 100
+    // parameters per query.
+    await chunkedWrite(tokens, (batch) =>
+      this.d1.db.delete(pushTokens).where(inArray(pushTokens.token, batch)),
+    );
   }
 
   /** Emails of active users in the given roles (defaults to admins + safety officers). */

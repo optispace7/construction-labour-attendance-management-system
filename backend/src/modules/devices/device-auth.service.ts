@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { D1Service } from '../../infra/d1/d1.service';
+import { chunkedWrite } from '../../infra/d1/chunked';
 import { devices, notifications, pushTokens, users } from '../../infra/d1/schema.generated';
 import { CryptoService } from '../../common/crypto/crypto.service';
 import { MailService } from '../../common/mail/mail.service';
@@ -141,7 +142,11 @@ export class DeviceAuthService {
         { title, body, data: { deviceId } },
       );
       if (stale.length) {
-        await this.d1.db.delete(pushTokens).where(inArray(pushTokens.token, stale));
+        // However many FCM reported, in chunks — D1 binds at most 100
+        // parameters per query.
+        await chunkedWrite(stale, (batch) =>
+          this.d1.db.delete(pushTokens).where(inArray(pushTokens.token, batch)),
+        );
       }
     } catch (e) {
       this.logger.error(`Device-pending alert failed: ${(e as Error).message}`);

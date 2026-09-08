@@ -4,6 +4,7 @@ import { DateTime } from 'luxon';
 import { and, asc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { D1Service } from '../../infra/d1/d1.service';
+import { chunked } from '../../infra/d1/chunked';
 import {
   attendanceSessions,
   attendanceTaps,
@@ -168,12 +169,12 @@ export class ManualApprovalsService {
     ).map(nestRequest);
 
     const reviewerIds = [...new Set(rows.map((r) => r.reviewedBy).filter(Boolean) as string[])];
-    const reviewers = reviewerIds.length
-      ? await this.d1.db
-          .select({ id: users.id, fullName: users.fullName })
-          .from(users)
-          .where(inArray(users.id, reviewerIds))
-      : [];
+    const reviewers = await chunked(reviewerIds, (ids) =>
+      this.d1.db
+        .select({ id: users.id, fullName: users.fullName })
+        .from(users)
+        .where(inArray(users.id, ids)),
+    );
     const nameOf = new Map(reviewers.map((u) => [u.id, u.fullName]));
 
     return rows.map((r) => ({
