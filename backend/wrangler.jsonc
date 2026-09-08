@@ -70,6 +70,13 @@
 
   // Worker and Aadhaar photos, and the APK the admin panel serves. The APK
   // cannot be a static asset: those are capped at 25 MiB and it is 72 MB.
+  // The application database. Hyperdrive and its Postgres stay declared for
+  // now so a rollback is a config change rather than a redeploy of code that
+  // no longer exists.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "clams-d1", "database_id": "13ee2585-428a-4a94-a5d2-a6f83f2d061f" }
+  ],
+
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "clams-media" }],
 
   // Replaces sharp for photo compression.

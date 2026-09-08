@@ -4,6 +4,7 @@ import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 
 import { PrismaModule } from './infra/prisma/prisma.module';
+import { D1Module } from './infra/d1/d1.module';
 import { RedisModule } from './infra/redis/redis.module';
 import { CryptoModule } from './common/crypto/crypto.module';
 import { BetterAuthModule } from './common/better-auth/better-auth.module';
@@ -43,6 +44,9 @@ import { StorageModule } from './modules/storage/storage.module';
     ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env', '../infra/.env'] }),
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     PrismaModule,
+    // The database the application is moving to. Both are registered while
+    // modules are ported one at a time; PrismaModule goes when the last one has.
+    D1Module,
     RedisModule,
     CryptoModule,
     // Evaluation only; registers no routes unless BETTER_AUTH_ENABLED=1.
