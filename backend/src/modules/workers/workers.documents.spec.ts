@@ -1,4 +1,5 @@
 import { WorkersService } from './workers.service';
+import { photoBlobs } from '../../infra/d1/schema.generated';
 import { AppException } from '../../common/errors/app.exception';
 
 const user = {
@@ -30,17 +31,60 @@ function makeBlob(over: Partial<any> = {}) {
   };
 }
 
-function setup(people: any[], blobs: Record<string, any | null>) {
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
-  const prisma = {
-    worker: { findMany: jest.fn().mockResolvedValue(people) },
-    photoBlob: {
-      findFirst: jest.fn(({ where }: any) => Promise.resolve(blobs[where.id] ?? null)),
+/** Every string anywhere in a Drizzle condition, however it is nested. */
+function stringsIn(value: unknown, found: string[] = [], seen = new Set<unknown>()): string[] {
+  if (typeof value === 'string') found.push(value);
+  else if (value && typeof value === 'object' && !seen.has(value)) {
+    seen.add(value);
+    for (const v of Object.values(value as Record<string, unknown>)) stringsIn(v, found, seen);
+  }
+  return found;
+}
+
+/**
+ * A stand-in for the Drizzle query builder.
+ *
+ * Every call returns the double again so the chain can be as long as the code
+ * wants, and awaiting it at the end resolves to rows. Which rows depends on the
+ * table asked for, which is unambiguous — the worker list and the blob lookup
+ * read different tables — and the blob is picked out by finding its id among
+ * the values bound into the condition.
+ */
+function fakeDb(people: any[], blobs: Record<string, any | null>) {
+  let table: unknown = null;
+  let wantedBlobId: string | null = null;
+  const chain: any = {
+    select: jest.fn(() => chain),
+    from: jest.fn((t: unknown) => {
+      table = t;
+      wantedBlobId = null;
+      return chain;
+    }),
+    leftJoin: jest.fn(() => chain),
+    innerJoin: jest.fn(() => chain),
+    orderBy: jest.fn(() => chain),
+    limit: jest.fn(() => chain),
+    where: jest.fn((cond: unknown) => {
+      const values = stringsIn(cond);
+      wantedBlobId = Object.keys(blobs).find((id) => values.includes(id)) ?? null;
+      return chain;
+    }),
+    then: (resolve: (rows: any[]) => unknown) => {
+      const isBlobTable = table === photoBlobs;
+      const rows = isBlobTable ? [blobs[wantedBlobId ?? '']].filter(Boolean) : people;
+      return Promise.resolve(rows).then(resolve);
     },
   };
+  return chain;
+}
+
+function setup(people: any[], blobs: Record<string, any | null>) {
+  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const db = fakeDb(people, blobs);
+  const d1 = { db, d1: {} };
   const crypto = { decryptBuffer: jest.fn(() => Buffer.from('plain-jpeg')) };
-  const service = new WorkersService(prisma as any, crypto as any, audit as any);
-  return { service, audit, prisma, crypto };
+  const service = new WorkersService(d1 as any, crypto as any, audit as any);
+  return { service, audit, db, crypto };
 }
 
 async function collect(gen: AsyncGenerator<{ path: string; data: Buffer }>) {
@@ -138,23 +182,19 @@ describe('WorkersService.documentFiles', () => {
   });
 
   it('scopes the export to the caller organization', async () => {
-    const { service, prisma } = setup([makePerson()], {
+    const { service, db } = setup([makePerson()], {
       'photo-1': makeBlob(),
       'front-1': makeBlob(),
     });
 
     await collect(service.documentFiles(user, ['w1']));
 
-    expect(prisma.worker.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ organizationId: 'org-1', deletedAt: null }),
-      }),
-    );
-    expect(prisma.photoBlob.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ organizationId: 'org-1' }),
-      }),
-    );
+    // The organization is part of the WHERE rather than an argument object
+    // now, so the assertion reads the values bound into it. Stringifying is
+    // not an option — a Drizzle condition holds column objects that refer back
+    // to their table.
+    const bound = db.where.mock.calls.flatMap((c: any[]) => stringsIn(c[0]));
+    expect(bound).toContain('org-1');
   });
 
   it('rejects when no requested person exists in the org', async () => {

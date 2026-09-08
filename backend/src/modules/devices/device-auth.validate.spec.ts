@@ -17,9 +17,21 @@ const TOKEN = `${DEVICE_ID}.6f8b1c22-2f3e-4d1a-9b0a-7c9d5f9e1234`;
 
 function build(device: Record<string, unknown> | null) {
   const update = jest.fn().mockResolvedValue({});
-  const prisma: any = { device: { findUnique: jest.fn().mockResolvedValue(device), update } };
-  const svc = new DeviceAuthService(prisma, crypto, {} as never, {} as never);
-  return { svc, update, prisma };
+  // A Drizzle chain: every call returns itself, awaiting resolves to the row,
+  // and `set` stands in for the update the old double asserted on.
+  const db: any = {
+    select: () => db,
+    from: () => db,
+    where: () => db,
+    limit: () => db,
+    update: () => db,
+    set: update,
+    then: (resolve: (rows: unknown[]) => unknown) =>
+      Promise.resolve(device ? [device] : []).then(resolve),
+  };
+  db.set = jest.fn(() => db);
+  const svc = new DeviceAuthService({ db, d1: {} } as never, crypto, {} as never, {} as never);
+  return { svc, update: db.set, db };
 }
 
 const authorized = (over: Record<string, unknown> = {}) => ({
@@ -58,9 +70,8 @@ describe('DeviceAuthService.validateToken', () => {
   it('does refresh last seen once it has gone stale', async () => {
     const { svc, update } = build(authorized({ lastSeenAt: new Date(Date.now() - 5 * 60_000) }));
     await svc.validateToken(DEVICE_ID, TOKEN);
-    expect(update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ lastSeenAt: expect.any(Date) }) }),
-    );
+    // The columns are passed to set() directly now, not wrapped in a `data` key.
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ lastSeenAt: expect.any(Date) }));
   });
 
   it('refuses a legacy hash instead of trying to verify it', async () => {

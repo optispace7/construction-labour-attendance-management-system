@@ -40,19 +40,33 @@ describe('UsersService.update — email/username clearing', () => {
     username: null,
   };
 
-  let prisma: {
-    user: { findFirst: jest.Mock; update: jest.Mock; updateMany?: jest.Mock };
-    refreshToken: { updateMany: jest.Mock };
-  };
+  let db: any;
   let service: UsersService;
 
   const build = (target: Record<string, unknown>) => {
-    prisma = {
-      user: {
-        findFirst: jest.fn().mockResolvedValue(target),
-        update: jest.fn().mockImplementation(({ data }) => ({ ...target, ...data })),
+    // A Drizzle chain. Reads resolve to the target user (and to no site scopes,
+    // which the service asks for separately); `set` records what an update was
+    // asked to write, which is what these tests are actually about.
+    db = {
+      select: jest.fn(() => db),
+      from: jest.fn(() => db),
+      where: jest.fn(() => db),
+      limit: jest.fn(() => db),
+      orderBy: jest.fn(() => db),
+      update: jest.fn(() => db),
+      insert: jest.fn(() => db),
+      delete: jest.fn(() => db),
+      values: jest.fn(() => db),
+      returning: jest.fn(() => db),
+      onConflictDoNothing: jest.fn(() => db),
+      set: jest.fn(() => db),
+      batch: jest.fn(() => Promise.resolve([])),
+      then: (resolve: (rows: unknown[]) => unknown) => {
+        // Site scopes are read with a different projection; an empty list is
+        // right for these tests and keeps the double from guessing.
+        const askedForScopes = db.from.mock.calls.length > db.select.mock.calls.length;
+        return Promise.resolve(askedForScopes ? [] : [target]).then(resolve);
       },
-      refreshToken: { updateMany: jest.fn() },
     };
     // Identity lives in Better Auth's tables now; the service keeps them in
     // step with every profile change, so the double has to accept those calls.
@@ -62,10 +76,11 @@ describe('UsersService.update — email/username clearing', () => {
       revokeSessions: jest.fn().mockResolvedValue(undefined),
     };
     const audit = { record: jest.fn() };
-    service = new UsersService(prisma as never, identity as never, audit as never);
+    service = new UsersService({ db, d1: {} } as never, identity as never, audit as never);
   };
 
-  const dataSentToPrisma = () => prisma.user.update.mock.calls[0][0].data;
+  /** The columns the update was asked to write. */
+  const dataSentToPrisma = () => db.set.mock.calls[0][0];
 
   it("clears a watchman's email when null is sent", async () => {
     build(watchman);
@@ -91,7 +106,7 @@ describe('UsersService.update — email/username clearing', () => {
       service.update(superAdmin, 'u-1', { username: null } as UpdateUserDto),
     );
     expect(detail).toMatch(/user ID/i);
-    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(db.set).not.toHaveBeenCalled();
   });
 
   it('refuses to strand an email-login role without an email', async () => {
@@ -100,7 +115,7 @@ describe('UsersService.update — email/username clearing', () => {
       service.update(superAdmin, 'u-2', { email: null } as UpdateUserDto),
     );
     expect(detail).toMatch(/Email is required/i);
-    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(db.set).not.toHaveBeenCalled();
   });
 
   it('lets a watchman become an admin when an email is supplied in the same edit', async () => {
@@ -162,7 +177,7 @@ describe('UsersService.update — email/username clearing', () => {
         service.update(admin, 'u-3', { canApplyCorrections: true } as UpdateUserDto),
       );
       expect(detail).toMatch(/Only the Super Admin/i);
-      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(db.set).not.toHaveBeenCalled();
     });
 
     it('leaves the grant alone on an edit that does not mention it', async () => {

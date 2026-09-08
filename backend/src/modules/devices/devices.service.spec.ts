@@ -1,4 +1,6 @@
 import { DevicesService } from './devices.service';
+import { drizzleDouble } from '../../../test/drizzle-double';
+import { devices as devicesTable } from '../../infra/d1/schema.generated';
 
 const superAdmin: any = {
   userId: 'u-super',
@@ -24,74 +26,70 @@ const gateTablet = {
 };
 
 function build(over: any = {}) {
-  const prisma: any = {
-    device: {
-      // `in`, not `??` — a test that passes `device: null` means "not found".
-      findFirst: jest.fn().mockResolvedValue('device' in over ? over.device : gateTablet),
-      update: jest.fn().mockResolvedValue({ ...gateTablet, status: 'REVOKED' }),
-      delete: jest.fn().mockResolvedValue({ id: 'dev-1' }),
-    },
-    attendanceTap: {
-      updateMany: jest.fn().mockResolvedValue({ count: over.taps ?? 1247 }),
-      count: jest.fn().mockResolvedValue(over.taps ?? 1247),
-    },
-  };
+  // `in`, not `??` — a test that passes `device: null` means "not found".
+  const device = 'device' in over ? over.device : gateTablet;
+  const taps = over.taps ?? 1247;
+
+  // The service reads the device with its owner's role joined, so the double
+  // answers with the row shape that join produces.
+  const double = drizzleDouble([], {});
+  const order: string[] = [];
+  double.db.then = jest.fn((resolve: (rows: any[]) => unknown) =>
+    Promise.resolve(device ? [{ device, ownerRole: device.user?.role ?? null }] : []).then(
+      resolve,
+    ),
+  ) as any;
+  double.db.update = jest.fn((t: unknown) => {
+    // Only an update to devices is the pre-delete revoke. The stamp inside the
+    // batch is an update too, on attendance_taps, and counting it here made
+    // the ordering assertion see a revoke that never happened.
+    if (t === devicesTable) order.push('revoke');
+    double.writes.push({ kind: 'update', table: t });
+    return double.db;
+  }) as any;
+  double.db.batch = jest.fn((stmts: unknown[]) => {
+    order.push('stamp', 'delete');
+    return Promise.resolve((stmts ?? []).map(() => ({ meta: { changes: taps } })));
+  }) as any;
+
   const audit: any = { record: jest.fn() };
-  return { svc: new DevicesService(prisma, audit), prisma, audit };
+  const d1: any = { db: double.db, d1: {} };
+  return { svc: new DevicesService(d1, audit), db: double.db, audit, order, double };
 }
 
 describe('DevicesService.remove', () => {
   it('deletes a device that has marked attendance, keeping its name on the punches', async () => {
-    const { svc, prisma } = build();
+    const { svc, db } = build();
 
     const res = await svc.remove(superAdmin, 'dev-1');
 
     expect(res).toEqual({ deleted: true, punchesStamped: 1247 });
-    expect(prisma.attendanceTap.updateMany).toHaveBeenCalledWith({
-      where: { deviceId: 'dev-1' },
-      data: { deviceLabel: 'Gate 1 tablet' },
-    });
-    expect(prisma.device.delete).toHaveBeenCalledWith({ where: { id: 'dev-1' } });
+    // The stamp and the delete go together in one batch — that is the point of
+    // them being a batch, so the assertion is that both were in it.
+    expect(db.batch).toHaveBeenCalledTimes(1);
+    expect(db.set).toHaveBeenCalledWith(expect.objectContaining({ deviceLabel: 'Gate 1 tablet' }));
   });
 
   it('revokes before it deletes, so a failed delete leaves the device locked out', async () => {
-    const { svc, prisma } = build();
-    const order: string[] = [];
-    prisma.device.update.mockImplementation(async () => {
-      order.push('revoke');
-      return { ...gateTablet, status: 'REVOKED' };
-    });
-    prisma.attendanceTap.updateMany.mockImplementation(async () => {
-      order.push('stamp');
-      return { count: 1247 };
-    });
-    prisma.device.delete.mockImplementation(async () => {
-      order.push('delete');
-      return { id: 'dev-1' };
-    });
+    const { svc, order, db } = build();
 
     await svc.remove(superAdmin, 'dev-1');
 
     expect(order).toEqual(['revoke', 'stamp', 'delete']);
-    expect(prisma.device.update).toHaveBeenCalledWith({
-      where: { id: 'dev-1' },
-      data: { status: 'REVOKED' },
-    });
+    expect(db.set).toHaveBeenCalledWith(expect.objectContaining({ status: 'REVOKED' }));
   });
 
   it('does not revoke again when the device was already revoked', async () => {
-    const { svc, prisma } = build({ device: { ...gateTablet, status: 'REVOKED' } });
+    const { svc, order, db } = build({ device: { ...gateTablet, status: 'REVOKED' } });
     await svc.remove(superAdmin, 'dev-1');
-    expect(prisma.device.update).not.toHaveBeenCalled();
-    expect(prisma.device.delete).toHaveBeenCalled();
+    expect(order).not.toContain('revoke');
+    expect(db.batch).toHaveBeenCalled();
   });
 
   it('falls back to the device uid when nobody ever named it', async () => {
-    const { svc, prisma } = build({ device: { ...gateTablet, label: '   ' } });
+    const { svc, db } = build({ device: { ...gateTablet, label: '   ' } });
     await svc.remove(superAdmin, 'dev-1');
-    expect(prisma.attendanceTap.updateMany.mock.calls[0][0].data).toEqual({
-      deviceLabel: 'ABC-123',
-    });
+    expect(db.set).toHaveBeenCalledWith(expect.objectContaining({ deviceLabel: 'ABC-123' }));
   });
 
   it('records what was kept, and how much of it, in the audit trail', async () => {
@@ -106,18 +104,18 @@ describe('DevicesService.remove', () => {
   });
 
   it("still refuses to let a Site Admin delete an Admin's own device", async () => {
-    const { svc, prisma } = build({
+    const { svc, db, order } = build({
       device: { ...gateTablet, user: { role: 'SITE_ADMIN' } },
     });
 
     await expect(svc.remove(siteAdmin, 'dev-1')).rejects.toMatchObject({ status: 403 });
-    expect(prisma.device.delete).not.toHaveBeenCalled();
-    expect(prisma.device.update).not.toHaveBeenCalled();
+    expect(db.batch).not.toHaveBeenCalled();
+    expect(order).toEqual([]);
   });
 
   it('404s for a device belonging to another organization', async () => {
-    const { svc, prisma } = build({ device: null });
+    const { svc, db } = build({ device: null });
     await expect(svc.remove(superAdmin, 'dev-1')).rejects.toMatchObject({ status: 404 });
-    expect(prisma.device.delete).not.toHaveBeenCalled();
+    expect(db.batch).not.toHaveBeenCalled();
   });
 });
