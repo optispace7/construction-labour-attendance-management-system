@@ -1,6 +1,18 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, SafetyMetric } from '@prisma/client';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte, ne, sql, type SQL } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { SafetyMetric } from '../../common/enums';
+import { D1Service } from '../../infra/d1/d1.service';
+import { chunked } from '../../infra/d1/chunked';
+import {
+  attendanceSessions,
+  dailySafetyEntries,
+  dailyWasteEntries,
+  organizations,
+  sites,
+  wasteTypes,
+  workers,
+} from '../../infra/d1/schema.generated';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
@@ -65,16 +77,17 @@ const WINDOW_METRIC_LABELS: Partial<Record<SafetyMetric, string>> = {
 @Injectable()
 export class SafetyService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly audit: AuditService,
   ) {}
 
   /** The org's today, in its own timezone. */
   private async today(user: AuthUser): Promise<Date> {
-    const org = await this.prisma.organization.findUnique({
-      where: { id: user.organizationId },
-      select: { timezone: true },
-    });
+    const [org] = await this.d1.db
+      .select({ timezone: organizations.timezone })
+      .from(organizations)
+      .where(eq(organizations.id, user.organizationId))
+      .limit(1);
     return businessDate(new Date(), org?.timezone ?? 'Asia/Kolkata');
   }
 
@@ -105,10 +118,11 @@ export class SafetyService {
     if (!siteId || siteId === 'all') {
       throw Errors.validation({ message: 'Pick a site before saving safety figures' });
     }
-    const site = await this.prisma.site.findFirst({
-      where: { id: siteId, organizationId: user.organizationId },
-      select: { id: true },
-    });
+    const [site] = await this.d1.db
+      .select({ id: sites.id })
+      .from(sites)
+      .where(and(eq(sites.id, siteId), eq(sites.organizationId, user.organizationId)))
+      .limit(1);
     if (!site) throw Errors.notFound('Site');
     if (user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0) {
       if (!user.siteScopes.includes(siteId)) {
@@ -118,18 +132,32 @@ export class SafetyService {
     return site.id;
   }
 
-  private sessionWhere(user: AuthUser, sites: string[] | null): Prisma.AttendanceSessionWhereInput {
-    return {
-      organizationId: user.organizationId,
-      state: { not: 'VOID' },
+  /**
+   * The shared session filter. Reads the joined worker, so every caller joins
+   * `workers` — they all do.
+   */
+  private sessionWhere(user: AuthUser, siteIds: string[] | null): SQL[] {
+    return [
+      eq(attendanceSessions.organizationId, user.organizationId),
+      ne(attendanceSessions.state, 'VOID'),
       // Everybody who works the site, labour and staff alike: a supervisor
       // standing in the same hazard is a man-day on the safety board and earns
       // the same safe hours. A visitor walking through is not, and is the one
       // category left out — which is why this is a list rather than "not
       // VISITOR", so a category added later has to be thought about.
-      worker: { category: { in: SAFETY_MANPOWER_CATEGORIES } },
-      ...(sites ? { siteId: { in: sites } } : {}),
-    };
+      inArray(workers.category, [...SAFETY_MANPOWER_CATEGORIES]),
+      ...(siteIds ? [inArray(attendanceSessions.siteId, siteIds)] : []),
+    ];
+  }
+
+  /** How many manpower sessions match, for a window of work dates. */
+  private async countSessions(where: SQL[], extra: SQL[]): Promise<number> {
+    const [row] = await this.d1.db
+      .select({ count: sql<number>`count(*)`.as('count') })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .where(and(...where, ...extra));
+    return Number(row?.count ?? 0);
   }
 
   /**
@@ -142,13 +170,14 @@ export class SafetyService {
    * differently — the sheet is always one day, the board is whatever window the
    * reader picked.
    */
-  private async manpowerCounts(user: AuthUser, sites: string[] | null, start: Date, end: Date) {
-    const where = this.sessionWhere(user, sites);
+  private async manpowerCounts(user: AuthUser, siteIds: string[] | null, start: Date, end: Date) {
+    const where = this.sessionWhere(user, siteIds);
     const [inWindow, toDate] = await Promise.all([
-      this.prisma.attendanceSession.count({
-        where: { ...where, workDate: { gte: start, lte: end } },
-      }),
-      this.prisma.attendanceSession.count({ where: { ...where, workDate: { lte: end } } }),
+      this.countSessions(where, [
+        gte(attendanceSessions.workDate, iso(start)),
+        lte(attendanceSessions.workDate, iso(end)),
+      ]),
+      this.countSessions(where, [lte(attendanceSessions.workDate, iso(end))]),
     ]);
     return { inWindow, toDate };
   }
@@ -160,8 +189,8 @@ export class SafetyService {
    * Safe man-hours does NOT reset on a lost-time injury — the client asked for
    * the running total, not the since-last-incident streak.
    */
-  private async automated(user: AuthUser, sites: string[] | null, date: Date) {
-    const { inWindow, toDate } = await this.manpowerCounts(user, sites, date, date);
+  private async automated(user: AuthUser, siteIds: string[] | null, date: Date) {
+    const { inWindow, toDate } = await this.manpowerCounts(user, siteIds, date, date);
     return {
       DAILY_MANPOWER: inWindow,
       TOTAL_MANPOWER: toDate,
@@ -179,22 +208,34 @@ export class SafetyService {
    * which the stats page treats differently from a recorded zero.
    */
   async daily(user: AuthUser, opts: { date?: string; siteId?: string }) {
-    const sites = this.readScope(user, opts.siteId);
+    const siteIds = this.readScope(user, opts.siteId);
     const date = opts.date ? midnight(opts.date) : await this.today(user);
     const single = opts.siteId && opts.siteId !== 'all' ? opts.siteId : null;
 
     const [rows, derived, wasteTypes, waste] = await Promise.all([
-      this.prisma.dailySafetyEntry.findMany({
-        where: {
-          organizationId: user.organizationId,
-          entryDate: date,
-          ...(sites ? { siteId: { in: sites } } : {}),
-        },
-        include: { site: { select: { name: true } } },
-      }),
-      this.automated(user, sites, date),
+      this.d1.db
+        .select({ entry: dailySafetyEntries, siteName: sites.name })
+        .from(dailySafetyEntries)
+        .innerJoin(sites, eq(sites.id, dailySafetyEntries.siteId))
+        .where(
+          and(
+            eq(dailySafetyEntries.organizationId, user.organizationId),
+            eq(dailySafetyEntries.entryDate, iso(date)),
+            ...(siteIds ? [inArray(dailySafetyEntries.siteId, siteIds)] : []),
+          ),
+        )
+        // Text on SQLite where Prisma had an enum; the values stored are the
+        // enum's own, so the narrowing restates rather than changes anything.
+        .then((rows) =>
+          rows.map((r) => ({
+            ...r.entry,
+            metric: r.entry.metric as SafetyMetric,
+            site: { name: r.siteName },
+          })),
+        ),
+      this.automated(user, siteIds, date),
       this.wasteTypes(user),
-      this.wasteFor(user, sites, date),
+      this.wasteFor(user, siteIds, date),
     ]);
 
     // Across several sites a typed metric is the sum of them. A comment belongs
@@ -253,24 +294,39 @@ export class SafetyService {
    * organizations that existed when it ran.
    */
   async wasteTypes(user: AuthUser) {
-    const existing = await this.prisma.wasteType.count({
-      where: { organizationId: user.organizationId },
-    });
-    if (existing === 0) {
-      await this.prisma.wasteType.createMany({
-        data: DEFAULT_WASTE_TYPES.map((name, i) => ({
-          organizationId: user.organizationId,
-          name,
-          sortOrder: i + 1,
-        })),
-        skipDuplicates: true,
-      });
+    const [{ count: existing } = { count: 0 }] = await this.d1.db
+      .select({ count: sql<number>`count(*)`.as('count') })
+      .from(wasteTypes)
+      .where(eq(wasteTypes.organizationId, user.organizationId));
+    if (Number(existing) === 0) {
+      const now = new Date();
+      await this.d1.db
+        .insert(wasteTypes)
+        .values(
+          DEFAULT_WASTE_TYPES.map((name, i) => ({
+            id: randomUUID(),
+            organizationId: user.organizationId,
+            name,
+            sortOrder: i + 1,
+            isActive: true,
+            createdAt: now,
+            updatedAt: now,
+          })),
+        )
+        // skipDuplicates, spelled out: two requests arriving together must not
+        // seed the list twice.
+        .onConflictDoNothing();
     }
-    return this.prisma.wasteType.findMany({
-      where: { organizationId: user.organizationId },
-      orderBy: [{ isActive: 'desc' }, { sortOrder: 'asc' }, { name: 'asc' }],
-      select: { id: true, name: true, sortOrder: true, isActive: true },
-    });
+    return this.d1.db
+      .select({
+        id: wasteTypes.id,
+        name: wasteTypes.name,
+        sortOrder: wasteTypes.sortOrder,
+        isActive: wasteTypes.isActive,
+      })
+      .from(wasteTypes)
+      .where(eq(wasteTypes.organizationId, user.organizationId))
+      .orderBy(desc(wasteTypes.isActive), asc(wasteTypes.sortOrder), asc(wasteTypes.name));
   }
 
   private cleanName(name: string): string {
@@ -281,14 +337,17 @@ export class SafetyService {
 
   /** A name already in use, whether or not that type is still active. */
   private async assertNameFree(user: AuthUser, name: string, exceptId?: string) {
-    const clash = await this.prisma.wasteType.findFirst({
-      where: {
-        organizationId: user.organizationId,
-        name,
-        ...(exceptId ? { id: { not: exceptId } } : {}),
-      },
-      select: { isActive: true },
-    });
+    const [clash] = await this.d1.db
+      .select({ isActive: wasteTypes.isActive })
+      .from(wasteTypes)
+      .where(
+        and(
+          eq(wasteTypes.organizationId, user.organizationId),
+          eq(wasteTypes.name, name),
+          ...(exceptId ? [ne(wasteTypes.id, exceptId)] : []),
+        ),
+      )
+      .limit(1);
     if (clash) {
       throw Errors.validation({
         message: clash.isActive
@@ -303,18 +362,28 @@ export class SafetyService {
     await this.assertNameFree(user, name);
     // Last in the dropdown, so an addition never reshuffles the list somebody
     // has learned the shape of.
-    const last = await this.prisma.wasteType.aggregate({
-      where: { organizationId: user.organizationId },
-      _max: { sortOrder: true },
-    });
-    const created = await this.prisma.wasteType.create({
-      data: {
+    const [last] = await this.d1.db
+      .select({ maxSort: sql<number>`coalesce(max(${wasteTypes.sortOrder}), 0)`.as('maxSort') })
+      .from(wasteTypes)
+      .where(eq(wasteTypes.organizationId, user.organizationId));
+    const now = new Date();
+    const [created] = await this.d1.db
+      .insert(wasteTypes)
+      .values({
+        id: randomUUID(),
         organizationId: user.organizationId,
         name,
-        sortOrder: (last._max.sortOrder ?? 0) + 1,
-      },
-      select: { id: true, name: true, sortOrder: true, isActive: true },
-    });
+        sortOrder: Number(last?.maxSort ?? 0) + 1,
+        isActive: true,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({
+        id: wasteTypes.id,
+        name: wasteTypes.name,
+        sortOrder: wasteTypes.sortOrder,
+        isActive: wasteTypes.isActive,
+      });
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -329,9 +398,11 @@ export class SafetyService {
   }
 
   private async ownWasteType(user: AuthUser, id: string) {
-    const type = await this.prisma.wasteType.findFirst({
-      where: { id, organizationId: user.organizationId },
-    });
+    const [type] = await this.d1.db
+      .select()
+      .from(wasteTypes)
+      .where(and(eq(wasteTypes.id, id), eq(wasteTypes.organizationId, user.organizationId)))
+      .limit(1);
     if (!type) throw Errors.notFound('Waste type');
     return type;
   }
@@ -346,11 +417,16 @@ export class SafetyService {
     const before = await this.ownWasteType(user, id);
     const name = this.cleanName(dto.name);
     if (name !== before.name) await this.assertNameFree(user, name, id);
-    const updated = await this.prisma.wasteType.update({
-      where: { id },
-      data: { name, isActive: true },
-      select: { id: true, name: true, sortOrder: true, isActive: true },
-    });
+    const [updated] = await this.d1.db
+      .update(wasteTypes)
+      .set({ name, isActive: true, updatedAt: new Date() })
+      .where(eq(wasteTypes.id, id))
+      .returning({
+        id: wasteTypes.id,
+        name: wasteTypes.name,
+        sortOrder: wasteTypes.sortOrder,
+        isActive: wasteTypes.isActive,
+      });
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -376,12 +452,19 @@ export class SafetyService {
    */
   async deleteWasteType(user: AuthUser, id: string) {
     const type = await this.ownWasteType(user, id);
-    const used = await this.prisma.dailyWasteEntry.count({ where: { wasteTypeId: id } });
+    const [usedRow] = await this.d1.db
+      .select({ count: sql<number>`count(*)`.as('count') })
+      .from(dailyWasteEntries)
+      .where(eq(dailyWasteEntries.wasteTypeId, id));
+    const used = Number(usedRow?.count ?? 0);
 
     if (used === 0) {
-      await this.prisma.wasteType.delete({ where: { id } });
+      await this.d1.db.delete(wasteTypes).where(eq(wasteTypes.id, id));
     } else {
-      await this.prisma.wasteType.update({ where: { id }, data: { isActive: false } });
+      await this.d1.db
+        .update(wasteTypes)
+        .set({ isActive: false, updatedAt: new Date() })
+        .where(eq(wasteTypes.id, id));
     }
 
     await this.audit.record({
@@ -403,17 +486,22 @@ export class SafetyService {
   // -------------------------------------------------------------------------
 
   /** The day's breakdown, summed across sites when several are in view. */
-  private async wasteFor(user: AuthUser, sites: string[] | null, date: Date) {
-    const rows = await this.prisma.dailyWasteEntry.groupBy({
-      by: ['wasteTypeId'],
-      where: {
-        organizationId: user.organizationId,
-        entryDate: date,
-        ...(sites ? { siteId: { in: sites } } : {}),
-      },
-      _sum: { value: true },
-    });
-    return rows.map((r) => ({ wasteTypeId: r.wasteTypeId, value: r._sum.value ?? 0 }));
+  private async wasteFor(user: AuthUser, siteIds: string[] | null, date: Date) {
+    const rows = await this.d1.db
+      .select({
+        wasteTypeId: dailyWasteEntries.wasteTypeId,
+        value: sql<number>`sum(${dailyWasteEntries.value})`.as('value'),
+      })
+      .from(dailyWasteEntries)
+      .where(
+        and(
+          eq(dailyWasteEntries.organizationId, user.organizationId),
+          eq(dailyWasteEntries.entryDate, iso(date)),
+          ...(siteIds ? [inArray(dailyWasteEntries.siteId, siteIds)] : []),
+        ),
+      )
+      .groupBy(dailyWasteEntries.wasteTypeId);
+    return rows.map((r) => ({ wasteTypeId: r.wasteTypeId, value: Number(r.value ?? 0) }));
   }
 
   /**
@@ -432,42 +520,63 @@ export class SafetyService {
   ) {
     const ids = [...new Set(items.map((i) => i.wasteTypeId))];
     if (ids.length) {
-      const known = await this.prisma.wasteType.count({
-        where: { id: { in: ids }, organizationId: user.organizationId },
-      });
-      if (known !== ids.length) throw Errors.validation({ message: 'Unknown waste type' });
+      const [knownRow] = await this.d1.db
+        .select({ count: sql<number>`count(*)`.as('count') })
+        .from(wasteTypes)
+        .where(
+          and(inArray(wasteTypes.id, ids), eq(wasteTypes.organizationId, user.organizationId)),
+        );
+      if (Number(knownRow?.count ?? 0) !== ids.length) {
+        throw Errors.validation({ message: 'Unknown waste type' });
+      }
     }
 
     const keep = items.filter((i) => i.value != null) as { wasteTypeId: string; value: number }[];
     const drop = items.filter((i) => i.value == null).map((i) => i.wasteTypeId);
 
-    await this.prisma.$transaction([
+    const now = new Date();
+    const day = iso(date);
+    await this.d1.db.batch([
       // A line cleared on the form is a row deleted, not a zero: the sheet
       // distinguishes "none went out" from "nobody said".
       ...(drop.length
         ? [
-            this.prisma.dailyWasteEntry.deleteMany({
-              where: { siteId, entryDate: date, wasteTypeId: { in: drop } },
-            }),
+            this.d1.db
+              .delete(dailyWasteEntries)
+              .where(
+                and(
+                  eq(dailyWasteEntries.siteId, siteId),
+                  eq(dailyWasteEntries.entryDate, day),
+                  inArray(dailyWasteEntries.wasteTypeId, drop),
+                ),
+              ),
           ]
         : []),
       ...keep.map((i) =>
-        this.prisma.dailyWasteEntry.upsert({
-          where: {
-            siteId_entryDate_wasteTypeId: { siteId, entryDate: date, wasteTypeId: i.wasteTypeId },
-          },
-          create: {
+        this.d1.db
+          .insert(dailyWasteEntries)
+          .values({
+            id: randomUUID(),
             organizationId: user.organizationId,
             siteId,
-            entryDate: date,
+            entryDate: day,
             wasteTypeId: i.wasteTypeId,
             value: i.value,
             recordedById: user.userId,
-          },
-          update: { value: i.value, recordedById: user.userId },
-        }),
+            createdAt: now,
+            updatedAt: now,
+          })
+          // Prisma's upsert, on the same key its compound unique named.
+          .onConflictDoUpdate({
+            target: [
+              dailyWasteEntries.siteId,
+              dailyWasteEntries.entryDate,
+              dailyWasteEntries.wasteTypeId,
+            ],
+            set: { value: i.value, recordedById: user.userId, updatedAt: now },
+          }),
       ),
-    ]);
+    ] as never);
 
     await this.syncWasteTotal(user, siteId, date, comment);
   }
@@ -479,15 +588,19 @@ export class SafetyService {
     date: Date,
     comment?: string | null,
   ) {
-    const sum = await this.prisma.dailyWasteEntry.aggregate({
-      where: { siteId, entryDate: date },
-      _sum: { value: true },
-      _count: true,
-    });
+    const [sum] = await this.d1.db
+      .select({
+        total: sql<number>`sum(${dailyWasteEntries.value})`.as('total'),
+        rows: sql<number>`count(*)`.as('rows'),
+      })
+      .from(dailyWasteEntries)
+      .where(
+        and(eq(dailyWasteEntries.siteId, siteId), eq(dailyWasteEntries.entryDate, iso(date))),
+      );
     // No rows at all means nobody has said anything about waste today, which is
     // a blank rather than a zero — the same distinction the rest of the sheet
     // keeps. The comment on the row survives either way.
-    const total = sum._count === 0 ? null : (sum._sum.value ?? 0);
+    const total = Number(sum?.rows ?? 0) === 0 ? null : Number(sum?.total ?? 0);
     await this.upsertOne(user, siteId, date, {
       metric: WASTE_METRIC,
       value: total,
@@ -497,10 +610,17 @@ export class SafetyService {
 
   /** The comment already on the WASTE_DISPOSAL row, which a resync must keep. */
   private async wasteComment(siteId: string, date: Date): Promise<string | null> {
-    const row = await this.prisma.dailySafetyEntry.findUnique({
-      where: { siteId_entryDate_metric: { siteId, entryDate: date, metric: WASTE_METRIC } },
-      select: { comment: true },
-    });
+    const [row] = await this.d1.db
+      .select({ comment: dailySafetyEntries.comment })
+      .from(dailySafetyEntries)
+      .where(
+        and(
+          eq(dailySafetyEntries.siteId, siteId),
+          eq(dailySafetyEntries.entryDate, iso(date)),
+          eq(dailySafetyEntries.metric, WASTE_METRIC),
+        ),
+      )
+      .limit(1);
     return row?.comment ?? null;
   }
 
@@ -522,7 +642,7 @@ export class SafetyService {
           comment: item.comment ?? null,
         }),
       );
-    await this.prisma.$transaction(writes);
+    if (writes.length) await this.d1.db.batch(writes as never);
 
     if (dto.waste) {
       // The comment on the waste row is still the sheet's to set; only its
@@ -558,19 +678,35 @@ export class SafetyService {
     date: Date,
     data: { metric: SafetyMetric; value: number | null; comment: string | null },
   ) {
-    return this.prisma.dailySafetyEntry.upsert({
-      where: { siteId_entryDate_metric: { siteId, entryDate: date, metric: data.metric } },
-      create: {
+    const now = new Date();
+    return this.d1.db
+      .insert(dailySafetyEntries)
+      .values({
+        id: randomUUID(),
         organizationId: user.organizationId,
         siteId,
-        entryDate: date,
+        entryDate: iso(date),
         metric: data.metric,
-        value: data.value,
-        comment: data.comment,
+        value: data.value ?? null,
+        comment: data.comment ?? null,
         recordedById: user.userId,
-      },
-      update: { value: data.value, comment: data.comment, recordedById: user.userId },
-    });
+        createdAt: now,
+        updatedAt: now,
+      })
+      // Prisma's upsert, on the same key its compound unique named.
+      .onConflictDoUpdate({
+        target: [
+          dailySafetyEntries.siteId,
+          dailySafetyEntries.entryDate,
+          dailySafetyEntries.metric,
+        ],
+        set: {
+          value: data.value ?? null,
+          comment: data.comment ?? null,
+          recordedById: user.userId,
+          updatedAt: now,
+        },
+      });
   }
 
   /** Edit a single item — the per-row Edit action. */
@@ -611,17 +747,32 @@ export class SafetyService {
   async deleteMetric(user: AuthUser, opts: { siteId: string; date: string; metric: SafetyMetric }) {
     const siteId = await this.writeSite(user, opts.siteId);
     const date = midnight(opts.date);
-    const existing = await this.prisma.dailySafetyEntry.findUnique({
-      where: { siteId_entryDate_metric: { siteId, entryDate: date, metric: opts.metric } },
-    });
+    const [existing] = await this.d1.db
+      .select()
+      .from(dailySafetyEntries)
+      .where(
+        and(
+          eq(dailySafetyEntries.siteId, siteId),
+          eq(dailySafetyEntries.entryDate, iso(date)),
+          eq(dailySafetyEntries.metric, opts.metric),
+        ),
+      )
+      .limit(1);
     if (!existing) throw Errors.notFound('Safety entry');
 
     // Clearing the waste figure means clearing what it is the total of.
     // Leaving the breakdown would put the number straight back on the next save.
     if (opts.metric === WASTE_METRIC) {
-      await this.prisma.dailyWasteEntry.deleteMany({ where: { siteId, entryDate: date } });
+      await this.d1.db
+        .delete(dailyWasteEntries)
+        .where(
+          and(
+            eq(dailyWasteEntries.siteId, siteId),
+            eq(dailyWasteEntries.entryDate, iso(date)),
+          ),
+        );
     }
-    await this.prisma.dailySafetyEntry.delete({ where: { id: existing.id } });
+    await this.d1.db.delete(dailySafetyEntries).where(eq(dailySafetyEntries.id, existing.id));
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -647,7 +798,7 @@ export class SafetyService {
   ) {
     const spec = specFor(opts.metric);
     if (!spec) throw Errors.validation({ message: 'Unknown safety metric' });
-    const sites = this.readScope(user, opts.siteId);
+    const siteIds = this.readScope(user, opts.siteId);
     const end = opts.to ? midnight(opts.to) : await this.today(user);
     const start = opts.from ? midnight(opts.from) : new Date(end.getTime() - 29 * DAY_MS);
     if (start > end) throw Errors.validation({ message: 'The range starts after it ends' });
@@ -656,23 +807,37 @@ export class SafetyService {
     for (let t = start.getTime(); t <= end.getTime(); t += DAY_MS) days.push(iso(new Date(t)));
 
     if (spec.kind === 'AUTOMATED') {
-      const sessions = await this.prisma.attendanceSession.findMany({
-        where: { ...this.sessionWhere(user, sites), workDate: { gte: start, lte: end } },
-        select: { workDate: true },
-      });
+      // Counted in SQL rather than by reading a row per session: a year of a
+      // real site is tens of thousands of rows, and only the daily totals are
+      // wanted.
+      const sessions = await this.d1.db
+        .select({
+          workDate: attendanceSessions.workDate,
+          count: sql<number>`count(*)`.as('count'),
+        })
+        .from(attendanceSessions)
+        .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+        .where(
+          and(
+            ...this.sessionWhere(user, siteIds),
+            gte(attendanceSessions.workDate, iso(start)),
+            lte(attendanceSessions.workDate, iso(end)),
+          ),
+        )
+        .groupBy(attendanceSessions.workDate);
       const perDay = new Map<string, number>();
-      for (const s of sessions) perDay.set(iso(s.workDate), (perDay.get(iso(s.workDate)) ?? 0) + 1);
+      for (const row of sessions) perDay.set(row.workDate, Number(row.count));
       // Only TOTAL_MANPOWER still runs a total forward; the other two are
       // per-day figures and would be nonsense carried over from before the
       // window opened.
       const priorTotal =
         spec.metric === 'TOTAL_MANPOWER'
-          ? await this.prisma.attendanceSession.count({
-              where: { ...this.sessionWhere(user, sites), workDate: { lt: start } },
-            })
+          ? await this.countSessions(this.sessionWhere(user, siteIds), [
+              lt(attendanceSessions.workDate, iso(start)),
+            ])
           : 0;
       let running = priorTotal;
-      const comments = await this.commentsFor(user, opts.metric, sites, start, end);
+      const comments = await this.commentsFor(user, opts.metric, siteIds, start, end);
       return {
         metric: opts.metric,
         label: spec.label,
@@ -704,20 +869,25 @@ export class SafetyService {
       };
     }
 
-    const rows = await this.prisma.dailySafetyEntry.findMany({
-      where: {
-        organizationId: user.organizationId,
-        metric: opts.metric,
-        entryDate: { gte: start, lte: end },
-        ...(sites ? { siteId: { in: sites } } : {}),
-      },
-      orderBy: { entryDate: 'asc' },
-      include: { site: { select: { name: true } } },
-    });
+    const joined = await this.d1.db
+      .select({ entry: dailySafetyEntries, siteName: sites.name })
+      .from(dailySafetyEntries)
+      .innerJoin(sites, eq(sites.id, dailySafetyEntries.siteId))
+      .where(
+        and(
+          eq(dailySafetyEntries.organizationId, user.organizationId),
+          eq(dailySafetyEntries.metric, opts.metric),
+          gte(dailySafetyEntries.entryDate, iso(start)),
+          lte(dailySafetyEntries.entryDate, iso(end)),
+          ...(siteIds ? [inArray(dailySafetyEntries.siteId, siteIds)] : []),
+        ),
+      )
+      .orderBy(asc(dailySafetyEntries.entryDate));
+    const rows = joined.map((r) => ({ ...r.entry, site: { name: r.siteName } }));
     const single = opts.siteId && opts.siteId !== 'all';
     const perDay = new Map<string, { value: number | null; comment: string | null; id: string }>();
     for (const r of rows) {
-      const key = iso(r.entryDate);
+      const key = r.entryDate;
       const prev = perDay.get(key);
       perDay.set(key, {
         value: (prev?.value ?? 0) + (r.value ?? 0),
@@ -742,7 +912,7 @@ export class SafetyService {
      */
     const breakdowns =
       opts.metric === WASTE_METRIC
-        ? await this.wasteBreakdownByDay(user, sites, start, end)
+        ? await this.wasteBreakdownByDay(user, siteIds, start, end)
         : new Map<string, { label: string; value: number }[]>();
 
     return {
@@ -782,38 +952,46 @@ export class SafetyService {
    */
   private async wasteBreakdownByDay(
     user: AuthUser,
-    sites: string[] | null,
+    siteIds: string[] | null,
     start: Date,
     end: Date,
   ): Promise<Map<string, { label: string; value: number }[]>> {
-    const grouped = await this.prisma.dailyWasteEntry.groupBy({
-      by: ['entryDate', 'wasteTypeId'],
-      where: {
-        organizationId: user.organizationId,
-        entryDate: { gte: start, lte: end },
-        ...(sites ? { siteId: { in: sites } } : {}),
-      },
-      _sum: { value: true },
-    });
+    const grouped = await this.d1.db
+      .select({
+        entryDate: dailyWasteEntries.entryDate,
+        wasteTypeId: dailyWasteEntries.wasteTypeId,
+        value: sql<number>`sum(${dailyWasteEntries.value})`.as('value'),
+      })
+      .from(dailyWasteEntries)
+      .where(
+        and(
+          eq(dailyWasteEntries.organizationId, user.organizationId),
+          gte(dailyWasteEntries.entryDate, iso(start)),
+          lte(dailyWasteEntries.entryDate, iso(end)),
+          ...(siteIds ? [inArray(dailyWasteEntries.siteId, siteIds)] : []),
+        ),
+      )
+      .groupBy(dailyWasteEntries.entryDate, dailyWasteEntries.wasteTypeId);
     if (grouped.length === 0) return new Map();
 
-    const types = await this.prisma.wasteType.findMany({
-      where: {
-        id: { in: [...new Set(grouped.map((g) => g.wasteTypeId))] },
-        organizationId: user.organizationId,
-      },
-      select: { id: true, name: true, sortOrder: true },
-    });
+    const types = await chunked([...new Set(grouped.map((g) => g.wasteTypeId))], (batch) =>
+      this.d1.db
+        .select({ id: wasteTypes.id, name: wasteTypes.name, sortOrder: wasteTypes.sortOrder })
+        .from(wasteTypes)
+        .where(
+          and(inArray(wasteTypes.id, batch), eq(wasteTypes.organizationId, user.organizationId)),
+        ),
+    );
     const byId = new Map(types.map((t) => [t.id, t]));
 
     const out = new Map<string, { label: string; value: number; sortOrder: number }[]>();
     for (const g of grouped) {
-      const key = iso(g.entryDate);
+      const key = g.entryDate;
       const type = byId.get(g.wasteTypeId);
       const list = out.get(key) ?? [];
       list.push({
         label: type?.name ?? 'Unknown type',
-        value: g._sum.value ?? 0,
+        value: Number(g.value ?? 0),
         sortOrder: type?.sortOrder ?? 0,
       });
       out.set(key, list);
@@ -832,26 +1010,34 @@ export class SafetyService {
   private async commentsFor(
     user: AuthUser,
     metric: SafetyMetric,
-    sites: string[] | null,
+    siteIds: string[] | null,
     start: Date,
     end: Date,
   ) {
-    const rows = await this.prisma.dailySafetyEntry.findMany({
-      where: {
-        organizationId: user.organizationId,
-        metric,
-        entryDate: { gte: start, lte: end },
-        comment: { not: null },
-        ...(sites ? { siteId: { in: sites } } : {}),
-      },
-      select: { entryDate: true, comment: true, site: { select: { name: true } } },
-    });
+    const rows = await this.d1.db
+      .select({
+        entryDate: dailySafetyEntries.entryDate,
+        comment: dailySafetyEntries.comment,
+        siteName: sites.name,
+      })
+      .from(dailySafetyEntries)
+      .innerJoin(sites, eq(sites.id, dailySafetyEntries.siteId))
+      .where(
+        and(
+          eq(dailySafetyEntries.organizationId, user.organizationId),
+          eq(dailySafetyEntries.metric, metric),
+          gte(dailySafetyEntries.entryDate, iso(start)),
+          lte(dailySafetyEntries.entryDate, iso(end)),
+          isNotNull(dailySafetyEntries.comment),
+          ...(siteIds ? [inArray(dailySafetyEntries.siteId, siteIds)] : []),
+        ),
+      );
     const out = new Map<string, string | null>();
     for (const r of rows) {
-      const key = iso(r.entryDate);
+      const key = r.entryDate;
       // Two sites commenting on the same day used to leave whichever row came
       // back last; both are kept and named instead.
-      out.set(key, joinSiteComments(out.get(key), r.site.name, r.comment));
+      out.set(key, joinSiteComments(out.get(key), r.siteName, r.comment));
     }
     return out;
   }
@@ -866,21 +1052,29 @@ export class SafetyService {
    * cumulative arms need the count from before the window opened, or every
    * period would look like it started from nothing.
    */
-  private async manpowerSeries(user: AuthUser, sites: string[] | null, start: Date, end: Date) {
-    const where = this.sessionWhere(user, sites);
+  private async manpowerSeries(user: AuthUser, siteIds: string[] | null, start: Date, end: Date) {
+    const where = this.sessionWhere(user, siteIds);
     const [sessions, priorTotal] = await Promise.all([
-      this.prisma.attendanceSession.findMany({
-        where: { ...where, workDate: { gte: start, lte: end } },
-        select: { workDate: true },
-      }),
-      this.prisma.attendanceSession.count({ where: { ...where, workDate: { lt: start } } }),
+      this.d1.db
+        .select({
+          workDate: attendanceSessions.workDate,
+          count: sql<number>`count(*)`.as('count'),
+        })
+        .from(attendanceSessions)
+        .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+        .where(
+          and(
+            ...where,
+            gte(attendanceSessions.workDate, iso(start)),
+            lte(attendanceSessions.workDate, iso(end)),
+          ),
+        )
+        .groupBy(attendanceSessions.workDate),
+      this.countSessions(where, [lt(attendanceSessions.workDate, iso(start))]),
     ]);
 
     const perDay = new Map<string, number>();
-    for (const s of sessions) {
-      const k = iso(s.workDate);
-      perDay.set(k, (perDay.get(k) ?? 0) + 1);
-    }
+    for (const row of sessions) perDay.set(row.workDate, Number(row.count));
 
     const days: string[] = [];
     for (let t = start.getTime(); t <= end.getTime(); t += DAY_MS) days.push(iso(new Date(t)));
@@ -906,18 +1100,24 @@ export class SafetyService {
   }
 
   /** Sum of every typed metric over a date window. */
-  private async totalsOver(user: AuthUser, sites: string[] | null, start: Date, end: Date) {
-    const grouped = await this.prisma.dailySafetyEntry.groupBy({
-      by: ['metric'],
-      where: {
-        organizationId: user.organizationId,
-        entryDate: { gte: start, lte: end },
-        ...(sites ? { siteId: { in: sites } } : {}),
-      },
-      _sum: { value: true },
-    });
+  private async totalsOver(user: AuthUser, siteIds: string[] | null, start: Date, end: Date) {
+    const grouped = await this.d1.db
+      .select({
+        metric: dailySafetyEntries.metric,
+        total: sql<number>`sum(${dailySafetyEntries.value})`.as('total'),
+      })
+      .from(dailySafetyEntries)
+      .where(
+        and(
+          eq(dailySafetyEntries.organizationId, user.organizationId),
+          gte(dailySafetyEntries.entryDate, iso(start)),
+          lte(dailySafetyEntries.entryDate, iso(end)),
+          ...(siteIds ? [inArray(dailySafetyEntries.siteId, siteIds)] : []),
+        ),
+      )
+      .groupBy(dailySafetyEntries.metric);
     const out: Partial<Record<SafetyMetric, number>> = {};
-    for (const g of grouped) out[g.metric] = g._sum.value ?? 0;
+    for (const g of grouped) out[g.metric as SafetyMetric] = Number(g.total ?? 0);
     return out;
   }
 
@@ -977,7 +1177,7 @@ export class SafetyService {
     opts: { period?: SafetyPeriod; date?: string; siteId?: string; from?: string; to?: string },
   ) {
     const period = opts.period ?? 'daily';
-    const sites = this.readScope(user, opts.siteId);
+    const siteIds = this.readScope(user, opts.siteId);
 
     let start: Date;
     let end: Date;
@@ -1005,20 +1205,22 @@ export class SafetyService {
     const trendStart = period === 'daily' ? new Date(anchor.getTime() - 6 * DAY_MS) : start;
 
     const [counts, totals, trend, manpower, siteName] = await Promise.all([
-      this.manpowerCounts(user, sites, start, end),
-      this.totalsOver(user, sites, start, end),
-      this.trendOver(user, sites, trendStart, end),
+      this.manpowerCounts(user, siteIds, start, end),
+      this.totalsOver(user, siteIds, start, end),
+      this.trendOver(user, siteIds, trendStart, end),
       // The selected window, on the same run-up rule as the trend: a daily
       // report gets six days of context so the sparklines are lines rather than
       // a single dot, and every other period plots exactly what was chosen.
-      this.manpowerSeries(user, sites, trendStart, end),
+      this.manpowerSeries(user, siteIds, trendStart, end),
       opts.siteId && opts.siteId !== 'all'
-        ? this.prisma.site
-            .findFirst({
-              where: { id: opts.siteId, organizationId: user.organizationId },
-              select: { name: true },
-            })
-            .then((s) => s?.name ?? null)
+        ? this.d1.db
+            .select({ name: sites.name })
+            .from(sites)
+            .where(
+              and(eq(sites.id, opts.siteId), eq(sites.organizationId, user.organizationId)),
+            )
+            .limit(1)
+            .then((rows) => rows[0]?.name ?? null)
         : Promise.resolve(null),
     ]);
 
@@ -1028,9 +1230,9 @@ export class SafetyService {
       safetyWindow(p, anchor),
     );
     const [dTot, wTot, mTot] = await Promise.all([
-      this.totalsOver(user, sites, dailyW.start, dailyW.end),
-      this.totalsOver(user, sites, weeklyW.start, weeklyW.end),
-      this.totalsOver(user, sites, monthlyW.start, monthlyW.end),
+      this.totalsOver(user, siteIds, dailyW.start, dailyW.end),
+      this.totalsOver(user, siteIds, weeklyW.start, weeklyW.end),
+      this.totalsOver(user, siteIds, monthlyW.start, monthlyW.end),
     ]);
 
     const n = (t: Partial<Record<SafetyMetric, number>>, m: SafetyMetric) => t[m] ?? 0;
@@ -1160,17 +1362,24 @@ export class SafetyService {
    * line does not silently join across a gap and imply a level that was never
    * entered.
    */
-  private async trendOver(user: AuthUser, sites: string[] | null, start: Date, end: Date) {
+  private async trendOver(user: AuthUser, siteIds: string[] | null, start: Date, end: Date) {
     const metrics: SafetyMetric[] = ['LABOUR_INDUCTION', 'TOOLBOX_TALK', 'VISITOR_INDUCTION'];
-    const rows = await this.prisma.dailySafetyEntry.findMany({
-      where: {
-        organizationId: user.organizationId,
-        metric: { in: metrics },
-        entryDate: { gte: start, lte: end },
-        ...(sites ? { siteId: { in: sites } } : {}),
-      },
-      select: { entryDate: true, metric: true, value: true },
-    });
+    const rows = await this.d1.db
+      .select({
+        entryDate: dailySafetyEntries.entryDate,
+        metric: dailySafetyEntries.metric,
+        value: dailySafetyEntries.value,
+      })
+      .from(dailySafetyEntries)
+      .where(
+        and(
+          eq(dailySafetyEntries.organizationId, user.organizationId),
+          inArray(dailySafetyEntries.metric, [...metrics]),
+          gte(dailySafetyEntries.entryDate, iso(start)),
+          lte(dailySafetyEntries.entryDate, iso(end)),
+          ...(siteIds ? [inArray(dailySafetyEntries.siteId, siteIds)] : []),
+        ),
+      );
 
     const days: string[] = [];
     for (let t = start.getTime(); t <= end.getTime(); t += DAY_MS) days.push(iso(new Date(t)));
@@ -1181,7 +1390,7 @@ export class SafetyService {
       values: new Array<number>(days.length).fill(0),
     }));
     for (const r of rows) {
-      const i = index.get(iso(r.entryDate));
+      const i = index.get(r.entryDate);
       const s = series.find((x) => x.metric === r.metric);
       if (i !== undefined && s) s.values[i] += r.value ?? 0;
     }
@@ -1199,10 +1408,11 @@ export class SafetyService {
     opts: { period?: SafetyPeriod; date?: string; siteId?: string; from?: string; to?: string },
   ) {
     const s = await this.stats(user, opts);
-    const org = await this.prisma.organization.findUnique({
-      where: { id: user.organizationId },
-      select: { name: true },
-    });
+    const [org] = await this.d1.db
+      .select({ name: organizations.name })
+      .from(organizations)
+      .where(eq(organizations.id, user.organizationId))
+      .limit(1);
     const periodName =
       s.period === 'custom' ? 'Custom range' : s.period[0].toUpperCase() + s.period.slice(1);
     const fmtDay = (v: string) =>

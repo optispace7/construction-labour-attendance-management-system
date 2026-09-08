@@ -1,5 +1,6 @@
 import { SafetyService } from './safety.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
+import { makeSafetyWorld, SafetyWorld, SITE_A } from '../../../test/safety-fixtures';
 
 /**
  * The day-by-day drawer for waste disposal.
@@ -17,55 +18,31 @@ const user = {
   siteScopes: [],
 } as unknown as AuthUser;
 
-const iso = (d: Date) => d.toISOString().slice(0, 10);
+let world: SafetyWorld | null = null;
 
-function build(
+afterEach(async () => {
+  await world?.dispose();
+  world = null;
+});
+
+/**
+ * The service over a real database holding the waste lines the test names,
+ * plus the WASTE_DISPOSAL row those lines total into — which is what the
+ * daily sheet writes and what the drawer reads.
+ */
+async function build(
   waste: { typeId: string; date: string; value: number }[],
   types: { id: string; name: string; sortOrder: number }[],
 ) {
-  const prisma: any = {
-    organization: { findUnique: async () => ({ timezone: 'Asia/Kolkata' }) },
-    attendanceSession: { count: async () => 0, findMany: async () => [] },
-    dailySafetyEntry: {
-      findMany: async () => [
-        {
-          id: 'e0',
-          organizationId: 'org1',
-          siteId: 's1',
-          entryDate: new Date('2026-08-27T00:00:00.000Z'),
-          metric: 'WASTE_DISPOSAL',
-          value: 3,
-          comment: 'test',
-          site: { name: 'Tower A' },
-        },
-      ],
-    },
-    wasteType: {
-      findMany: async ({ where }: any) =>
-        types.filter((t) => !where?.id?.in || where.id.in.includes(t.id)),
-    },
-    dailyWasteEntry: {
-      groupBy: async ({ where }: any) => {
-        const w = where.entryDate ?? {};
-        const hits = waste.filter(
-          (r) => (!w.gte || r.date >= iso(w.gte)) && (!w.lte || r.date <= iso(w.lte)),
-        );
-        const sums = new Map<string, number>();
-        for (const r of hits) {
-          sums.set(`${r.date}|${r.typeId}`, (sums.get(`${r.date}|${r.typeId}`) ?? 0) + r.value);
-        }
-        return [...sums].map(([k, value]) => {
-          const [date, wasteTypeId] = k.split('|');
-          return {
-            entryDate: new Date(`${date}T00:00:00.000Z`),
-            wasteTypeId,
-            _sum: { value },
-          };
-        });
-      },
-    },
-  };
-  return new SafetyService(prisma, null as never);
+  world = await makeSafetyWorld();
+  for (const t of types) await world.wasteType(t.id, t.name, t.sortOrder);
+  for (const w of waste) {
+    await world.wasteEntry({ date: w.date, wasteTypeId: w.typeId, value: w.value });
+  }
+  // The sheet's own row for the day under test, as saveWaste would have left it.
+  await world.entry({ metric: 'WASTE_DISPOSAL', date: day, value: 3, comment: 'test' });
+  await world.entry({ metric: 'TOOLBOX_TALK', date: day, value: 1 });
+  return new SafetyService({ db: world.drizzle, d1: world.db } as never, null as never);
 }
 
 const TYPES = [
@@ -76,7 +53,7 @@ const day = '2026-08-27';
 
 describe('waste disposal history', () => {
   it('carries the split the total was made of', async () => {
-    const svc = build(
+    const svc = await build(
       [
         { typeId: 't1', date: day, value: 1 },
         { typeId: 't2', date: day, value: 2 },
@@ -86,7 +63,7 @@ describe('waste disposal history', () => {
 
     const h = await svc.history(user, {
       metric: 'WASTE_DISPOSAL' as never,
-      siteId: 's1',
+      siteId: SITE_A,
       from: day,
       to: day,
     });
@@ -102,11 +79,11 @@ describe('waste disposal history', () => {
   });
 
   it('leaves a metric that is not a total of anything without a breakdown', async () => {
-    const svc = build([], TYPES);
+    const svc = await build([], TYPES);
 
     const h = await svc.history(user, {
       metric: 'TOOLBOX_TALK' as never,
-      siteId: 's1',
+      siteId: SITE_A,
       from: day,
       to: day,
     });
@@ -116,11 +93,12 @@ describe('waste disposal history', () => {
   });
 
   it('says nothing for a day inside the window with no waste on it', async () => {
-    const svc = build([{ typeId: 't1', date: '2026-08-26', value: 4 }], TYPES);
+    const svc = await build([{ typeId: 't1', date: '2026-08-26', value: 4 }], TYPES);
+    await world!.entry({ metric: 'WASTE_DISPOSAL', date: '2026-08-26', value: 4 });
 
     const h = await svc.history(user, {
       metric: 'WASTE_DISPOSAL' as never,
-      siteId: 's1',
+      siteId: SITE_A,
       from: '2026-08-26',
       to: day,
     });

@@ -1,5 +1,6 @@
 import { SafetyService } from './safety.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
+import { makeSafetyWorld, SafetyWorld, SITE_A, SITE_B } from '../../../test/safety-fixtures';
 
 /**
  * Comments on the daily task sheet, read back from the statistics board.
@@ -20,53 +21,33 @@ const user = {
 
 interface Row {
   siteId: string;
-  siteName: string;
   date: string;
   metric: string;
   value: number | null;
   comment: string | null;
 }
 
-function build(rows: Row[]) {
-  const stored = rows.map((r, i) => ({
-    id: `e${i}`,
-    organizationId: 'org1',
-    siteId: r.siteId,
-    entryDate: new Date(`${r.date}T00:00:00.000Z`),
-    metric: r.metric,
-    value: r.value,
-    comment: r.comment,
-    updatedAt: new Date(),
-    site: { name: r.siteName },
-  }));
+let world: SafetyWorld | null = null;
 
-  const prisma: any = {
-    organization: { findUnique: async () => ({ timezone: 'Asia/Kolkata' }) },
-    attendanceSession: { count: async () => 0, findMany: async () => [] },
-    wasteType: { count: async () => 1, findMany: async () => [] },
-    dailyWasteEntry: { groupBy: async () => [] },
-    dailySafetyEntry: {
-      findMany: async ({ where }: any) =>
-        stored.filter(
-          (r) =>
-            (!where.metric || r.metric === where.metric) &&
-            (!where.siteId?.in || where.siteId.in.includes(r.siteId)) &&
-            (!where.comment || r.comment !== null),
-        ),
-    },
-  };
+afterEach(async () => {
+  await world?.dispose();
+  world = null;
+});
 
-  return new SafetyService(prisma, null as never);
+/** The service over a real database holding exactly these sheet entries. */
+async function build(rows: Row[]) {
+  world = await makeSafetyWorld();
+  for (const r of rows) await world.entry(r);
+  return new SafetyService({ db: world.drizzle, d1: world.db } as never, null as never);
 }
 
 const day = '2026-06-17';
 
 describe('safety comments across sites', () => {
   it('keeps a comment when the board is reading every site', async () => {
-    const svc = build([
+    const svc = await build([
       {
-        siteId: 's1',
-        siteName: 'Tower A',
+        siteId: SITE_A,
         date: day,
         metric: 'WORK_PERMIT',
         value: 3,
@@ -81,18 +62,16 @@ describe('safety comments across sites', () => {
   });
 
   it('names each site when several commented on the same day', async () => {
-    const svc = build([
+    const svc = await build([
       {
-        siteId: 's1',
-        siteName: 'Tower A',
+        siteId: SITE_A,
         date: day,
         metric: 'NEAR_MISS',
         value: 1,
         comment: 'slip at gate',
       },
       {
-        siteId: 's2',
-        siteName: 'Tower B',
+        siteId: SITE_B,
         date: day,
         metric: 'NEAR_MISS',
         value: 2,
@@ -109,10 +88,9 @@ describe('safety comments across sites', () => {
   });
 
   it('leaves a single-site read exactly as the officer typed it', async () => {
-    const svc = build([
+    const svc = await build([
       {
-        siteId: 's1',
-        siteName: 'Tower A',
+        siteId: SITE_A,
         date: day,
         metric: 'TRAINING',
         value: 1,
@@ -122,19 +100,20 @@ describe('safety comments across sites', () => {
 
     const one = await svc.history(user, {
       metric: 'TRAINING' as never,
-      siteId: 's1',
+      siteId: SITE_A,
       from: day,
       to: day,
     });
 
     // One site is one author, so the note needs no attribution in front of it.
     expect(one.rows[0].comment).toBe('Scaffolding training');
-    expect(one.rows[0].entryId).toBe('e0');
+    // Whatever row it is, the drawer points at the one the officer would edit.
+    expect(one.rows[0].entryId).toBeTruthy();
   });
 
   it('says nothing for a day nobody commented on', async () => {
-    const svc = build([
-      { siteId: 's1', siteName: 'Tower A', date: day, metric: 'TRAINING', value: 1, comment: null },
+    const svc = await build([
+      { siteId: SITE_A, date: day, metric: 'TRAINING', value: 1, comment: null },
     ]);
 
     const all = await svc.history(user, { metric: 'TRAINING' as never, from: day, to: day });

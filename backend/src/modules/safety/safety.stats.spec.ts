@@ -1,5 +1,6 @@
 import { SafetyService } from './safety.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
+import { evenMonth, makeSafetyWorld, SafetyWorld } from '../../../test/safety-fixtures';
 
 /**
  * The statistics board against the period selector.
@@ -17,89 +18,37 @@ const user = {
   siteScopes: [],
 } as unknown as AuthUser;
 
-const iso = (d: Date) => d.toISOString().slice(0, 10);
+let world: SafetyWorld | null = null;
+
+afterEach(async () => {
+  await world?.dispose();
+  world = null;
+});
 
 /**
- * A prisma double that answers from one set of man-days, so a count is a real
- * count of the window asked for rather than a fixture number that would pass
- * whatever window the code chose.
+ * The service over a real database, holding the man-days and typed figures the
+ * test names. The windows are then SQLite's to apply, which is the thing being
+ * asserted — a double that re-implemented them could only agree with itself.
  */
-function build(
+async function build(
   opts: {
     manDays?: Record<string, number>;
     entries?: { metric: string; date: string; value: number }[];
   } = {},
 ) {
-  const manDays = opts.manDays ?? {};
-  const entries = opts.entries ?? [];
-
-  const sessionDates: string[] = [];
-  for (const [day, n] of Object.entries(manDays)) {
-    for (let i = 0; i < n; i++) sessionDates.push(day);
-  }
-
-  const inRange = (day: string, w: { gte?: Date; lte?: Date; lt?: Date }) => {
-    if (w.gte && day < iso(w.gte)) return false;
-    if (w.lte && day > iso(w.lte)) return false;
-    if (w.lt && day >= iso(w.lt)) return false;
-    return true;
-  };
-
-  const countCalls: { gte?: Date; lte?: Date; lt?: Date }[] = [];
-  const seriesCalls: { gte?: Date; lte?: Date }[] = [];
-
-  const prisma: any = {
-    organization: { findUnique: jest.fn().mockResolvedValue({ timezone: 'Asia/Kolkata' }) },
-    site: { findFirst: jest.fn().mockResolvedValue(null) },
-    attendanceSession: {
-      count: jest.fn(async ({ where }: any) => {
-        const w = where.workDate ?? {};
-        countCalls.push(w);
-        return sessionDates.filter((d) => inRange(d, w)).length;
-      }),
-      findMany: jest.fn(async ({ where }: any) => {
-        const w = where.workDate ?? {};
-        seriesCalls.push(w);
-        return sessionDates
-          .filter((d) => inRange(d, w))
-          .map((d) => ({ workDate: new Date(`${d}T00:00:00.000Z`) }));
-      }),
-    },
-    dailySafetyEntry: {
-      findMany: jest.fn().mockResolvedValue([]),
-      groupBy: jest.fn(async ({ where }: any) => {
-        const w = where.entryDate ?? {};
-        const hits = entries.filter((e) => inRange(e.date, w));
-        const sums = new Map<string, number>();
-        for (const e of hits) sums.set(e.metric, (sums.get(e.metric) ?? 0) + e.value);
-        return [...sums].map(([metric, value]) => ({ metric, _sum: { value } }));
-      }),
-    },
-  };
-
-  const svc = new SafetyService(prisma, null as never);
-  return { svc, prisma, countCalls, seriesCalls };
-}
-
-/** Ten man-days on every day of a month, so any window has a distinct total. */
-function evenMonth(month: string, perDay = 10) {
-  const days: Record<string, number> = {};
-  for (let d = 1; d <= 31; d++) {
-    const day = `${month}-${String(d).padStart(2, '0')}`;
-    if (
-      new Date(`${day}T00:00:00.000Z`).getUTCMonth() !==
-      new Date(`${month}-01T00:00:00.000Z`).getUTCMonth()
-    )
-      continue;
-    days[day] = perDay;
-  }
-  return days;
+  world = await makeSafetyWorld();
+  await world.manDays(opts.manDays ?? {});
+  for (const e of opts.entries ?? []) await world.entry(e);
+  const svc = new SafetyService(
+    { db: world.drizzle, d1: world.db } as never,
+    null as never,
+  );
+  return { svc, world };
 }
 
 describe('safety stats — the period selector', () => {
   it('counts manpower over the selected window, not one anchor day', async () => {
-    const manDays = evenMonth('2026-06');
-    const { svc } = build({ manDays });
+    const { svc } = await build({ manDays: evenMonth('2026-06') });
 
     // 2026-06-17 is a Wednesday, so the week is Mon 15th to Sun 21st.
     const daily = await svc.stats(user, { period: 'daily', date: '2026-06-17' });
@@ -112,7 +61,7 @@ describe('safety stats — the period selector', () => {
   });
 
   it('credits safe man-hours for the same window as the manpower beside it', async () => {
-    const { svc } = build({ manDays: evenMonth('2026-06') });
+    const { svc } = await build({ manDays: evenMonth('2026-06') });
 
     const weekly = await svc.stats(user, { period: 'weekly', date: '2026-06-17' });
 
@@ -121,7 +70,7 @@ describe('safety stats — the period selector', () => {
   });
 
   it('keeps total manpower cumulative, read at the last day of the window', async () => {
-    const { svc } = build({ manDays: { ...evenMonth('2026-05'), ...evenMonth('2026-06') } });
+    const { svc } = await build({ manDays: { ...evenMonth('2026-05'), ...evenMonth('2026-06') } });
 
     const weekly = await svc.stats(user, { period: 'weekly', date: '2026-06-17' });
 
@@ -132,7 +81,7 @@ describe('safety stats — the period selector', () => {
   });
 
   it('moves every headline figure when the custom range moves', async () => {
-    const { svc } = build({ manDays: evenMonth('2026-06') });
+    const { svc } = await build({ manDays: evenMonth('2026-06') });
 
     const first = await svc.stats(user, {
       period: 'custom',
@@ -153,7 +102,7 @@ describe('safety stats — the period selector', () => {
   });
 
   it('plots the sparklines over the window rather than a fixed trailing month', async () => {
-    const { svc } = build({ manDays: evenMonth('2026-06') });
+    const { svc } = await build({ manDays: evenMonth('2026-06') });
 
     const weekly = await svc.stats(user, { period: 'weekly', date: '2026-06-17' });
 
@@ -167,7 +116,7 @@ describe('safety stats — the period selector', () => {
   });
 
   it('still gives a daily report a week of run-up, so the spark is a line', async () => {
-    const { svc } = build({ manDays: evenMonth('2026-06') });
+    const { svc } = await build({ manDays: evenMonth('2026-06') });
 
     const daily = await svc.stats(user, { period: 'daily', date: '2026-06-17' });
 
@@ -179,7 +128,7 @@ describe('safety stats — the period selector', () => {
   });
 
   it('scores the selected window, not always the calendar month', async () => {
-    const { svc } = build({
+    const { svc } = await build({
       manDays: evenMonth('2026-06'),
       entries: [
         // An injury outside the week must not weigh on the week's dial.
@@ -197,7 +146,7 @@ describe('safety stats — the period selector', () => {
   });
 
   it('does not charge a short window for routine work it was too short to hold', async () => {
-    const { svc } = build({
+    const { svc } = await build({
       manDays: evenMonth('2026-06'),
       entries: [{ metric: 'TOOLBOX_TALK', date: '2026-06-17', value: 1 }],
     });
@@ -214,7 +163,7 @@ describe('safety stats — the period selector', () => {
   });
 
   it('still charges a short window for what actually went wrong in it', async () => {
-    const { svc } = build({
+    const { svc } = await build({
       manDays: evenMonth('2026-06'),
       entries: [
         { metric: 'LOST_TIME_INJURY', date: '2026-06-17', value: 1 },
@@ -231,7 +180,7 @@ describe('safety stats — the period selector', () => {
   });
 
   it('names the derived rows for the window they now cover', async () => {
-    const { svc } = build({ manDays: evenMonth('2026-06') });
+    const { svc } = await build({ manDays: evenMonth('2026-06') });
 
     const weekly = await svc.stats(user, { period: 'weekly', date: '2026-06-17' });
     const labels = new Map(weekly.statistics.map((s) => [s.metric, s.label]));
@@ -244,15 +193,25 @@ describe('safety stats — the period selector', () => {
   });
 
   it('counts staff as manpower, and leaves visitors out', async () => {
-    const { svc, prisma } = build({ manDays: evenMonth('2026-06') });
-
-    await svc.stats(user, { period: 'weekly', date: '2026-06-17' });
-
     // An engineer standing in the same hazard is a man-day on the safety board
     // and earns the same safe hours; somebody walking through for an hour is
-    // not. Asserted on the query because the board's whole headline row is
-    // built from it.
-    const where = prisma.attendanceSession.count.mock.calls[0][0].where;
-    expect(where.worker.category).toEqual({ in: ['WORKER', 'STAFF'] });
+    // not.
+    const { svc, world } = await build({});
+    const w = world;
+    await w.manDay('2026-06-17'); // a WORKER
+    await w.db
+      .prepare("update workers set category = 'STAFF' where id = (select max(id) from workers)")
+      .run();
+    await w.manDay('2026-06-17'); // another WORKER
+    await w.manDay('2026-06-17');
+    await w.db
+      .prepare("update workers set category = 'VISITOR' where id = (select max(id) from workers)")
+      .run();
+
+    const daily = await svc.stats(user, { period: 'daily', date: '2026-06-17' });
+
+    // Two of the three count: the staff member and the worker. The visitor
+    // does not.
+    expect(daily.kpis.periodManpower).toBe(2);
   });
 });
