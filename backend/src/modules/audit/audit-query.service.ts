@@ -1,6 +1,17 @@
 import { Injectable } from '@nestjs/common';
-import { AuditLog, Prisma } from '@prisma/client';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, desc, eq, gte, inArray, lt, lte, notInArray, type SQL } from 'drizzle-orm';
+import { D1Service } from '../../infra/d1/d1.service';
+import {
+  auditLogs,
+  correctionRequests,
+  designations,
+  devices,
+  shifts,
+  sites,
+  users,
+  vendors,
+  workers,
+} from '../../infra/d1/schema.generated';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 
 export interface AuditQuery {
@@ -16,52 +27,55 @@ export interface AuditQuery {
   cursor?: string;
 }
 
+type AuditRow = typeof auditLogs.$inferSelect;
+
 @Injectable()
 export class AuditQueryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly d1: D1Service) {}
 
   async query(user: AuthUser, q: AuditQuery) {
     const limit = Math.min(q.limit ?? 50, 200);
-    const where: Prisma.AuditLogWhereInput = {
-      organizationId: user.organizationId,
-      ...(q.entityType ? { entityType: q.entityType } : {}),
-      ...(q.entityId ? { entityId: q.entityId } : {}),
-      ...(q.actorUserId ? { actorUserId: q.actorUserId } : {}),
-      ...(q.action ? { action: q.action } : {}),
-      ...(q.excludeActions?.length ? { action: { notIn: q.excludeActions } } : {}),
-      ...(q.from || q.to
-        ? {
-            createdAt: {
-              ...(q.from ? { gte: new Date(q.from) } : {}),
-              ...(q.to ? { lte: new Date(q.to) } : {}),
-            },
-          }
-        : {}),
-    };
 
-    const rows = await this.prisma.auditLog.findMany({
-      where,
-      take: limit + 1,
-      ...(q.cursor ? { cursor: { id: BigInt(q.cursor) }, skip: 1 } : {}),
-      orderBy: { createdAt: 'desc' },
-    });
+    const filters: SQL[] = [eq(auditLogs.organizationId, user.organizationId)];
+    if (q.entityType) filters.push(eq(auditLogs.entityType, q.entityType));
+    if (q.entityId) filters.push(eq(auditLogs.entityId, q.entityId));
+    if (q.actorUserId) filters.push(eq(auditLogs.actorUserId, q.actorUserId));
+    if (q.action) filters.push(eq(auditLogs.action, q.action));
+    if (q.excludeActions?.length) filters.push(notInArray(auditLogs.action, q.excludeActions));
+    if (q.from) filters.push(gte(auditLogs.createdAt, new Date(q.from)));
+    if (q.to) filters.push(lte(auditLogs.createdAt, new Date(q.to)));
 
-    const nextCursor = rows.length > limit ? rows[limit].id.toString() : null;
+    // Prisma's cursor took an id and skipped it. Here the same thing is said
+    // directly: rows are ordered newest first and the page after a cursor is
+    // everything with a smaller id, which is stable even when two entries share
+    // a timestamp — the id is monotonic and created_at is not unique.
+    if (q.cursor) filters.push(lt(auditLogs.id, Number(q.cursor)));
+
+    const rows = await this.d1.db
+      .select()
+      .from(auditLogs)
+      .where(and(...filters))
+      .orderBy(desc(auditLogs.createdAt), desc(auditLogs.id))
+      .limit(limit + 1);
+
+    const nextCursor = rows.length > limit ? String(rows[limit].id) : null;
     const page = rows.slice(0, limit);
     const names = await this.resolveNames(page);
 
-    // BigInt id → string for JSON safety; UUIDs → human names for the UI.
     const data = page.map((r) => ({
       ...r,
-      id: r.id.toString(),
+      id: String(r.id),
+      // Stored as JSON text; the panel expects objects, as it got from jsonb.
+      oldValue: parse(r.oldValue),
+      newValue: parse(r.newValue),
       actorName: r.actorUserId ? (names.users.get(r.actorUserId) ?? null) : null,
       entityName: r.entityId ? (names.byType(r.entityType)?.get(r.entityId) ?? null) : null,
     }));
     return { data, nextCursor };
   }
 
-  /** Batch-resolve actor users + referenced entities to display names. */
-  private async resolveNames(rows: AuditLog[]) {
+  /** Batch-resolve actor users and referenced entities to display names. */
+  private async resolveNames(rows: AuditRow[]) {
     const idsOf = (type: string) => [
       ...new Set(
         rows.filter((r) => r.entityType === type && r.entityId).map((r) => r.entityId as string),
@@ -81,69 +95,58 @@ export class AuditQueryService {
     const correctionIds = idsOf('CorrectionRequest');
     const shiftIds = idsOf('Shift');
 
-    const [users, workers, sites, vendors, designations, devices, corrections, shifts] =
-      await Promise.all([
-        userIds.length
-          ? this.prisma.user.findMany({
-              where: { id: { in: userIds } },
-              select: { id: true, fullName: true },
-            })
-          : [],
-        workerIds.length
-          ? this.prisma.worker.findMany({
-              where: { id: { in: workerIds } },
-              select: { id: true, fullName: true, workerCode: true },
-            })
-          : [],
-        siteIds.length
-          ? this.prisma.site.findMany({
-              where: { id: { in: siteIds } },
-              select: { id: true, name: true },
-            })
-          : [],
-        vendorIds.length
-          ? this.prisma.vendor.findMany({
-              where: { id: { in: vendorIds } },
-              select: { id: true, name: true },
-            })
-          : [],
-        designationIds.length
-          ? this.prisma.designation.findMany({
-              where: { id: { in: designationIds } },
-              select: { id: true, name: true },
-            })
-          : [],
-        deviceIds.length
-          ? this.prisma.device.findMany({
-              where: { id: { in: deviceIds } },
-              select: { id: true, label: true, deviceUid: true },
-            })
-          : [],
-        correctionIds.length
-          ? this.prisma.correctionRequest.findMany({
-              where: { id: { in: correctionIds } },
-              select: { id: true, worker: { select: { fullName: true, workerCode: true } } },
-            })
-          : [],
-        shiftIds.length
-          ? this.prisma.shift.findMany({
-              where: { id: { in: shiftIds } },
-              select: { id: true, name: true },
-            })
-          : [],
-      ]);
+    const db = this.d1.db;
+    const pick = <T>(ids: string[], run: () => Promise<T[]>) => (ids.length ? run() : []);
 
-    const maps = {
-      users: new Map(users.map((u) => [u.id, u.fullName])),
-      workers: new Map(workers.map((w) => [w.id, `${w.fullName} (${w.workerCode})`])),
-      sites: new Map(sites.map((s) => [s.id, s.name])),
-      vendors: new Map(vendors.map((v) => [v.id, v.name])),
-      designations: new Map(designations.map((d) => [d.id, d.name])),
-      devices: new Map(devices.map((d) => [d.id, d.label ?? d.deviceUid])),
+    const [
+      userRows, workerRows, siteRows, vendorRows,
+      designationRows, deviceRows, correctionRows, shiftRows,
+    ] = await Promise.all([
+      pick(userIds, () =>
+        db.select({ id: users.id, fullName: users.fullName }).from(users)
+          .where(inArray(users.id, userIds))),
+      pick(workerIds, () =>
+        db.select({ id: workers.id, fullName: workers.fullName, workerCode: workers.workerCode })
+          .from(workers).where(inArray(workers.id, workerIds))),
+      pick(siteIds, () =>
+        db.select({ id: sites.id, name: sites.name }).from(sites)
+          .where(inArray(sites.id, siteIds))),
+      pick(vendorIds, () =>
+        db.select({ id: vendors.id, name: vendors.name }).from(vendors)
+          .where(inArray(vendors.id, vendorIds))),
+      pick(designationIds, () =>
+        db.select({ id: designations.id, name: designations.name }).from(designations)
+          .where(inArray(designations.id, designationIds))),
+      pick(deviceIds, () =>
+        db.select({ id: devices.id, label: devices.label, deviceUid: devices.deviceUid })
+          .from(devices).where(inArray(devices.id, deviceIds))),
+      // Prisma fetched the worker through the relation. There is no relation
+      // loader here, so it is a join — one query either way.
+      pick(correctionIds, () =>
+        db.select({
+            id: correctionRequests.id,
+            fullName: workers.fullName,
+            workerCode: workers.workerCode,
+          })
+          .from(correctionRequests)
+          .innerJoin(workers, eq(workers.id, correctionRequests.workerId))
+          .where(inArray(correctionRequests.id, correctionIds))),
+      pick(shiftIds, () =>
+        db.select({ id: shifts.id, name: shifts.name }).from(shifts)
+          .where(inArray(shifts.id, shiftIds))),
+    ]);
+
+    return {
+      users: new Map(userRows.map((u) => [u.id, u.fullName])),
+      workers: new Map(workerRows.map((w) => [w.id, `${w.fullName} (${w.workerCode})`])),
+      sites: new Map(siteRows.map((s) => [s.id, s.name])),
+      vendors: new Map(vendorRows.map((v) => [v.id, v.name])),
+      designations: new Map(designationRows.map((d) => [d.id, d.name])),
+      devices: new Map(deviceRows.map((d) => [d.id, d.label ?? d.deviceUid])),
       corrections: new Map(
-        corrections.map((c) => [c.id, `${c.worker.fullName} (${c.worker.workerCode})`]),
+        correctionRows.map((c) => [c.id, `${c.fullName} (${c.workerCode})`]),
       ),
-      shifts: new Map(shifts.map((s) => [s.id, s.name])),
+      shifts: new Map(shiftRows.map((s) => [s.id, s.name])),
       byType(type: string): Map<string, string> | undefined {
         switch (type) {
           case 'User':
@@ -167,6 +170,15 @@ export class AuditQueryService {
         }
       },
     };
-    return maps;
+  }
+}
+
+/** Text back to the object the panel expects; bad JSON reads as absent. */
+function parse(value: string | null): unknown {
+  if (value == null) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
   }
 }
