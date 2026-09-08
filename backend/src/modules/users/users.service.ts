@@ -1,25 +1,29 @@
 import { Injectable } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { D1Service } from '../../infra/d1/d1.service';
+import { devices, userSiteScopes, users } from '../../infra/d1/schema.generated';
 import { IdentityService } from '../../common/better-auth/identity.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
 import { CreateUserDto, SetSiteScopesDto, UpdateUserDto } from './dto/user.dto';
 
-const PUBLIC_SELECT = {
-  id: true,
-  role: true,
-  fullName: true,
-  email: true,
-  username: true,
-  phone: true,
-  isActive: true,
-  canApplyCorrections: true,
-  lastLoginAt: true,
-  createdAt: true,
-  organizationId: true,
-  siteScopes: { select: { siteId: true } },
+type UserRole = 'SUPER_ADMIN' | 'SITE_ADMIN' | 'SUPERVISOR' | 'WATCHMAN';
+
+/** The columns the panel is allowed to see. A password never was among them. */
+const PUBLIC_COLUMNS = {
+  id: users.id,
+  role: users.role,
+  fullName: users.fullName,
+  email: users.email,
+  username: users.username,
+  phone: users.phone,
+  isActive: users.isActive,
+  canApplyCorrections: users.canApplyCorrections,
+  lastLoginAt: users.lastLoginAt,
+  createdAt: users.createdAt,
+  organizationId: users.organizationId,
 };
 
 /**
@@ -37,7 +41,7 @@ const MANAGEABLE: Record<UserRole, UserRole[]> = {
 @Injectable()
 export class UsersService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly identity: IdentityService,
     private readonly audit: AuditService,
   ) {}
@@ -59,8 +63,8 @@ export class UsersService {
     }
   }
 
-  private assertCanManage(actor: AuthUser, targetRole: UserRole) {
-    if (!MANAGEABLE[actor.role]?.includes(targetRole)) {
+  private assertCanManage(actor: AuthUser, targetRole: string) {
+    if (!MANAGEABLE[actor.role as UserRole]?.includes(targetRole as UserRole)) {
       throw Errors.forbidden(
         actor.role === 'SITE_ADMIN'
           ? 'Admins can only manage Safety Officer and Watchman accounts — ask your Super Admin.'
@@ -69,65 +73,117 @@ export class UsersService {
     }
   }
 
-  list(user: AuthUser) {
-    return this.prisma.user.findMany({
-      where: { organizationId: user.organizationId, deletedAt: null },
-      select: PUBLIC_SELECT,
-      orderBy: { createdAt: 'desc' },
-    });
+  /**
+   * Attaches each user's site scopes.
+   *
+   * Prisma nested this through a relation select. Here it is one extra query
+   * for the whole page rather than one per row — the shape callers receive is
+   * unchanged, which is the part that matters.
+   */
+  private async withScopes<T extends { id: string }>(rows: T[]) {
+    if (!rows.length) return [] as (T & { siteScopes: { siteId: string }[] })[];
+    const scopes = await this.d1.db
+      .select({ userId: userSiteScopes.userId, siteId: userSiteScopes.siteId })
+      .from(userSiteScopes)
+      .where(inArray(userSiteScopes.userId, rows.map((r) => r.id)));
+    const byUser = new Map<string, { siteId: string }[]>();
+    for (const s of scopes) {
+      const list = byUser.get(s.userId) ?? [];
+      list.push({ siteId: s.siteId });
+      byUser.set(s.userId, list);
+    }
+    return rows.map((r) => ({ ...r, siteScopes: byUser.get(r.id) ?? [] }));
+  }
+
+  async list(user: AuthUser) {
+    const rows = await this.d1.db
+      .select(PUBLIC_COLUMNS)
+      .from(users)
+      .where(and(eq(users.organizationId, user.organizationId), isNull(users.deletedAt)))
+      .orderBy(desc(users.createdAt));
+    return this.withScopes(rows);
   }
 
   async get(user: AuthUser, id: string) {
-    const found = await this.prisma.user.findFirst({
-      where: { id, organizationId: user.organizationId, deletedAt: null },
-      select: PUBLIC_SELECT,
-    });
+    const [found] = await this.d1.db
+      .select(PUBLIC_COLUMNS)
+      .from(users)
+      .where(
+        and(
+          eq(users.id, id),
+          eq(users.organizationId, user.organizationId),
+          isNull(users.deletedAt),
+        ),
+      )
+      .limit(1);
     if (!found) throw Errors.notFound('User');
-    return found;
+    const [withScopes] = await this.withScopes([found]);
+    return withScopes;
   }
 
   async create(user: AuthUser, dto: CreateUserDto) {
     this.assertCanManage(user, dto.role);
     this.assertCanGrantDirectApply(user, dto.canApplyCorrections);
     // Watchmen sign in with a user ID (no email); every other role resets
-    // passwords via email OTP, so email is mandatory for them.
+    // passwords via email, so an address is mandatory for them.
     if (dto.role === 'WATCHMAN' && !dto.username?.trim()) {
       throw Errors.businessRule('Watchman accounts need a user ID (username).');
     }
     if (dto.role !== 'WATCHMAN' && !dto.email?.trim()) {
       throw Errors.businessRule('Email is required for this role (used for password reset).');
     }
-    const created = await this.prisma.user.create({
-      data: {
-        organizationId: user.organizationId,
-        role: dto.role,
-        fullName: dto.fullName,
-        email: dto.email?.trim() || null,
-        username: dto.username?.trim() || null,
-        phone: dto.phone,
-        canApplyCorrections: dto.canApplyCorrections ?? false,
-        siteScopes: dto.siteIds?.length
-          ? { create: dto.siteIds.map((siteId) => ({ siteId })) }
-          : undefined,
-      },
-      select: PUBLIC_SELECT,
-    });
+
+    const id = randomUUID();
+    const now = new Date();
+    // Typed loosely on purpose: a batch mixes statements against different
+    // tables, and inferring the array from its first element pins it to that
+    // one table.
+    const writes: unknown[] = [
+      this.d1.db
+        .insert(users)
+        .values({
+          id,
+          organizationId: user.organizationId,
+          role: dto.role,
+          fullName: dto.fullName,
+          email: dto.email?.trim() || null,
+          username: dto.username?.trim() || null,
+          phone: dto.phone ?? null,
+          canApplyCorrections: dto.canApplyCorrections ?? false,
+          isActive: true,
+          createdAt: now,
+          updatedAt: now,
+        }),
+    ];
+    // Prisma created the scope rows through the nested write; here they are
+    // part of the same batch, so a user cannot appear without them.
+    if (dto.siteIds?.length) {
+      writes.push(
+        this.d1.db
+          .insert(userSiteScopes)
+          .values(dto.siteIds.map((siteId) => ({ userId: id, siteId }))),
+      );
+    }
+    await this.d1.db.batch(writes as never);
+
     // The account is not usable until Better Auth knows about it: the user row
     // carries what they may do, and the identity rows are what a login reads.
     await this.identity.create({
-      id: created.id,
+      id,
       fullName: dto.fullName,
       email: dto.email?.trim() || null,
       username: dto.username?.trim() || null,
       password: dto.password,
     });
+
+    const created = await this.get(user, id);
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
       actorRole: user.role,
       action: 'USER_CREATE',
       entityType: 'User',
-      entityId: created.id,
+      entityId: id,
       newValue: { role: created.role, email: created.email, username: created.username },
     });
     return created;
@@ -154,7 +210,7 @@ export class UsersService {
     const username = clearable(dto.username);
 
     // Whatever the edit leaves behind must still be able to sign in: watchmen
-    // by username, everyone else by email (which also receives reset codes).
+    // by username, everyone else by email.
     const role = dto.role ?? target.role;
     const nextEmail = email === undefined ? target.email : email;
     const nextUsername = username === undefined ? target.username : username;
@@ -165,21 +221,22 @@ export class UsersService {
       throw Errors.businessRule('Email is required for this role (used for password reset).');
     }
 
-    const data: Record<string, unknown> = {
-      role: dto.role,
-      fullName: dto.fullName,
-      email,
-      username,
-      phone: dto.phone,
-      isActive: dto.isActive,
-      canApplyCorrections: dto.canApplyCorrections,
-    };
+    await this.d1.db
+      .update(users)
+      .set({
+        ...(dto.role !== undefined ? { role: dto.role } : {}),
+        ...(dto.fullName !== undefined ? { fullName: dto.fullName } : {}),
+        ...(email !== undefined ? { email } : {}),
+        ...(username !== undefined ? { username } : {}),
+        ...(dto.phone !== undefined ? { phone: dto.phone } : {}),
+        ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+        ...(dto.canApplyCorrections !== undefined
+          ? { canApplyCorrections: dto.canApplyCorrections }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(users.id, id));
 
-    const updated = await this.prisma.user.update({
-      where: { id },
-      data,
-      select: PUBLIC_SELECT,
-    });
     // Keep the identity half in step: a name, a user ID or a new password all
     // live on Better Auth's rows, not on the one just written.
     await this.identity.update({
@@ -190,15 +247,12 @@ export class UsersService {
       password: dto.password,
     });
     // Deactivating somebody should log them out, not wait for their session to
-    // expire on its own.
+    // expire on its own. The same goes for a password an admin set for them —
+    // identity.update already ends those sessions, which is what the old
+    // refresh-token revocation here was doing before that scheme was removed.
     if (dto.isActive === false) await this.identity.revokeSessions(id);
-    // A password set by an admin invalidates existing sessions.
-    if (dto.password && id !== user.userId) {
-      await this.prisma.refreshToken.updateMany({
-        where: { userId: id, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-    }
+
+    const updated = await this.get(user, id);
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -224,20 +278,20 @@ export class UsersService {
     if (id === user.userId) throw Errors.businessRule('You cannot delete your own account.');
     const target = await this.get(user, id);
 
-    await this.prisma.$transaction([
-      this.prisma.user.update({
-        where: { id },
-        data: { deletedAt: new Date(), isActive: false, email: null, username: null },
-      }),
-      this.prisma.refreshToken.updateMany({
-        where: { userId: id, revokedAt: null },
-        data: { revokedAt: new Date() },
-      }),
-      this.prisma.device.updateMany({
-        where: { userId: id, status: { not: 'REVOKED' } },
-        data: { status: 'REVOKED' },
-      }),
-    ]);
+    await this.d1.db.batch([
+      this.d1.db
+        .update(users)
+        .set({ deletedAt: new Date(), isActive: false, email: null, username: null })
+        .where(eq(users.id, id)),
+      this.d1.db
+        .update(devices)
+        .set({ status: 'REVOKED' })
+        .where(and(eq(devices.userId, id), ne(devices.status, 'REVOKED'))),
+    ] as never);
+    // Sessions are Better Auth's, so they are ended through it rather than by
+    // revoking the refresh tokens the old scheme used.
+    await this.identity.revokeSessions(id);
+
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -253,13 +307,22 @@ export class UsersService {
   async setSiteScopes(user: AuthUser, id: string, dto: SetSiteScopesDto) {
     const target = await this.get(user, id);
     if (id !== user.userId) this.assertCanManage(user, target.role);
-    await this.prisma.$transaction([
-      this.prisma.userSiteScope.deleteMany({ where: { userId: id } }),
-      this.prisma.userSiteScope.createMany({
-        data: dto.siteIds.map((siteId) => ({ userId: id, siteId })),
-        skipDuplicates: true,
-      }),
-    ]);
+
+    // Replace, in one batch: a delete that committed without its insert would
+    // leave somebody scoped to nothing, which reads as access to every site.
+    const writes: unknown[] = [
+      this.d1.db.delete(userSiteScopes).where(eq(userSiteScopes.userId, id)),
+    ];
+    if (dto.siteIds.length) {
+      writes.push(
+        this.d1.db
+          .insert(userSiteScopes)
+          .values(dto.siteIds.map((siteId) => ({ userId: id, siteId })))
+          .onConflictDoNothing(),
+      );
+    }
+    await this.d1.db.batch(writes as never);
+
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
