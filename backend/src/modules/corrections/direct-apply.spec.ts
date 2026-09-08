@@ -1,4 +1,5 @@
 import { CorrectionsService } from './corrections.service';
+import { makeWorld, onlySession, SITE, USER, WORKER, World } from '../../../test/correction-fixtures';
 
 /**
  * Corrections filed by someone the Super Admin has cleared to apply their own.
@@ -7,20 +8,20 @@ import { CorrectionsService } from './corrections.service';
  * reason and its author, and still goes through the one apply path — it just
  * does not wait for a second person. And an officer without the grant must be
  * exactly as blocked as before.
+ *
+ * Run against a real SQLite through D1's API, so "the request was rolled back"
+ * is read off the database rather than off a mock's call log.
  */
-
 const officer: any = {
-  userId: 'u-officer',
+  userId: USER,
   organizationId: 'org1',
   role: 'SUPERVISOR',
   siteScopes: [],
 };
 
-const workDate = new Date(Date.UTC(2026, 5, 8));
-
 const dto: any = {
-  workerId: 'w1',
-  siteId: 'site1',
+  workerId: WORKER,
+  siteId: SITE,
   workDate: '2026-06-08',
   type: 'LOGOUT',
   reason: 'FORGOT_CARD',
@@ -28,136 +29,102 @@ const dto: any = {
   items: [{ field: 'logout_at', proposedValue: '2026-06-08T13:00:00Z' }],
 };
 
-/** A session the correction can land on, plus the tx doubles around it. */
-function harness(canApplyCorrections: boolean) {
-  const session = {
-    id: 's1',
-    updatedAt: new Date('2026-06-08T06:00:00Z'),
-    loginAt: new Date('2026-06-08T03:30:00Z'), // 09:00 IST
-    logoutAt: null,
-    siteId: 'site1',
-    shiftId: null,
-    workDate,
-    shift: null,
-    site: { timezone: 'Asia/Kolkata' },
-  };
-
-  const tx: any = {
-    correctionRequest: {
-      create: jest.fn().mockResolvedValue({ id: 'c1' }),
-      findFirst: jest.fn().mockResolvedValue({
-        id: 'c1',
-        status: 'PENDING',
-        organizationId: 'org1',
-        workerId: 'w1',
-        siteId: 'site1',
-        sessionId: null,
-        workDate,
-        createdAt: new Date('2026-06-08T14:00:00Z'),
-        items: dto.items,
-      }),
-      update: jest
-        .fn()
-        .mockImplementation(({ data }: any) => ({ id: 'c1', status: 'APPROVED', ...data })),
-    },
-    site: {
-      findFirst: jest
-        .fn()
-        .mockResolvedValue({ id: 'site1', timezone: 'Asia/Kolkata', settings: null }),
-    },
-    attendanceSession: {
-      findUnique: jest.fn(),
-      findFirst: jest.fn().mockResolvedValue(session),
-      create: jest.fn(),
-      update: jest
-        .fn()
-        .mockResolvedValue({ ...session, logoutAt: new Date('2026-06-08T13:00:00Z') }),
-    },
-  };
-
-  const prisma: any = {
-    user: { findFirst: jest.fn().mockResolvedValue({ canApplyCorrections }) },
-    correctionRequest: {
-      create: jest.fn().mockResolvedValue({ id: 'c1', status: 'PENDING', items: dto.items }),
-    },
-    $transaction: (fn: any) => fn(tx),
-  };
-  const audit: any = { record: jest.fn() };
-  return { svc: new CorrectionsService(prisma, audit), prisma, tx, audit };
-}
-
 describe('CorrectionsService.create (direct apply)', () => {
+  let w: World;
+  let svc: CorrectionsService;
+  let audit: { record: jest.Mock };
+
+  /** A world where the officer may or may not skip the queue. */
+  const build = async (canApplyCorrections: boolean) => {
+    w = await makeWorld({ canApplyCorrections });
+    audit = { record: jest.fn() };
+    svc = new CorrectionsService({ db: w.drizzle, d1: w.db } as never, audit as never);
+  };
+
+  /** The session a logout correction can land on: in at 09:00 IST, still open. */
+  const openDay = () =>
+    w.session({
+      id: 's1',
+      workDate: '2026-06-08',
+      loginAt: '2026-06-08T03:30:00Z',
+      state: 'OPEN',
+      updatedAt: '2026-06-08T06:00:00Z',
+    });
+
+  const requests = async () =>
+    (await w.db.prepare('SELECT * FROM correction_requests').all()).results as Record<
+      string,
+      unknown
+    >[];
+
+  afterEach(async () => {
+    await w?.dispose();
+  });
+
   it('applies the correction on the spot when the author is cleared for it', async () => {
-    const { svc, tx } = harness(true);
+    await build(true);
+    await openDay();
 
     const res: any = await svc.create(officer, dto);
 
-    expect(res.status).toBe('APPROVED');
     expect(res.autoApplied).toBe(true);
-    // The attendance row actually changed — not merely a request marked approved.
-    expect(tx.attendanceSession.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 's1' },
-        data: expect.objectContaining({ logoutAt: new Date('2026-06-08T13:00:00Z') }),
-      }),
-    );
-    // Signed off by its own author, so the history says who did it.
-    expect(tx.correctionRequest.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ reviewedBy: 'u-officer', autoApplied: true }),
-      }),
-    );
+    expect(res.status).toBe('APPROVED');
+    // The attendance actually moved.
+    const s = await w.readSession('s1');
+    expect(s?.state).toBe('CLOSED');
+    expect(s?.logout_at).toBe(new Date('2026-06-08T13:00:00Z').getTime());
+    // The request is still a record of who asked and why.
+    expect(res.reason).toBe('FORGOT_CARD');
+    expect(res.requestedBy).toBe(USER);
+    expect(res.items).toHaveLength(1);
   });
 
   it('records the bypass under its own audit action', async () => {
-    const { svc, audit } = harness(true);
+    await build(true);
+    await openDay();
 
     await svc.create(officer, dto);
 
-    const actions = audit.record.mock.calls.map((c: any[]) => c[0].action);
-    // Both halves are still on the record: it was filed, and it was applied
-    // without review — the second under a name a reader can search for.
+    // A distinct action, so "who changed attendance without review" is a
+    // question the audit log can answer on its own.
+    const actions = audit.record.mock.calls.map((c) => c[0].action);
     expect(actions).toContain('CORRECTION_REQUEST');
     expect(actions).toContain('CORRECTION_AUTO_APPLY');
     expect(actions).not.toContain('CORRECTION_APPROVE');
   });
 
   it('still queues the correction when the author is not cleared', async () => {
-    const { svc, prisma, tx } = harness(false);
+    await build(false);
+    await openDay();
 
     const res: any = await svc.create(officer, dto);
 
     expect(res.status).toBe('PENDING');
-    expect(prisma.correctionRequest.create).toHaveBeenCalled();
-    // Nothing was applied: attendance is untouched until somebody approves.
-    expect(tx.attendanceSession.update).not.toHaveBeenCalled();
+    expect(res.autoApplied).toBe(false);
+    // Attendance is untouched until somebody reviews it.
+    expect((await w.readSession('s1'))?.logout_at).toBeNull();
+    expect(audit.record.mock.calls.map((c) => c[0].action)).toEqual(['CORRECTION_REQUEST']);
   });
 
   it("reads the grant from the user row, not from the caller's token", async () => {
-    const { svc, prisma } = harness(true);
+    await build(false);
+    await openDay();
 
-    await svc.create(officer, dto);
-
-    // Revoking the flag has to bite immediately, so it is looked up per call —
-    // and only for the live account in the caller's own organization.
-    expect(prisma.user.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'u-officer', organizationId: 'org1', deletedAt: null },
-      }),
+    // The token says otherwise; the row is what counts, so the Super Admin can
+    // take the grant back now rather than when a session happens to expire.
+    const res: any = await svc.create(
+      { ...officer, canApplyCorrections: true } as never,
+      dto,
     );
+
+    expect(res.status).toBe('PENDING');
+    expect((await w.readSession('s1'))?.logout_at).toBeNull();
   });
 
-  /**
-   * Both ends of a night shift, filed as one request.
-   *
-   * The mobile and web forms now send `login_at` and `logout_at` together, with
-   * the logout dated to the following morning when the shift crosses midnight.
-   * The pair has to apply as one operation, and the day has to be the day they
-   * came in — filing it under the morning they walked out is the mistake this
-   * whole area keeps making.
-   */
   it('applies both stamps of an overnight shift and files it under the day they came in', async () => {
-    const overnight: any = {
+    await build(true);
+    // Never scanned, so there is nothing to patch — the pair has to make it.
+    const overnight = {
       ...dto,
       type: 'MISSING',
       workDate: '2026-08-08',
@@ -169,105 +136,54 @@ describe('CorrectionsService.create (direct apply)', () => {
       ],
     };
 
-    const created: any[] = [];
-    const tx: any = {
-      correctionRequest: {
-        create: jest.fn().mockResolvedValue({ id: 'c1' }),
-        findFirst: jest.fn().mockResolvedValue({
-          id: 'c1',
-          status: 'PENDING',
-          organizationId: 'org1',
-          workerId: 'w1',
-          siteId: 'site1',
-          sessionId: null,
-          workDate: new Date(Date.UTC(2026, 7, 8)),
-          createdAt: new Date('2026-08-09T04:00:00Z'),
-          items: overnight.items,
-        }),
-        update: jest
-          .fn()
-          .mockImplementation(({ data }: any) => ({ id: 'c1', status: 'APPROVED', ...data })),
-      },
-      site: {
-        findFirst: jest
-          .fn()
-          .mockResolvedValue({ id: 'site1', timezone: 'Asia/Kolkata', settings: null }),
-      },
-      attendanceSession: {
-        findUnique: jest.fn(),
-        // Never scanned, so there is nothing to patch — the pair has to make it.
-        findFirst: jest.fn().mockResolvedValue(null),
-        create: jest.fn().mockImplementation(async ({ data }: any) => {
-          const row = { id: 'sNew', ...data, shift: null, site: { timezone: 'Asia/Kolkata' } };
-          created.push(row);
-          return row;
-        }),
-        update: jest.fn().mockImplementation(async ({ data }: any) => ({
-          ...created[0],
-          ...data,
-          shift: null,
-          site: { timezone: 'Asia/Kolkata' },
-        })),
-      },
-    };
-    const prisma: any = {
-      user: { findFirst: jest.fn().mockResolvedValue({ canApplyCorrections: true }) },
-      correctionRequest: { create: jest.fn() },
-      $transaction: (fn: any) => fn(tx),
-    };
-    const svc = new CorrectionsService(prisma, { record: jest.fn() } as any);
-
     const res: any = await svc.create(officer, overnight);
 
     expect(res.autoApplied).toBe(true);
     // One session, carrying both stamps, closed because the logout is known.
-    expect(created).toHaveLength(1);
-    expect(created[0].loginAt).toEqual(new Date('2026-08-08T16:00:00.000Z'));
-    expect(created[0].logoutAt).toEqual(new Date('2026-08-09T02:30:00.000Z'));
-    expect(created[0].state).toBe('CLOSED');
+    const s = await onlySession(w);
+    expect(s?.login_at).toBe(new Date('2026-08-08T16:00:00.000Z').getTime());
+    expect(s?.logout_at).toBe(new Date('2026-08-09T02:30:00.000Z').getTime());
+    expect(s?.state).toBe('CLOSED');
     // The 8th — the shift belongs to the night it started, not to the morning
     // the logout happens to fall in.
-    expect(created[0].workDate).toEqual(new Date(Date.UTC(2026, 7, 8)));
+    expect(s?.work_date).toBe('2026-08-08');
     // 21:30 → 08:00 is ten and a half hours across midnight.
-    expect(tx.attendanceSession.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ workedMinutes: 630 }) }),
-    );
+    expect(s?.worked_minutes).toBe(630);
   });
 
   it('still refuses a backwards pair from someone cleared to apply their own', async () => {
-    const { svc, tx } = harness(true);
+    await build(true);
     // Both stamps on the same day, with the logout earlier than the login —
     // what an un-ticked "went out the next day" would produce. The grant skips
     // the review, never the sanity check.
-    tx.correctionRequest.findFirst.mockResolvedValue({
-      id: 'c1',
-      status: 'PENDING',
-      organizationId: 'org1',
-      workerId: 'w1',
-      siteId: 'site1',
-      sessionId: null,
-      workDate,
-      createdAt: new Date('2026-06-08T14:00:00Z'),
+    const backwards = {
+      ...dto,
+      type: 'MISSING',
       items: [
         { field: 'login_at', proposedValue: '2026-06-08T16:00:00.000Z' }, // 21:30 IST
         { field: 'logout_at', proposedValue: '2026-06-08T02:30:00.000Z' }, // 08:00 IST, same day
       ],
-    });
+    };
 
-    await expect(svc.create(officer, dto)).rejects.toMatchObject({ code: 'BUSINESS_RULE' });
-    expect(tx.correctionRequest.update).not.toHaveBeenCalled();
+    await expect(svc.create(officer, backwards)).rejects.toMatchObject({
+      code: 'BUSINESS_RULE',
+    });
+    // No attendance, and no request left waiting for a reviewer who was never
+    // going to be asked.
+    expect(await onlySession(w)).toBeNull();
+    expect((await requests())[0]?.status).toBe('CANCELLED');
   });
 
   it('leaves no request behind when applying it fails', async () => {
-    const { svc, tx } = harness(true);
-    // The session the correction names has since been deleted.
-    tx.attendanceSession.findFirst.mockResolvedValue(null);
-    // ...and a logout-only correction cannot invent one.
+    await build(true);
+    // No session for that day, and a logout-only correction cannot invent one.
 
     await expect(svc.create(officer, dto)).rejects.toMatchObject({ code: 'CONFLICT' });
 
-    // The create and the apply share a transaction, so a failed apply rolls the
-    // request back rather than parking it in a queue nobody is watching.
-    expect(tx.correctionRequest.update).not.toHaveBeenCalled();
+    // The request must not be parked in a queue nobody is watching: it was
+    // never filed for review in the first place.
+    const [req] = await requests();
+    expect(req?.status).toBe('CANCELLED');
+    expect(await onlySession(w)).toBeNull();
   });
 });

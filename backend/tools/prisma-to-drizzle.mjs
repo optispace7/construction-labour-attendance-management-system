@@ -54,7 +54,9 @@ function columnFor(line, modelNames) {
   else if (type === 'Float' || type === 'Decimal') col = `real('${dbName}')`;
   else if (type === 'Boolean') col = `integer('${dbName}', { mode: 'boolean' })`;
   else if (type === 'Json') col = `text('${dbName}')`;
-  else if (type === 'Bytes') col = `blob('${dbName}')`;
+  // 'buffer' mode, so ciphertext and image bytes come back as a Buffer rather
+  // than as `unknown` that every reader has to cast.
+  else if (type === 'Bytes') col = `blob('${dbName}', { mode: 'buffer' })`;
   else if (enums.has(type)) col = `text('${dbName}')`;
   else if (type === 'DateTime') {
     if (/@db\.Date\b/.test(rest)) col = `text('${dbName}')`;

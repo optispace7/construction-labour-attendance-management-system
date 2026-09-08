@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { eq } from 'drizzle-orm';
+import { D1Service } from '../../infra/d1/d1.service';
+import { userSiteScopes, users } from '../../infra/d1/schema.generated';
 import { Errors } from '../../common/errors/app.exception';
 
 /**
@@ -14,14 +16,17 @@ import { Errors } from '../../common/errors/app.exception';
  */
 @Injectable()
 export class AuthService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly d1: D1Service) {}
 
   async me(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      include: { siteScopes: true },
-    });
+    const [user] = await this.d1.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user) throw Errors.notFound('User');
+    // Prisma's include; one more query here rather than a join, because the
+    // scopes are a list and a join would repeat the user row for each one.
+    const scopes = await this.d1.db
+      .select({ siteId: userSiteScopes.siteId })
+      .from(userSiteScopes)
+      .where(eq(userSiteScopes.userId, userId));
     return {
       id: user.id,
       fullName: user.fullName,
@@ -29,7 +34,7 @@ export class AuthService {
       username: user.username,
       role: user.role,
       organizationId: user.organizationId,
-      siteScopes: user.siteScopes.map((s) => s.siteId),
+      siteScopes: scopes.map((s) => s.siteId),
     };
   }
 }

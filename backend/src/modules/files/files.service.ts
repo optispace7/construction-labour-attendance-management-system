@@ -4,7 +4,9 @@ import { PhotoKind } from '../../common/enums';
 import { compressImage } from './image-compressor';
 import { blobStore, blobStoreConfigured } from './blob-store';
 import { readStoredBytes, StoredBlobRef } from './read-blob';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, eq } from 'drizzle-orm';
+import { D1Service } from '../../infra/d1/d1.service';
+import { photoBlobs } from '../../infra/d1/schema.generated';
 import { CryptoService } from '../../common/crypto/crypto.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
@@ -44,7 +46,7 @@ export class FilesService {
   private readonly logger = new Logger(FilesService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly crypto: CryptoService,
   ) {}
 
@@ -91,8 +93,9 @@ export class FilesService {
       await blobStore.put(this.storageKey(user.organizationId, id, kind), stored, mimeType);
     }
 
-    const blob = await this.prisma.photoBlob.create({
-      data: {
+    const [blob] = await this.d1.db
+      .insert(photoBlobs)
+      .values({
         id,
         organizationId: user.organizationId,
         mimeType,
@@ -104,9 +107,15 @@ export class FilesService {
         isCompressed: didCompress,
         isEncrypted: encrypt,
         createdBy: user.userId,
-      },
-      select: { id: true, mimeType: true, sizeBytes: true, originalSizeBytes: true, kind: true },
-    });
+        createdAt: new Date(),
+      })
+      .returning({
+        id: photoBlobs.id,
+        mimeType: photoBlobs.mimeType,
+        sizeBytes: photoBlobs.sizeBytes,
+        originalSizeBytes: photoBlobs.originalSizeBytes,
+        kind: photoBlobs.kind,
+      });
     return { ...blob, url: `/files/${blob.id}` };
   }
 
@@ -130,9 +139,11 @@ export class FilesService {
    * bucket being addressed by id directly.
    */
   async get(user: AuthUser, id: string) {
-    const blob = await this.prisma.photoBlob.findFirst({
-      where: { id, organizationId: user.organizationId },
-    });
+    const [blob] = await this.d1.db
+      .select()
+      .from(photoBlobs)
+      .where(and(eq(photoBlobs.id, id), eq(photoBlobs.organizationId, user.organizationId)))
+      .limit(1);
     if (!blob) throw Errors.notFound('File');
     const stored = await this.readBytes(blob);
     const data = blob.isEncrypted ? this.crypto.decryptBuffer(stored) : stored;

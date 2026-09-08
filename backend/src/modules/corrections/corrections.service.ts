@@ -1,17 +1,36 @@
 import { Injectable } from '@nestjs/common';
-import { CorrectionStatus, Prisma } from '@prisma/client';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, desc, eq, inArray, isNull, type SQL } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { CorrectionStatus } from '../../common/enums';
+import { D1Service } from '../../infra/d1/d1.service';
+import {
+  attendanceSessions,
+  correctionItems,
+  correctionRequests,
+  users,
+  workers,
+} from '../../infra/d1/schema.generated';
+import { applyCorrectionOnD1 } from '../../infra/d1/correction-apply.d1';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
-import { businessDate, minutesOfDay } from '../../common/time/time.util';
-import { computeWorkHours, ShiftConfig } from '../attendance/engine/work-hours.engine';
 import { CreateCorrectionDto, ReviewCorrectionDto } from './dto/correction.dto';
+
+/** A correction item as callers read it: the value parsed back out of its text. */
+function parseItem(row: typeof correctionItems.$inferSelect) {
+  let proposedValue: unknown = null;
+  try {
+    proposedValue = JSON.parse(row.proposedValue);
+  } catch {
+    proposedValue = row.proposedValue;
+  }
+  return { ...row, proposedValue };
+}
 
 @Injectable()
 export class CorrectionsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly audit: AuditService,
   ) {}
 
@@ -23,34 +42,42 @@ export class CorrectionsService {
    * fifteen minutes from now when an access token happens to expire.
    */
   private async mayApplyDirectly(user: AuthUser): Promise<boolean> {
-    const row = await this.prisma.user.findFirst({
-      where: { id: user.userId, organizationId: user.organizationId, deletedAt: null },
-      select: { canApplyCorrections: true },
-    });
+    const [row] = await this.d1.db
+      .select({ canApplyCorrections: users.canApplyCorrections })
+      .from(users)
+      .where(
+        and(
+          eq(users.id, user.userId),
+          eq(users.organizationId, user.organizationId),
+          // A deleted account keeps nothing, including this.
+          isNull(users.deletedAt),
+        ),
+      )
+      .limit(1);
     return row?.canApplyCorrections ?? false;
+  }
+
+  /** A request with its items, in the shape the panel reads. */
+  private async withItems(id: string) {
+    const [request] = await this.d1.db
+      .select()
+      .from(correctionRequests)
+      .where(eq(correctionRequests.id, id))
+      .limit(1);
+    if (!request) throw Errors.notFound('Correction request');
+    const items = await this.d1.db
+      .select()
+      .from(correctionItems)
+      .where(eq(correctionItems.requestId, id));
+    return { ...request, items: items.map(parseItem) };
   }
 
   async create(user: AuthUser, dto: CreateCorrectionDto) {
     const applyNow = await this.mayApplyDirectly(user);
-    const data = {
-      organizationId: user.organizationId,
-      workerId: dto.workerId,
-      siteId: dto.siteId,
-      sessionId: dto.sessionId,
-      workDate: new Date(dto.workDate),
-      type: dto.type,
-      reason: dto.reason,
-      notes: dto.notes,
-      requestedBy: user.userId,
-      items: {
-        create: dto.items.map((i) => ({
-          field: i.field,
-          proposedValue: i.proposedValue as Prisma.InputJsonValue,
-        })),
-      },
-    };
+    const id = randomUUID();
+    const now = new Date();
 
-    const recordFiling = (id: string) =>
+    const recordFiling = () =>
       this.audit.record({
         organizationId: user.organizationId,
         actorUserId: user.userId,
@@ -61,28 +88,68 @@ export class CorrectionsService {
         newValue: { type: dto.type, reason: dto.reason, items: dto.items, autoApplied: applyNow },
       });
 
+    // The request and its items go in one batch: Prisma's nested create, and
+    // for the same reason — a request with no items is a correction that
+    // proposes nothing, which no reviewer could act on.
+    await this.d1.db.batch([
+      this.d1.db.insert(correctionRequests).values({
+        id,
+        organizationId: user.organizationId,
+        workerId: dto.workerId,
+        siteId: dto.siteId,
+        sessionId: dto.sessionId ?? null,
+        // A calendar day, stored as text.
+        workDate: new Date(dto.workDate).toISOString().slice(0, 10),
+        type: dto.type,
+        reason: dto.reason,
+        notes: dto.notes ?? null,
+        requestedBy: user.userId,
+        status: 'PENDING',
+        autoApplied: false,
+        createdAt: now,
+        updatedAt: now,
+      }),
+      this.d1.db.insert(correctionItems).values(
+        dto.items.map((i) => ({
+          id: randomUUID(),
+          requestId: id,
+          field: i.field,
+          // Serialised here: the column is text on SQLite, and handing it an
+          // object stores "[object Object]".
+          proposedValue: JSON.stringify(i.proposedValue),
+        })),
+      ),
+    ] as never);
+
     if (!applyNow) {
-      const request = await this.prisma.correctionRequest.create({
-        data,
-        include: { items: true },
-      });
-      await recordFiling(request.id);
-      return request;
+      await recordFiling();
+      return this.withItems(id);
     }
 
-    // Filed and applied as one transaction: a request that was never going to
-    // wait for a reviewer must not be able to survive its own failed
-    // application and sit in the queue as if somebody still had to look at it.
-    // The apply step is the same one an approver runs — see applyInTx.
-    const applied = await this.prisma.$transaction(async (tx) => {
-      const request = await tx.correctionRequest.create({ data, select: { id: true } });
-      return this.applyInTx(tx, user, request.id, {
-        reviewNotes: dto.notes,
-        autoApplied: true,
-      });
-    });
-    await recordFiling(applied.id);
-    return applied;
+    // Filed and applied in immediate succession: a request that was never going
+    // to wait for a reviewer must not survive its own failed application and
+    // sit in the queue as if somebody still had to look at it. The apply step
+    // is the same one an approver runs, and it is itself one guarded batch.
+    try {
+      const applied = await applyCorrectionOnD1(
+        this.d1.d1,
+        { userId: user.userId, organizationId: user.organizationId },
+        id,
+        { reviewNotes: dto.notes, autoApplied: true },
+      );
+      await recordFiling();
+      await this.recordApply(user, id, applied, { reviewNotes: dto.notes, autoApplied: true });
+    } catch (e) {
+      // The apply failed, so the request must not be left PENDING — nobody
+      // filed it for review, and a queue entry nobody expects is worse than
+      // the error the author is about to see.
+      await this.d1.db
+        .update(correctionRequests)
+        .set({ status: 'CANCELLED', updatedAt: new Date() })
+        .where(eq(correctionRequests.id, id));
+      throw e;
+    }
+    return this.withItems(id);
   }
 
   async list(
@@ -92,58 +159,103 @@ export class CorrectionsService {
     workerId?: string,
     autoApplied?: boolean,
   ) {
-    const rows = await this.prisma.correctionRequest.findMany({
-      where: {
-        organizationId: user.organizationId,
-        ...(status ? { status } : {}),
-        ...(siteId ? { siteId } : {}),
-        ...(workerId ? { workerId } : {}),
-        ...(autoApplied === undefined ? {} : { autoApplied }),
-      },
-      include: {
-        items: true,
-        worker: { select: { fullName: true, workerCode: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+    const filters: SQL[] = [eq(correctionRequests.organizationId, user.organizationId)];
+    if (status) filters.push(eq(correctionRequests.status, status));
+    if (siteId) filters.push(eq(correctionRequests.siteId, siteId));
+    if (workerId) filters.push(eq(correctionRequests.workerId, workerId));
+    if (autoApplied !== undefined) filters.push(eq(correctionRequests.autoApplied, autoApplied));
+
+    const rows = await this.d1.db
+      .select({
+        request: correctionRequests,
+        workerFullName: workers.fullName,
+        workerCode: workers.workerCode,
+      })
+      .from(correctionRequests)
+      .innerJoin(workers, eq(workers.id, correctionRequests.workerId))
+      .where(and(...filters))
+      .orderBy(desc(correctionRequests.createdAt));
+
+    // The items for the whole page in one query, rather than one per row.
+    const items = rows.length
+      ? await this.d1.db
+          .select()
+          .from(correctionItems)
+          .where(
+            inArray(
+              correctionItems.requestId,
+              rows.map((r) => r.request.id),
+            ),
+          )
+      : [];
+    const itemsFor = new Map<string, ReturnType<typeof parseItem>[]>();
+    for (const i of items) {
+      const list = itemsFor.get(i.requestId) ?? [];
+      list.push(parseItem(i));
+      itemsFor.set(i.requestId, list);
+    }
 
     // Resolve the requester/reviewer UUIDs to human names so the admin sees
     // *who* filed each correction and who reviewed it, not raw IDs.
     const userIds = [
-      ...new Set(rows.flatMap((r) => [r.requestedBy, r.reviewedBy]).filter(Boolean) as string[]),
+      ...new Set(
+        rows
+          .flatMap((r) => [r.request.requestedBy, r.request.reviewedBy])
+          .filter(Boolean) as string[],
+      ),
     ];
-    const users = userIds.length
-      ? await this.prisma.user.findMany({
-          where: { id: { in: userIds } },
-          select: { id: true, fullName: true, role: true },
-        })
+    const people = userIds.length
+      ? await this.d1.db
+          .select({ id: users.id, fullName: users.fullName, role: users.role })
+          .from(users)
+          .where(inArray(users.id, userIds))
       : [];
-    const nameOf = new Map(users.map((u) => [u.id, u.fullName]));
+    const nameOf = new Map(people.map((u) => [u.id, u.fullName]));
 
     return rows.map((r) => ({
-      ...r,
-      requestedByName: nameOf.get(r.requestedBy) ?? null,
-      reviewedByName: r.reviewedBy ? (nameOf.get(r.reviewedBy) ?? null) : null,
+      ...r.request,
+      items: itemsFor.get(r.request.id) ?? [],
+      worker: { fullName: r.workerFullName, workerCode: r.workerCode },
+      requestedByName: nameOf.get(r.request.requestedBy) ?? null,
+      reviewedByName: r.request.reviewedBy ? (nameOf.get(r.request.reviewedBy) ?? null) : null,
     }));
   }
 
   async get(user: AuthUser, id: string) {
-    const req = await this.prisma.correctionRequest.findFirst({
-      where: { id, organizationId: user.organizationId },
-      include: { items: true, session: true },
-    });
+    const [req] = await this.d1.db
+      .select()
+      .from(correctionRequests)
+      .where(
+        and(
+          eq(correctionRequests.id, id),
+          eq(correctionRequests.organizationId, user.organizationId),
+        ),
+      )
+      .limit(1);
     if (!req) throw Errors.notFound('Correction request');
-    return req;
+
+    const items = await this.d1.db
+      .select()
+      .from(correctionItems)
+      .where(eq(correctionItems.requestId, id));
+    const [session] = req.sessionId
+      ? await this.d1.db
+          .select()
+          .from(attendanceSessions)
+          .where(eq(attendanceSessions.id, req.sessionId))
+          .limit(1)
+      : [];
+    return { ...req, items: items.map(parseItem), session: session ?? null };
   }
 
   async cancel(user: AuthUser, id: string) {
     const req = await this.get(user, id);
     if (req.status !== 'PENDING')
       throw Errors.businessRule('Only pending requests can be cancelled');
-    const updated = await this.prisma.correctionRequest.update({
-      where: { id },
-      data: { status: 'CANCELLED' },
-    });
+    await this.d1.db
+      .update(correctionRequests)
+      .set({ status: 'CANCELLED', updatedAt: new Date() })
+      .where(eq(correctionRequests.id, id));
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -152,21 +264,22 @@ export class CorrectionsService {
       entityType: 'CorrectionRequest',
       entityId: id,
     });
-    return updated;
+    return this.get(user, id);
   }
 
   async reject(user: AuthUser, id: string, dto: ReviewCorrectionDto) {
     const req = await this.get(user, id);
     if (req.status !== 'PENDING') throw Errors.businessRule('Request is not pending');
-    const updated = await this.prisma.correctionRequest.update({
-      where: { id },
-      data: {
+    await this.d1.db
+      .update(correctionRequests)
+      .set({
         status: 'REJECTED',
         reviewedBy: user.userId,
         reviewedAt: new Date(),
-        reviewNotes: dto.reviewNotes,
-      },
-    });
+        reviewNotes: dto.reviewNotes ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(correctionRequests.id, id));
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -176,318 +289,49 @@ export class CorrectionsService {
       entityId: id,
       reason: dto.reviewNotes,
     });
-    return updated;
+    return this.get(user, id);
   }
 
   /**
    * APPROVE — a reviewer signs off a request somebody else filed.
-   * Runs in a transaction: re-validate freshness → apply field changes →
-   * recompute hours → mark APPROVED → write an audit record with old/new.
+   *
+   * The work happens in applyCorrectionOnD1, which is the only path that
+   * mutates attendance from a correction and is shared with the author who
+   * holds canApplyCorrections. It reads and decides first, then commits the
+   * session change and the APPROVED stamp as one guarded batch — so a request
+   * can never be marked approved without the attendance having moved, and a
+   * session that changed under it fails the guard instead of being overwritten.
    */
   async approve(user: AuthUser, id: string, dto: ReviewCorrectionDto) {
-    return this.prisma.$transaction((tx) => this.applyInTx(tx, user, id, dto));
+    const applied = await applyCorrectionOnD1(
+      this.d1.d1,
+      { userId: user.userId, organizationId: user.organizationId },
+      id,
+      { reviewNotes: dto.reviewNotes },
+    );
+    await this.recordApply(user, id, applied, dto);
+    return this.get(user, id);
   }
 
-  /**
-   * The ONLY path that mutates attendance from a correction, shared by the
-   * approver's sign-off and by an author who holds canApplyCorrections.
-   *
-   * It stays one function on purpose. Everything below — resolving which
-   * session a night shift's logout belongs to, refusing a logout that precedes
-   * its login, rebasing workDate onto the corrected time, recomputing the hours
-   * — was learned the hard way, and a second "apply directly" path would have
-   * to learn it all again.
-   */
-  private async applyInTx(
-    tx: Prisma.TransactionClient,
+  /** The audit row for an apply, whichever of the two paths ran it. */
+  private async recordApply(
     user: AuthUser,
     id: string,
+    applied: Awaited<ReturnType<typeof applyCorrectionOnD1>>,
     dto: ReviewCorrectionDto & { autoApplied?: boolean },
   ) {
-    {
-      const req = await tx.correctionRequest.findFirst({
-        where: { id, organizationId: user.organizationId },
-        include: { items: true },
-      });
-      if (!req) throw Errors.notFound('Correction request');
-      if (req.status !== 'PENDING') throw Errors.businessRule('Request is not pending');
-
-      let sessionBefore: Record<string, unknown> | null = null;
-      let sessionAfter: Record<string, unknown> | null = null;
-      let appliedSessionId: string | null = null;
-
-      {
-        const patch: Prisma.AttendanceSessionUpdateInput = {};
-        for (const item of req.items) {
-          const v = item.proposedValue as unknown;
-          switch (item.field) {
-            case 'login_at':
-              patch.loginAt = new Date(v as string);
-              break;
-            case 'logout_at':
-              patch.logoutAt = new Date(v as string);
-              break;
-            case 'site_id':
-              patch.site = { connect: { id: v as string } };
-              break;
-            case 'shift_id':
-              patch.shift = { connect: { id: v as string } };
-              break;
-            default:
-              throw Errors.businessRule(`Unsupported correction field: ${item.field}`);
-          }
-        }
-
-        const site = await tx.site.findFirst({
-          where: { id: req.siteId, organizationId: req.organizationId },
-          include: { settings: true },
-        });
-        if (!site) throw Errors.notFound('Site');
-
-        // Which day does this correction mean? NOT req.workDate — the mobile
-        // builds that from local midnight and converts to UTC, so at +05:30 it
-        // lands on the previous day and the Date column truncates it there. The
-        // proposed timestamp is an unambiguous instant, so derive the day from
-        // it and only fall back to workDate when nothing was proposed.
-        const anchor = (patch.loginAt ?? patch.logoutAt) as Date | undefined;
-        const targetDate = anchor ? businessDate(anchor, site.timezone) : req.workDate;
-
-        // Requests filed from the mobile app don't pin a sessionId, so fall back
-        // to the worker's session for the target day. Without this the approval
-        // silently changed nothing and attendance/reports kept the old values.
-        // Which of the day's sessions does a logout correction mean? The latest
-        // one that had already *started* by then — not simply the latest, which
-        // on 5 Aug 2026 put an 18:19 logout onto a stray tap made at 19:14 and
-        // left the row reading zero hours worked for both men it hit.
-        const startedBeforeLogout =
-          patch.logoutAt && !patch.loginAt ? { loginAt: { lt: patch.logoutAt as Date } } : {};
-
-        let session = req.sessionId
-          ? await tx.attendanceSession.findUnique({
-              where: { id: req.sessionId },
-              include: { shift: true, site: true },
-            })
-          : await tx.attendanceSession.findFirst({
-              where: {
-                organizationId: req.organizationId,
-                workerId: req.workerId,
-                workDate: targetDate,
-                ...startedBeforeLogout,
-              },
-              include: { shift: true, site: true },
-              orderBy: { loginAt: 'desc' },
-            });
-
-        // A night shift's logout falls on the *next* calendar day, so a
-        // logout-only correction ("he came in at 21:30 and left at 08:00")
-        // resolves to a day that has no session of its own. The row it means is
-        // the one still running from the evening before, so fall back to the
-        // worker's last session that started within the day before the proposed
-        // logout. Without this every overnight correction sat PENDING for ever:
-        // approving it only ever answered "no attendance session for that day".
-        if (!session && !req.sessionId && patch.logoutAt && !patch.loginAt) {
-          const proposedLogout = patch.logoutAt as Date;
-          const runningInto = {
-            organizationId: req.organizationId,
-            workerId: req.workerId,
-            loginAt: {
-              lt: proposedLogout,
-              gte: new Date(proposedLogout.getTime() - 24 * 60 * 60 * 1000),
-            },
-          };
-          // A session still OPEN is the one this logout is for. Only if there is
-          // none does an already-closed shift come into it — otherwise a stray
-          // request would silently stretch a finished day shift across the night.
-          session =
-            (await tx.attendanceSession.findFirst({
-              where: { ...runningInto, state: 'OPEN' },
-              include: { shift: true, site: true },
-              orderBy: { loginAt: 'desc' },
-            })) ??
-            (await tx.attendanceSession.findFirst({
-              where: runningInto,
-              include: { shift: true, site: true },
-              orderBy: { loginAt: 'desc' },
-            }));
-        }
-
-        if (req.sessionId && !session) throw Errors.conflict('Target session no longer exists');
-
-        // Freshness: if a pinned session changed after the request was filed, abort.
-        // Resolved-by-date sessions are deliberately exempt — they are looked up
-        // fresh at approval time, so "current row wins" is the intended behaviour.
-        if (req.sessionId && session && session.updatedAt > req.createdAt) {
-          throw Errors.conflict('Session changed since the request was filed; please re-file');
-        }
-
-        // A logout that lands before its own login is a typo, not a correction.
-        // Nothing downstream rejects it: the session closes with negative time,
-        // the hours engine floors that to zero, and the day quietly reads as
-        // worked-nothing. The Fix-attendance panel already refuses this; the
-        // approval path did not, and two days in August were saved that way.
-        // Compared against whatever the row will hold afterwards, so correcting
-        // only one end of a session is checked against the end left alone.
-        const finalLoginAt = (patch.loginAt as Date | undefined) ?? session?.loginAt;
-        const finalLogoutAt = (patch.logoutAt as Date | undefined) ?? session?.logoutAt;
-        if (finalLoginAt && finalLogoutAt && finalLogoutAt <= finalLoginAt) {
-          throw Errors.businessRule(
-            'The corrected logout time is not after the login time. Fix the times on the ' +
-              'request — approving this would record the day as zero hours worked.',
-          );
-        }
-
-        // A MISSING correction has no row to patch — the whole point is that the
-        // worker was never scanned in. Materialise the session from the proposed
-        // login time instead of approving into the void.
-        if (!session) {
-          if (!patch.loginAt) {
-            // Refuse rather than guess: a logout-only correction that matches no
-            // session on the target day and no shift running into it from the
-            // day before needs a human, not an invented row.
-            throw Errors.conflict(
-              `No attendance session for ${targetDate.toISOString().slice(0, 10)}, and no shift ` +
-                'running into that time from the day before. The correction must propose a ' +
-                'login time.',
-            );
-          }
-          // uq_open_session_per_worker allows only ONE open session per worker,
-          // so a login-only correction can't be materialised while the worker is
-          // still clocked in somewhere. Land it CLOSED when a logout is proposed.
-          if (!patch.logoutAt) {
-            const alreadyOpen = await tx.attendanceSession.findFirst({
-              where: { workerId: req.workerId, state: 'OPEN' },
-              include: { site: true },
-            });
-            if (alreadyOpen) {
-              // Name the day that is in the way. The conflicting session is
-              // usually *today* — the worker is on site right now — while the
-              // correction is for a day gone by, and an approver reading
-              // "already has an open session" has no way to guess that.
-              const openDay = businessDate(alreadyOpen.loginAt, alreadyOpen.site.timezone)
-                .toISOString()
-                .slice(0, 10);
-              throw Errors.conflict(
-                `This correction would open a second session for ${targetDate
-                  .toISOString()
-                  .slice(0, 10)}, but the worker is still clocked in from ${openDay} at ` +
-                  `${alreadyOpen.site.name}. A worker can only have one session open at a ` +
-                  'time. Add a logout time to the correction — a past day needs one anyway — ' +
-                  'or close the open session first.',
-              );
-            }
-          }
-          session = await tx.attendanceSession.create({
-            data: {
-              organizationId: req.organizationId,
-              workerId: req.workerId,
-              siteId: req.siteId,
-              shiftId: site.settings?.defaultShiftId ?? null,
-              workDate: targetDate,
-              loginAt: patch.loginAt as Date,
-              logoutAt: (patch.logoutAt as Date | undefined) ?? null,
-              state: patch.logoutAt ? 'CLOSED' : 'OPEN',
-            },
-            include: { shift: true, site: true },
-          });
-        } else {
-          sessionBefore = {
-            loginAt: session.loginAt,
-            logoutAt: session.logoutAt,
-            siteId: session.siteId,
-            shiftId: session.shiftId,
-            workDate: session.workDate,
-          };
-        }
-
-        // Apply, then recompute hours from resulting login/logout.
-        let applied = await tx.attendanceSession.update({
-          where: { id: session.id },
-          data: patch,
-          include: { shift: true, site: true },
-        });
-
-        // workDate is what attendance and reports filter on, so it has to follow
-        // a corrected login time (or a corrected site's timezone) — otherwise the
-        // session stays filed under the day it was originally scanned.
-        const workDate = businessDate(applied.loginAt, applied.site.timezone);
-        if (workDate.getTime() !== applied.workDate.getTime()) {
-          applied = await tx.attendanceSession.update({
-            where: { id: session.id },
-            data: { workDate },
-            include: { shift: true, site: true },
-          });
-        }
-
-        if (applied.logoutAt) {
-          const shiftCfg: ShiftConfig | undefined = applied.shift
-            ? {
-                startTimeMinutes: minutesOfDay(applied.shift.startTime),
-                endTimeMinutes: minutesOfDay(applied.shift.endTime),
-                isOvernight: applied.shift.isOvernight,
-                lateGraceMinutes: applied.shift.lateGraceMinutes,
-                earlyGraceMinutes: applied.shift.earlyGraceMinutes,
-                otThresholdMinutes: applied.shift.otThresholdMinutes,
-              }
-            : undefined;
-          const hours = computeWorkHours(
-            applied.loginAt,
-            applied.logoutAt,
-            applied.site.timezone,
-            shiftCfg,
-          );
-          await tx.attendanceSession.update({
-            where: { id: session.id },
-            data: {
-              state: 'CLOSED',
-              workedMinutes: hours.workedMinutes,
-              overtimeMinutes: hours.overtimeMinutes,
-              lateMinutes: hours.lateMinutes,
-              earlyLeaveMinutes: hours.earlyLeaveMinutes,
-              closedReason: 'CORRECTION',
-            },
-          });
-        }
-
-        sessionAfter = {
-          loginAt: applied.loginAt,
-          logoutAt: applied.logoutAt,
-          siteId: applied.siteId,
-          shiftId: applied.shiftId,
-          workDate: applied.workDate,
-        };
-        appliedSessionId = applied.id;
-      }
-
-      const updated = await tx.correctionRequest.update({
-        where: { id },
-        data: {
-          status: 'APPROVED',
-          reviewedBy: user.userId,
-          reviewedAt: new Date(),
-          reviewNotes: dto.reviewNotes,
-          autoApplied: dto.autoApplied ?? false,
-          // Record which session the approval actually landed on, so the request
-          // is traceable back to the row it changed.
-          ...(req.sessionId ? {} : { sessionId: appliedSessionId }),
-        },
-        include: { items: true },
-      });
-
-      await this.audit.record({
-        organizationId: user.organizationId,
-        actorUserId: user.userId,
-        actorRole: user.role,
-        // A distinct action, so "who changed attendance without review" is a
-        // question the audit log can answer on its own.
-        action: dto.autoApplied ? 'CORRECTION_AUTO_APPLY' : 'CORRECTION_APPROVE',
-        entityType: 'AttendanceSession',
-        entityId: appliedSessionId ?? req.id,
-        oldValue: sessionBefore,
-        newValue: sessionAfter,
-        reason: dto.reviewNotes,
-      });
-
-      return updated;
-    }
+    await this.audit.record({
+      organizationId: user.organizationId,
+      actorUserId: user.userId,
+      actorRole: user.role,
+      // A distinct action, so "who changed attendance without review" is a
+      // question the audit log can answer on its own.
+      action: dto.autoApplied ? 'CORRECTION_AUTO_APPLY' : 'CORRECTION_APPROVE',
+      entityType: 'AttendanceSession',
+      entityId: applied.sessionId ?? id,
+      oldValue: applied.before,
+      newValue: applied.after,
+      reason: dto.reviewNotes,
+    });
   }
 }
