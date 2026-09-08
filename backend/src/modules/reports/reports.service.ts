@@ -1,6 +1,31 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNull,
+  lt,
+  lte,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { D1Service } from '../../infra/d1/d1.service';
+import {
+  attendanceSessions,
+  correctionRequests,
+  designations,
+  organizations,
+  reportJobs,
+  sites,
+  vendors,
+  workerSiteAssignments,
+  workers,
+} from '../../infra/d1/schema.generated';
 import { CryptoService } from '../../common/crypto/crypto.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { Permission, roleHasPermission } from '../../common/rbac/permissions';
@@ -26,10 +51,44 @@ import {
 } from './report.renderer';
 import { CreateReportDto, ReportType } from './dto/report.dto';
 
+/**
+ * A session filter as a list of conditions.
+ *
+ * Prisma took one nested object; Drizzle takes conditions, and the flag says
+ * whether a work-date range was already pinned — from/to only applies when it
+ * was not, which the object form expressed by checking for the key.
+ */
+interface SessionFilter {
+  conditions: SQL[];
+  hasDateFilter: boolean;
+}
+
+/** A day as work_date stores it: 'YYYY-MM-DD'. */
+function day(v: Date | string): string {
+  return typeof v === 'string' ? v.slice(0, 10) : v.toISOString().slice(0, 10);
+}
+
+/**
+ * The worker, vendor, designation and site columns every session report reads.
+ *
+ * Prisma's `include` nested them; a join returns one flat row, so the selection
+ * and the reshaping live together rather than at each of the four call sites.
+ */
+const SESSION_JOIN_COLUMNS = {
+  session: attendanceSessions,
+  workerFullName: workers.fullName,
+  workerCode: workers.workerCode,
+  workerCategory: workers.category,
+  designationName: designations.name,
+  vendorName: vendors.name,
+  siteName: sites.name,
+  siteTimezone: sites.timezone,
+} as const;
+
 @Injectable()
 export class ReportsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly crypto: CryptoService,
     private readonly audit: AuditService,
   ) {}
@@ -120,17 +179,7 @@ export class ReportsService {
     // its own build + render path; CSV/PDF fall back to a flat representation.
     if (dto.reportType === ReportType.ATTENDANCE_SHEET) {
       const sheet = await this.buildAttendanceSheet(user, params, sensitive);
-      const job = await this.prisma.reportJob.create({
-        data: {
-          organizationId: user.organizationId,
-          requestedBy: user.userId,
-          reportType: dto.reportType,
-          format: dto.format,
-          params: params as Prisma.InputJsonValue,
-          status: 'DONE',
-          completedAt: new Date(),
-        },
-      });
+      const job = await this.recordJob(user, dto, params);
       const base = { jobId: job.id, status: job.status, rowCount: sheet.rows.length };
       const stem = `attendance-sheet-${job.id}`;
       if (dto.format === 'XLSX') {
@@ -171,21 +220,12 @@ export class ReportsService {
     // CSV and XLSX still carry the underlying rows.
     if (dto.format === 'PDF' && ReportsService.isChartReport(dto.reportType)) {
       const manpower = await this.buildManpower(user, dto.reportType, params);
-      const org = await this.prisma.organization.findUnique({
-        where: { id: user.organizationId },
-        select: { name: true },
-      });
-      const job = await this.prisma.reportJob.create({
-        data: {
-          organizationId: user.organizationId,
-          requestedBy: user.userId,
-          reportType: dto.reportType,
-          format: dto.format,
-          params: params as Prisma.InputJsonValue,
-          status: 'DONE',
-          completedAt: new Date(),
-        },
-      });
+      const [org] = await this.d1.db
+        .select({ name: organizations.name })
+        .from(organizations)
+        .where(eq(organizations.id, user.organizationId))
+        .limit(1);
+      const job = await this.recordJob(user, dto, params);
       const buffer = await renderManpowerPdf(manpower, org?.name ?? '');
       return {
         jobId: job.id,
@@ -199,17 +239,7 @@ export class ReportsService {
 
     const { headers, rows } = await this.buildRows(user, dto.reportType, params, sensitive);
 
-    const job = await this.prisma.reportJob.create({
-      data: {
-        organizationId: user.organizationId,
-        requestedBy: user.userId,
-        reportType: dto.reportType,
-        format: dto.format,
-        params: params as Prisma.InputJsonValue,
-        status: 'DONE',
-        completedAt: new Date(),
-      },
-    });
+    const job = await this.recordJob(user, dto, params);
 
     const title = `${dto.reportType} report`;
     const base = {
@@ -263,20 +293,59 @@ export class ReportsService {
     return { headers, rows, rowCount: rows.length };
   }
 
+  /**
+   * The receipt for a report that was just built.
+   *
+   * Every format takes the same row, so it is written once here rather than
+   * three times with the same eight fields.
+   */
+  private async recordJob(
+    user: AuthUser,
+    dto: CreateReportDto,
+    params: Record<string, unknown>,
+  ) {
+    const now = new Date();
+    const [job] = await this.d1.db
+      .insert(reportJobs)
+      .values({
+        id: randomUUID(),
+        organizationId: user.organizationId,
+        requestedBy: user.userId,
+        reportType: dto.reportType,
+        format: dto.format,
+        // Serialised here: the column is text on SQLite, and handing it an
+        // object stores "[object Object]".
+        params: JSON.stringify(params),
+        status: 'DONE',
+        completedAt: now,
+        createdAt: now,
+      })
+      .returning();
+    return job;
+  }
+
   async get(user: AuthUser, id: string) {
-    const job = await this.prisma.reportJob.findFirst({
-      where: { id, organizationId: user.organizationId },
-    });
+    const [job] = await this.d1.db
+      .select()
+      .from(reportJobs)
+      .where(and(eq(reportJobs.id, id), eq(reportJobs.organizationId, user.organizationId)))
+      .limit(1);
     if (!job) throw Errors.notFound('Report job');
     return job;
   }
 
   list(user: AuthUser, type?: string) {
-    return this.prisma.reportJob.findMany({
-      where: { organizationId: user.organizationId, ...(type ? { reportType: type } : {}) },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-    });
+    return this.d1.db
+      .select()
+      .from(reportJobs)
+      .where(
+        and(
+          eq(reportJobs.organizationId, user.organizationId),
+          ...(type ? [eq(reportJobs.reportType, type)] : []),
+        ),
+      )
+      .orderBy(desc(reportJobs.createdAt))
+      .limit(100);
   }
 
   // ---- Row builders --------------------------------------------------------
@@ -291,45 +360,53 @@ export class ReportsService {
     org: string,
     type: ReportType,
     params: Record<string, unknown>,
-  ): Prisma.AttendanceSessionWhereInput {
-    const where: Prisma.AttendanceSessionWhereInput = { organizationId: org };
-    if (params.siteId) where.siteId = String(params.siteId);
-    if (params.workerId) where.workerId = String(params.workerId);
-    // vendor and/or person-type (WORKER/STAFF/VISITOR) filters on the worker.
-    const workerFilter: Prisma.WorkerWhereInput = {};
-    if (params.vendorId) workerFilter.vendorId = String(params.vendorId);
-    if (params.category)
-      workerFilter.category = String(params.category) as Prisma.WorkerWhereInput['category'];
-    if (Object.keys(workerFilter).length) where.worker = workerFilter;
+  ): SessionFilter {
+    const conditions: SQL[] = [eq(attendanceSessions.organizationId, org)];
+    if (params.siteId) conditions.push(eq(attendanceSessions.siteId, String(params.siteId)));
+    if (params.workerId) conditions.push(eq(attendanceSessions.workerId, String(params.workerId)));
+    // vendor and/or person-type (WORKER/STAFF/VISITOR) filters on the worker,
+    // which every caller joins.
+    if (params.vendorId) conditions.push(eq(workers.vendorId, String(params.vendorId)));
+    if (params.category) conditions.push(eq(workers.category, String(params.category)));
+
+    // work_date is a calendar day, stored as text, so these are string
+    // comparisons — which sort correctly because the format is ISO.
+    let hasDateFilter = false;
     if (type === ReportType.DAILY && params.date) {
-      where.workDate = new Date(String(params.date));
+      conditions.push(eq(attendanceSessions.workDate, day(String(params.date))));
+      hasDateFilter = true;
     }
     // Weekly: params.weekStart is the Monday of the week; the range runs the
     // seven days from there, so the admin only ever picks one date.
     if (type === ReportType.WEEKLY && params.weekStart) {
       const start = new Date(`${String(params.weekStart)}T00:00:00.000Z`);
-      const end = new Date(start);
-      end.setUTCDate(end.getUTCDate() + 7);
-      where.workDate = { gte: start, lt: end };
+      const end = new Date(start.getTime() + 7 * 86_400_000);
+      conditions.push(
+        gte(attendanceSessions.workDate, day(start)),
+        lt(attendanceSessions.workDate, day(end)),
+      );
+      hasDateFilter = true;
     }
     if (type === ReportType.MONTHLY && params.month) {
       const [y, m] = String(params.month)
         .split('-')
         .map((n) => parseInt(n, 10));
-      where.workDate = { gte: new Date(Date.UTC(y, m - 1, 1)), lt: new Date(Date.UTC(y, m, 1)) };
+      conditions.push(
+        gte(attendanceSessions.workDate, day(new Date(Date.UTC(y, m - 1, 1)))),
+        lt(attendanceSessions.workDate, day(new Date(Date.UTC(y, m, 1)))),
+      );
+      hasDateFilter = true;
     }
     // from/to carry full date-times — filter on the actual login timestamp so
     // time-of-day selections in the admin panel are honoured.
-    if ((params.from || params.to) && !where.workDate) {
-      where.loginAt = {
-        ...(params.from ? { gte: new Date(String(params.from)) } : {}),
-        ...(params.to ? { lte: new Date(String(params.to)) } : {}),
-      };
+    if ((params.from || params.to) && !hasDateFilter) {
+      if (params.from) conditions.push(gte(attendanceSessions.loginAt, new Date(String(params.from))));
+      if (params.to) conditions.push(lte(attendanceSessions.loginAt, new Date(String(params.to))));
     }
     if (type === ReportType.OVERTIME) {
-      where.overtimeMinutes = { gt: 0 };
+      conditions.push(gt(attendanceSessions.overtimeMinutes, 0));
     }
-    return where;
+    return { conditions, hasDateFilter };
   }
 
   /** Whether the caller asked for the statutory hours cap. */
@@ -349,7 +426,7 @@ export class ReportsService {
     T extends {
       id: string;
       workerId: string;
-      workDate: Date;
+      workDate: string;
       workedMinutes: number | null;
       overtimeMinutes: number | null;
       loginAt: Date | null;
@@ -358,7 +435,8 @@ export class ReportsService {
   >(sessions: T[]): Map<string, CappedSession> {
     const byWorkerDay = new Map<string, T[]>();
     for (const s of sessions) {
-      const key = `${s.workerId}|${s.workDate.toISOString().slice(0, 10)}`;
+      // work_date is already 'YYYY-MM-DD'.
+      const key = `${s.workerId}|${s.workDate}`;
       const group = byWorkerDay.get(key);
       if (group) group.push(s);
       else byWorkerDay.set(key, [s]);
@@ -392,11 +470,10 @@ export class ReportsService {
    * from the subset that falls inside the period.
    */
   async buildManpower(user: AuthUser, type: ReportType, params: Record<string, unknown>) {
-    const where = this.sessionWhere(user.organizationId, type, params);
+    const filter = this.sessionWhere(user.organizationId, type, params);
     // Manpower is labour; an explicit category filter still wins so the admin
     // can look at staff deliberately.
-    const worker = (where.worker ?? {}) as Prisma.WorkerWhereInput;
-    where.worker = { ...worker, ...(params.category ? {} : { category: 'WORKER' }) };
+    if (!params.category) filter.conditions.push(eq(workers.category, 'WORKER'));
 
     const dayMs = 86_400_000;
     const iso = (d: Date) => d.toISOString().slice(0, 10);
@@ -405,25 +482,39 @@ export class ReportsService {
     // their own period.
     const trendStart = type === ReportType.DAILY ? new Date(start.getTime() - 6 * dayMs) : start;
 
-    const sessions = await this.prisma.attendanceSession.findMany({
-      where: { ...where, workDate: { gte: trendStart, lt: end } },
-      select: {
-        id: true,
-        workDate: true,
-        workedMinutes: true,
-        overtimeMinutes: true,
-        loginAt: true,
-        logoutAt: true,
-        workerId: true,
-        worker: {
-          select: {
-            vendor: { select: { name: true } },
-            designation: { select: { name: true } },
-          },
-        },
+    const rows = await this.d1.db
+      .select({
+        id: attendanceSessions.id,
+        workDate: attendanceSessions.workDate,
+        workedMinutes: attendanceSessions.workedMinutes,
+        overtimeMinutes: attendanceSessions.overtimeMinutes,
+        loginAt: attendanceSessions.loginAt,
+        logoutAt: attendanceSessions.logoutAt,
+        workerId: attendanceSessions.workerId,
+        vendorName: vendors.name,
+        designationName: designations.name,
+      })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .leftJoin(designations, eq(designations.id, workers.designationId))
+      .where(
+        and(
+          ...filter.conditions,
+          gte(attendanceSessions.workDate, day(trendStart)),
+          lt(attendanceSessions.workDate, day(end)),
+        ),
+      )
+      .limit(50000);
+    // Back into the nested shape the tallying below reads, rather than
+    // rewriting the tallying around a flat row.
+    const sessions = rows.map((r) => ({
+      ...r,
+      worker: {
+        vendor: r.vendorName ? { name: r.vendorName } : null,
+        designation: r.designationName ? { name: r.designationName } : null,
       },
-      take: 50000,
-    });
+    }));
 
     // Man-hours honour the same day-wide ceiling as the row reports, so the
     // headline total agrees with the detail rows behind it.
@@ -442,11 +533,11 @@ export class ReportsService {
     let inPeriod = 0;
 
     for (const s of sessions) {
-      const key = iso(s.workDate);
-      const i = trendIndex.get(key);
+      const i = trendIndex.get(s.workDate);
       if (i !== undefined) trend[i] += 1;
       // Everything below is period-only; the run-up days are trend context.
-      if (s.workDate < start) continue;
+      // Both sides are 'YYYY-MM-DD', which compares correctly as text.
+      if (s.workDate < day(start)) continue;
       inPeriod += 1;
       uniqueWorkers.add(s.workerId);
       manMinutes += (capped.get(s.id) ?? s).workedMinutes ?? 0;
@@ -529,20 +620,33 @@ export class ReportsService {
     const org = user.organizationId;
 
     if (type === ReportType.CORRECTION) {
-      const [reqs, orgRow] = await Promise.all([
-        this.prisma.correctionRequest.findMany({
-          where: { organizationId: org },
-          include: { worker: true },
-          orderBy: { createdAt: 'desc' },
-        }),
-        this.prisma.organization.findUnique({ where: { id: org } }),
+      const [reqs, orgRows] = await Promise.all([
+        this.d1.db
+          .select({
+            workDate: correctionRequests.workDate,
+            type: correctionRequests.type,
+            reason: correctionRequests.reason,
+            status: correctionRequests.status,
+            reviewedAt: correctionRequests.reviewedAt,
+            workerFullName: workers.fullName,
+          })
+          .from(correctionRequests)
+          .innerJoin(workers, eq(workers.id, correctionRequests.workerId))
+          .where(eq(correctionRequests.organizationId, org))
+          .orderBy(desc(correctionRequests.createdAt)),
+        this.d1.db
+          .select({ timezone: organizations.timezone })
+          .from(organizations)
+          .where(eq(organizations.id, org))
+          .limit(1),
       ]);
-      const tz = orgRow?.timezone || 'Asia/Kolkata';
+      const tz = orgRows[0]?.timezone || 'Asia/Kolkata';
       return {
         headers: ['Date', 'Worker', 'Type', 'Reason', 'Status', 'Reviewed At'],
         rows: reqs.map((r) => [
-          r.workDate.toISOString().slice(0, 10),
-          r.worker.fullName,
+          // Already 'YYYY-MM-DD'.
+          r.workDate,
+          r.workerFullName,
           r.type,
           r.reason,
           r.status,
@@ -551,27 +655,36 @@ export class ReportsService {
       };
     }
 
-    const where = this.sessionWhere(org, type, params);
+    const filter = this.sessionWhere(org, type, params);
 
     // Workers always come first, then staff, then visitors. Within a category,
     // optional vendor-wise sorting (params.sortBy === 'vendor'), then chronology.
     const vendorSort = params.sortBy === 'vendor';
-    const sessions = await this.prisma.attendanceSession.findMany({
-      where,
-      include: { worker: { include: { vendor: true, designation: true } }, site: true },
-      orderBy: [
-        { worker: { category: 'asc' } },
-        ...(vendorSort
-          ? [
-              {
-                worker: { vendor: { name: 'asc' } },
-              } as Prisma.AttendanceSessionOrderByWithRelationInput,
-            ]
-          : []),
-        { workDate: 'asc' },
-        { loginAt: 'asc' },
-      ],
-    });
+    const sessionRows = await this.d1.db
+      .select({ ...SESSION_JOIN_COLUMNS, worker: workers })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .leftJoin(designations, eq(designations.id, workers.designationId))
+      .leftJoin(sites, eq(sites.id, attendanceSessions.siteId))
+      .where(and(...filter.conditions))
+      .orderBy(
+        // The relation orderings Prisma expressed as nested objects are plain
+        // columns on the joined tables here.
+        asc(workers.category),
+        ...(vendorSort ? [asc(vendors.name)] : []),
+        asc(attendanceSessions.workDate),
+        asc(attendanceSessions.loginAt),
+      );
+    const sessions = sessionRows.map((r) => ({
+      ...r.session,
+      worker: {
+        ...r.worker,
+        vendor: r.vendorName ? { name: r.vendorName } : null,
+        designation: r.designationName ? { name: r.designationName } : null,
+      },
+      site: { name: r.siteName ?? '', timezone: r.siteTimezone ?? 'Asia/Kolkata' },
+    }));
 
     const sensitiveHeaders = [
       "Father's Name",
@@ -607,7 +720,8 @@ export class ReportsService {
       ...(sensitive ? sensitiveHeaders : []),
     ];
 
-    const day = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : '');
+    // Date-only columns arrive as 'YYYY-MM-DD' already.
+    const day = (d: string | null) => d ?? '';
     const stamp = (d: Date | null, tz: string) => (d ? this.formatStamp(d, tz) : null);
     const sensitiveCells = (w: (typeof sessions)[number]['worker']): (string | number | null)[] => [
       w.fatherName ?? '',
@@ -638,7 +752,7 @@ export class ReportsService {
     const toRow = (s: (typeof sessions)[number]): (string | number | null)[] => {
       const t = capped.get(s.id) ?? s;
       return [
-        s.workDate.toISOString().slice(0, 10),
+        s.workDate,
         s.worker.workerCode,
         s.worker.fullName,
         s.worker.category,
@@ -694,7 +808,11 @@ export class ReportsService {
     sensitive = false,
   ) {
     const orgId = user.organizationId;
-    const org = await this.prisma.organization.findUnique({ where: { id: orgId } });
+    const [org] = await this.d1.db
+      .select()
+      .from(organizations)
+      .where(eq(organizations.id, orgId))
+      .limit(1);
     const tz = org?.timezone || 'Asia/Kolkata';
 
     // Resolve the list of month blocks to render.
@@ -755,45 +873,66 @@ export class ReportsService {
     ); // exclusive
 
     // Workers (the workforce — exclude visitors), with optional vendor/site filters.
-    const where: Prisma.WorkerWhereInput = {
-      organizationId: orgId,
-      deletedAt: null,
+    const workerFilters: SQL[] = [
+      eq(workers.organizationId, orgId),
+      isNull(workers.deletedAt),
       // Default to the workforce (workers + staff); a Person-type filter narrows it.
-      category: params.category
-        ? (String(params.category) as Prisma.WorkerWhereInput['category'])
-        : { in: ['WORKER', 'STAFF'] },
-    };
-    if (params.vendorId) where.vendorId = String(params.vendorId);
+      params.category
+        ? eq(workers.category, String(params.category))
+        : inArray(workers.category, ['WORKER', 'STAFF']),
+    ];
+    if (params.vendorId) workerFilters.push(eq(workers.vendorId, String(params.vendorId)));
     if (params.siteId) {
-      where.assignments = { some: { siteId: String(params.siteId), endDate: null } };
+      // Prisma's `assignments: { some: ... }` — an EXISTS, which is what it
+      // compiled to. Written as one so a worker on two matching assignments is
+      // still listed once.
+      workerFilters.push(
+        sql`exists (select 1 from ${workerSiteAssignments} wsa
+              where wsa.worker_id = ${workers.id}
+                and wsa.end_date is null
+                and wsa.site_id = ${String(params.siteId)})`,
+      );
     }
-    const workers = await this.prisma.worker.findMany({
-      where,
-      include: { vendor: true },
-      orderBy: [{ category: 'asc' }, { fullName: 'asc' }],
-    });
+    const workerRows = await this.d1.db
+      .select({ worker: workers, vendorName: vendors.name })
+      .from(workers)
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .where(and(...workerFilters))
+      .orderBy(asc(workers.category), asc(workers.fullName));
+    const workerList = workerRows.map((r) => ({
+      ...r.worker,
+      vendor: r.vendorName ? { name: r.vendorName } : null,
+    }));
 
     // Every shift, per worker per day — not just the first IN and last Out.
     // Collapsing a split shift to its outer bounds would read as one unbroken
     // stretch and overstate the day (10:00-12:00 plus 13:00-15:00 is four hours
     // worked, not five), so each shift keeps its own IN/Out and lands in its
     // own block of the sheet.
-    const sessions = await this.prisma.attendanceSession.findMany({
-      where: {
-        organizationId: orgId,
-        workerId: { in: workers.map((w) => w.id) },
-        workDate: { gte: periodStart, lt: periodEnd },
-      },
-      select: {
-        id: true,
-        workerId: true,
-        workDate: true,
-        loginAt: true,
-        logoutAt: true,
-        workedMinutes: true,
-        overtimeMinutes: true,
-      },
-    });
+    const sessions = workerList.length
+      ? await this.d1.db
+          .select({
+            id: attendanceSessions.id,
+            workerId: attendanceSessions.workerId,
+            workDate: attendanceSessions.workDate,
+            loginAt: attendanceSessions.loginAt,
+            logoutAt: attendanceSessions.logoutAt,
+            workedMinutes: attendanceSessions.workedMinutes,
+            overtimeMinutes: attendanceSessions.overtimeMinutes,
+          })
+          .from(attendanceSessions)
+          .where(
+            and(
+              eq(attendanceSessions.organizationId, orgId),
+              inArray(
+                attendanceSessions.workerId,
+                workerList.map((w) => w.id),
+              ),
+              gte(attendanceSessions.workDate, day(periodStart)),
+              lt(attendanceSessions.workDate, day(periodEnd)),
+            ),
+          )
+      : [];
 
     // The sheet prints clock times rather than an hours column, so the cap acts
     // on the stamps themselves — the final Out of an over-long day is pulled
@@ -804,7 +943,7 @@ export class ReportsService {
 
     const byWorkerDay = new Map<string, Map<string, { inAt: Date | null; outAt: Date | null }[]>>();
     for (const s of sessions) {
-      const dkey = s.workDate.toISOString().slice(0, 10);
+      const dkey = s.workDate;
       let wm = byWorkerDay.get(s.workerId);
       if (!wm) {
         wm = new Map();
@@ -872,7 +1011,9 @@ export class ReportsService {
       year: 'numeric',
       timeZone: 'UTC',
     });
-    const fmtDate = (d: Date | null) => (d ? dateFmt.format(d) : '');
+    // Date-only columns are 'YYYY-MM-DD' text; read at UTC midnight so the
+    // formatter shows the day that was stored, not the day before it.
+    const fmtDate = (d: string | null) => (d ? dateFmt.format(new Date(`${d}T00:00:00.000Z`)) : '');
     const sex = (g: string | null) => (g === 'M' ? 'Male' : g === 'F' ? 'Female' : (g ?? ''));
 
     // Extra joining/sensitive columns appended to the info block for the full
@@ -908,12 +1049,12 @@ export class ReportsService {
     // PRESENCE mode: one column per day with P (present) / A (absent), blank for
     // days the worker wasn't employed. TIMES mode (default): IN/Out per day.
     const presence = String(params.attendanceMode ?? '').toUpperCase() === 'PRESENCE';
-    const dkeyOf = (w: { joinDate: Date | null; exitDate: Date | null }) => ({
-      join: w.joinDate ? w.joinDate.toISOString().slice(0, 10) : null,
-      exit: w.exitDate ? w.exitDate.toISOString().slice(0, 10) : null,
+    const dkeyOf = (w: { joinDate: string | null; exitDate: string | null }) => ({
+      join: w.joinDate,
+      exit: w.exitDate,
     });
 
-    const infoCells = (w: (typeof workers)[number], serial: number): (string | number | null)[] => [
+    const infoCells = (w: (typeof workerList)[number], serial: number): (string | number | null)[] => [
       serial,
       w.fullName,
       w.fatherName ?? '',
@@ -951,7 +1092,7 @@ export class ReportsService {
     }
 
     /** One worker's cells for a given shift of the day (0 = their first). */
-    const shiftCells = (w: (typeof workers)[number], shiftIndex: number): Cell[] => {
+    const shiftCells = (w: (typeof workerList)[number], shiftIndex: number): Cell[] => {
       const wm = byWorkerDay.get(w.id);
       const emp = dkeyOf(w);
       const cells: Cell[] = [];
@@ -1000,8 +1141,8 @@ export class ReportsService {
     for (let shiftIndex = 0; shiftIndex < maxShifts; shiftIndex++) {
       const inBlock =
         shiftIndex === 0
-          ? workers
-          : workers.filter((w) => {
+          ? workerList
+          : workerList.filter((w) => {
               const wm = byWorkerDay.get(w.id);
               return wm ? [...wm.values()].some((s) => s.length > shiftIndex) : false;
             });

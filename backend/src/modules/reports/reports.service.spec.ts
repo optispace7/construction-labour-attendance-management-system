@@ -1,7 +1,10 @@
+import { drizzle } from 'drizzle-orm/d1';
 import { ReportsService } from './reports.service';
 import { ReportType } from './dto/report.dto';
 import { Cell, cellText, isNightTime } from './report.builder';
 import { AuthUser } from '../../common/auth/auth-user.interface';
+import { createTestD1, insert, TestD1 } from '../../../test/d1-harness';
+import * as schema from '../../infra/d1/schema.generated';
 
 /**
  * Attendance-sheet shape: one block per shift of the day. Driven through the
@@ -18,39 +21,77 @@ describe('ReportsService — attendance sheet shifts', () => {
 
   const worker = (id: string, fullName: string, workerCode: string) => ({
     id,
-    fullName,
-    workerCode,
-    fatherName: null,
-    natureOfContractor: null,
-    dateOfBirth: null,
-    joinDate: null,
-    exitDate: null,
-    gender: null,
-    mobileNumber: null,
-    vendor: null,
+    organization_id: 'org1',
+    worker_code: workerCode,
+    full_name: fullName,
+    category: 'WORKER',
+    status: 'ACTIVE',
+    created_at: 0,
+    updated_at: 0,
   });
 
-  const DAY = new Date(Date.UTC(2026, 6, 11));
+  const DAY = '2026-07-11';
   /** A shift on 11 Jul 2026, given in whole UTC hours. */
-  const shift = (id: string, workerId: string, fromHour: number, toHour: number) => ({
+  const shift = (
+    id: string,
+    workerId: string,
+    fromHour: number,
+    toHour: number,
+    over: Record<string, unknown> = {},
+  ) => ({
     id,
-    workerId,
-    workDate: DAY,
-    loginAt: new Date(Date.UTC(2026, 6, 11, fromHour)),
-    logoutAt: new Date(Date.UTC(2026, 6, 11, toHour)),
-    workedMinutes: (toHour - fromHour) * 60,
-    overtimeMinutes: 0,
+    organization_id: 'org1',
+    worker_id: workerId,
+    site_id: 'site1',
+    work_date: DAY,
+    login_at: Date.UTC(2026, 6, 11, fromHour),
+    logout_at: Date.UTC(2026, 6, 11, toHour),
+    worked_minutes: (toHour - fromHour) * 60,
+    overtime_minutes: 0,
+    state: 'CLOSED',
+    is_cross_site: 0,
+    created_at: 0,
+    updated_at: 0,
+    ...over,
   });
 
-  const build = (workers: unknown[], sessions: unknown[]) => {
-    const prisma = {
-      organization: { findUnique: jest.fn().mockResolvedValue({ timezone: 'UTC' }) },
-      worker: { findMany: jest.fn().mockResolvedValue(workers) },
-      attendanceSession: { findMany: jest.fn().mockResolvedValue(sessions) },
-    };
+  let harness: TestD1 | null = null;
+
+  afterEach(async () => {
+    await harness?.dispose();
+    harness = null;
+  });
+
+  /**
+   * The service over a real SQLite. The sheet is built from joins and from
+   * calendar-day text, so the rows are seeded through the actual schema rather
+   * than handed to a mock — a fixture the database would reject is one the
+   * report would never see.
+   */
+  const build = async (
+    workers: Record<string, unknown>[],
+    sessions: Record<string, unknown>[],
+  ) => {
+    harness = await createTestD1();
+    const { db } = harness;
+    await insert(db, 'organizations', {
+      id: 'org1', name: 'X', code: 'X', timezone: 'UTC',
+      is_active: 1, logo_scale: 1, created_at: 0, updated_at: 0,
+    });
+    await insert(db, 'sites', {
+      id: 'site1', organization_id: 'org1', name: 'Tower A', code: 'TA',
+      timezone: 'UTC', is_active: 1, created_at: 0, updated_at: 0,
+    });
+    for (const w of workers) await insert(db, 'workers', w);
+    for (const s of sessions) await insert(db, 'attendance_sessions', s);
+
     const crypto = { decrypt: jest.fn() };
     const audit = { record: jest.fn() };
-    return new ReportsService(prisma as never, crypto as never, audit as never);
+    return new ReportsService(
+      { db: drizzle(db, { schema }), d1: db } as never,
+      crypto as never,
+      audit as never,
+    );
   };
 
   const params = { from: '2026-07-11', to: '2026-07-11' };
@@ -64,7 +105,7 @@ describe('ReportsService — attendance sheet shifts', () => {
   const names = (rows: Cell[][]) => rows.map((r) => (String(r[0]).includes('=====') ? r[0] : r[1]));
 
   it('keeps a single block when nobody logged in twice', async () => {
-    const svc = build(
+    const svc = await build(
       [worker('w1', 'Anand', 'EMP1'), worker('w2', 'Bala', 'EMP2')],
       [shift('s1', 'w1', 9, 17), shift('s2', 'w2', 9, 17)],
     );
@@ -74,7 +115,7 @@ describe('ReportsService — attendance sheet shifts', () => {
   });
 
   it('splits a two-shift day into a second block instead of one long stretch', async () => {
-    const svc = build(
+    const svc = await build(
       [worker('w1', 'Anand', 'EMP1'), worker('w2', 'Bala', 'EMP2')],
       [shift('s1', 'w1', 10, 12), shift('s2', 'w1', 13, 15), shift('s3', 'w2', 9, 17)],
     );
@@ -94,7 +135,7 @@ describe('ReportsService — attendance sheet shifts', () => {
   });
 
   it('numbers each block from one', async () => {
-    const svc = build(
+    const svc = await build(
       [worker('w1', 'Anand', 'EMP1'), worker('w2', 'Bala', 'EMP2')],
       [shift('s1', 'w1', 10, 12), shift('s2', 'w1', 13, 15), shift('s3', 'w2', 9, 17)],
     );
@@ -105,18 +146,17 @@ describe('ReportsService — attendance sheet shifts', () => {
   });
 
   it('leaves single-shift days blank in the second block', async () => {
-    const svc = build(
+    const svc = await build(
       [worker('w1', 'Anand', 'EMP1')],
       [
         // 11 Jul: two shifts. 12 Jul: one.
         shift('s1', 'w1', 10, 12),
         shift('s2', 'w1', 13, 15),
-        {
-          ...shift('s3', 'w1', 9, 17),
-          workDate: new Date(Date.UTC(2026, 6, 12)),
-          loginAt: new Date(Date.UTC(2026, 6, 12, 9)),
-          logoutAt: new Date(Date.UTC(2026, 6, 12, 17)),
-        },
+        shift('s3', 'w1', 9, 17, {
+          work_date: '2026-07-12',
+          login_at: Date.UTC(2026, 6, 12, 9),
+          logout_at: Date.UTC(2026, 6, 12, 17),
+        }),
       ],
     );
     const out = await svc.preview(user, ReportType.ATTENDANCE_SHEET, {
@@ -129,7 +169,7 @@ describe('ReportsService — attendance sheet shifts', () => {
   });
 
   it('stays a single block in presence mode, however many taps a day held', async () => {
-    const svc = build(
+    const svc = await build(
       [worker('w1', 'Anand', 'EMP1')],
       [shift('s1', 'w1', 10, 12), shift('s2', 'w1', 13, 15)],
     );
@@ -142,7 +182,7 @@ describe('ReportsService — attendance sheet shifts', () => {
   });
 
   it('pulls the last Out back when the day breaches the 9-hour cap', async () => {
-    const svc = build(
+    const svc = await build(
       [worker('w1', 'Anand', 'EMP1')],
       // 06:00-12:00 then 13:00-19:00 — twelve hours across two taps.
       [shift('s1', 'w1', 6, 12), shift('s2', 'w1', 13, 19)],
@@ -157,15 +197,14 @@ describe('ReportsService — attendance sheet shifts', () => {
   });
 
   it('marks both times of a shift that ends the next morning', async () => {
-    const svc = build(
+    const svc = await build(
       [worker('w1', 'Kailu', 'W-0084')],
       [
-        {
-          ...shift('s1', 'w1', 22, 22),
-          // In at 22:00 on the 11th, out at 06:00 on the 12th.
-          logoutAt: new Date(Date.UTC(2026, 6, 12, 6)),
-          workedMinutes: 480,
-        },
+        // In at 22:00 on the 11th, out at 06:00 on the 12th.
+        shift('s1', 'w1', 22, 22, {
+          logout_at: Date.UTC(2026, 6, 12, 6),
+          worked_minutes: 480,
+        }),
       ],
     );
     const out = await svc.preview(user, ReportType.ATTENDANCE_SHEET, params);
@@ -181,7 +220,7 @@ describe('ReportsService — attendance sheet shifts', () => {
   });
 
   it('leaves the times alone when the cap is off', async () => {
-    const svc = build(
+    const svc = await build(
       [worker('w1', 'Anand', 'EMP1')],
       [shift('s1', 'w1', 6, 12), shift('s2', 'w1', 13, 19)],
     );
