@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { UserRole } from '@prisma/client';
+import { UserRole } from '../../common/enums';
 import { CompanyDocumentsController } from './company-documents.controller';
 import { PERMISSIONS_KEY } from '../../common/rbac/rbac.decorators';
 import { Permission, roleHasPermission } from '../../common/rbac/permissions';

@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { ManualApprovalStatus } from '@prisma/client';
+import { ManualApprovalStatus } from '../../common/enums';
 import { ManualApprovalsService } from './manual-approvals.service';
 import { ReviewManualDto } from './dto/manual-approval.dto';
 import { RequirePermissions } from '../../common/rbac/rbac.decorators';

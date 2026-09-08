@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { CorrectionReason, CorrectionType } from '@prisma/client';
+import { CorrectionReason, CorrectionType } from '../../../common/enums';
 import { Type } from 'class-transformer';
 import {
   Allow,

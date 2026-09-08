@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { TapSource } from '@prisma/client';
+import { TapSource } from '../../../common/enums';
 import { Type } from 'class-transformer';
 import {
   IsBoolean,

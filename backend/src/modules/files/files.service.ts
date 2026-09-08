@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { PhotoKind } from '@prisma/client';
+import { PhotoKind } from '../../common/enums';
 import { compressImage } from './image-compressor';
 import { blobStore, blobStoreConfigured } from './blob-store';
 import { readStoredBytes, StoredBlobRef } from './read-blob';

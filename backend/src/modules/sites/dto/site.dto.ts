@@ -10,7 +10,7 @@ import {
   Max,
   Min,
 } from 'class-validator';
-import { PhotoVerifyMode, VerificationMode } from '@prisma/client';
+import { PhotoVerifyMode, VerificationMode } from '../../../common/enums';
 
 export class CreateSiteDto {
   @ApiProperty()

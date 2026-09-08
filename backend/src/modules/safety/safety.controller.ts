@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Res } from '@nestjs/common';
 import { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { SafetyMetric } from '@prisma/client';
+import { SafetyMetric } from '../../common/enums';
 import { SafetyService } from './safety.service';
 import { SafetyPeriod, SaveDailyDto, UpsertMetricDto, WasteTypeDto } from './dto/safety.dto';
 import { RequirePermissions } from '../../common/rbac/rbac.decorators';

@@ -1,4 +1,4 @@
-import { TapType } from '@prisma/client';
+import { TapType } from '../../../common/enums';
 
 export interface OpenSessionInfo {
   id: string;

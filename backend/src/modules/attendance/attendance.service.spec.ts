@@ -1,6 +1,15 @@
 import { AttendanceService } from './attendance.service';
-import { TapSource } from '@prisma/client';
+import { TapSource } from '../../common/enums';
 import { AppException } from '../../common/errors/app.exception';
+import { drizzleDouble } from '../../../test/drizzle-double';
+import {
+  attendanceSessions,
+  attendanceTaps,
+  manualAttendanceRequests,
+  organizations,
+  sites,
+  workers,
+} from '../../infra/d1/schema.generated';
 
 function makeDto(over: Partial<any> = {}) {
   return {
@@ -17,77 +26,131 @@ function makeDto(over: Partial<any> = {}) {
 const baseWorker = {
   id: 'w1',
   fullName: 'Ramesh',
+  workerCode: 'W-0001',
+  category: 'WORKER',
   photoUrl: null,
   bloodGroup: 'B+',
   emergencyContactName: 'S',
   emergencyContactNumber: '9',
   deletedAt: null,
-  validityTill: null as Date | null,
-};
-const baseSite = {
-  id: 'site-1',
-  timezone: 'Asia/Kolkata',
-  latitude: null,
-  longitude: null,
-  settings: {
-    siteId: 'site-1',
-    verificationMode: 'AUTO',
-    autoLoginCountdownSeconds: 10,
-    duplicateTapCooldownSeconds: 30,
-    safetyGapMinutes: 0,
-    geoEnforcement: false,
-    geoRadiusMeters: 200,
-    photoVerificationMode: 'NEVER',
-    photoVerificationRandomPct: 0,
-    defaultShiftId: null,
-    updatedAt: new Date(),
-  },
+  // A date-only column: 'YYYY-MM-DD' text, as SQLite stores it.
+  validityTill: null as string | null,
 };
 
-function buildService(prismaOver: any) {
-  const prisma: any = {
-    attendanceTap: {
-      findUnique: jest.fn().mockResolvedValue(null),
-      create: jest.fn().mockResolvedValue({ id: 'tap-1' }),
-      findFirst: jest.fn().mockResolvedValue(null),
-    },
-    site: {
-      findFirst: jest.fn().mockResolvedValue(baseSite),
-      findUnique: jest.fn().mockResolvedValue(baseSite),
-    },
-    worker: { findFirst: jest.fn().mockResolvedValue(baseWorker) },
-    attendanceSession: {
-      findFirst: jest.fn().mockResolvedValue(null),
-      create: jest
-        .fn()
-        .mockResolvedValue({ id: 'sess-1', loginAt: new Date('2026-06-09T02:30:00Z') }),
-      update: jest.fn(),
-      findUnique: jest.fn(),
-    },
-    manualAttendanceRequest: {
-      findFirst: jest.fn().mockResolvedValue(null),
-      create: jest.fn().mockResolvedValue({ id: 'mreq-1' }),
-    },
-    ...prismaOver,
+const baseSettings = {
+  siteId: 'site-1',
+  verificationMode: 'AUTO',
+  autoLoginCountdownSeconds: 10,
+  duplicateTapCooldownSeconds: 30,
+  safetyGapMinutes: 0,
+  geoEnforcement: false,
+  geoRadiusMeters: 200,
+  photoVerificationMode: 'NEVER',
+  photoVerificationRandomPct: 0,
+  defaultShiftId: null,
+  updatedAt: new Date(),
+};
+
+const baseSite = { id: 'site-1', timezone: 'Asia/Kolkata', latitude: null, longitude: null };
+
+/**
+ * An open session, in both the shapes it is read in.
+ *
+ * The tap decision reads it as a plain row; the logout path reads it joined to
+ * its shift. One object carries both, so a fixture reads as "there is an open
+ * session" rather than as two mocks that have to agree with each other.
+ */
+function openSessionRow(over: Partial<{ loginAt: Date; workDate: string }> = {}) {
+  const session = {
+    id: 'sess-1',
+    workerId: 'w1',
+    siteId: 'site-1',
+    state: 'OPEN',
+    loginAt: over.loginAt ?? new Date('2026-06-09T02:30:00Z'),
+    workDate: over.workDate ?? '2026-06-09',
   };
+  return { ...session, session, shift: null };
+}
+
+/**
+ * The service against a Drizzle double.
+ *
+ * Each option names a row the database holds, not a query — the tap path reads
+ * the taps table twice for different reasons, and the double is told which read
+ * is which rather than the test having to count calls.
+ */
+function buildService(
+  o: {
+    worker?: Record<string, unknown>;
+    settings?: Record<string, unknown>;
+    replayTap?: unknown;
+    lastTap?: unknown;
+    openSession?: unknown;
+    pendingManual?: unknown;
+    logoutResult?: Record<string, unknown>;
+  } = {},
+) {
+  const db = drizzleDouble(
+    [
+      [sites, [{ site: baseSite, settings: { ...baseSettings, ...(o.settings ?? {}) } }]],
+      [
+        workers,
+        [
+          {
+            worker: { ...baseWorker, ...(o.worker ?? {}) },
+            vendorName: null,
+            designationName: null,
+          },
+        ],
+      ],
+      // Read 0 is the replay check; read 1 is the worker's last tap.
+      [
+        attendanceTaps,
+        (n) =>
+          n === 0 ? (o.replayTap ? [o.replayTap] : []) : o.lastTap ? [o.lastTap] : [],
+      ],
+      [attendanceSessions, o.openSession ? [o.openSession] : []],
+      [manualAttendanceRequests, o.pendingManual ? [o.pendingManual] : []],
+    ],
+    {
+      onWrite: (kind, table) => {
+        if (table === attendanceTaps) return [{ id: 'tap-1' }];
+        if (table === attendanceSessions) {
+          return [
+            {
+              id: 'sess-1',
+              loginAt: new Date('2026-06-09T02:30:00Z'),
+              logoutAt: new Date('2026-06-09T11:30:00Z'),
+              workedMinutes: 540,
+              overtimeMinutes: 0,
+              ...(o.logoutResult ?? {}),
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
   const redis: any = { acquireLock: jest.fn().mockResolvedValue('tok'), releaseLock: jest.fn() };
   const audit: any = { record: jest.fn() };
   const notifications: any = { create: jest.fn() };
   return {
-    svc: new AttendanceService(prisma, redis, audit, notifications),
-    prisma,
+    svc: new AttendanceService({ db: db.db } as any, redis, audit, notifications),
+    db,
     audit,
     notifications,
   };
 }
 
+type Db = ReturnType<typeof buildService>['db'];
+const inserted = (db: Db, table: unknown) =>
+  db.writes.some((w) => w.kind === 'insert' && w.table === table);
+const updated = (db: Db, table: unknown) =>
+  db.writes.some((w) => w.kind === 'update' && w.table === table);
+
 describe('AttendanceService.handleTap', () => {
   it('returns IDEMPOTENT_REPLAY for an already-seen eventId', async () => {
-    const { svc } = buildService({
-      attendanceTap: {
-        findUnique: jest.fn().mockResolvedValue({ id: 'tap-x', eventId: 'e', tapType: 'LOGIN' }),
-      },
-    });
+    const { svc } = buildService({ replayTap: { id: 'tap-x', eventId: 'e', tapType: 'LOGIN' } });
     const res = await svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' });
     expect(res.result).toBe('IDEMPOTENT_REPLAY');
   });
@@ -95,7 +158,7 @@ describe('AttendanceService.handleTap', () => {
   // A typed-in worker code has no badge behind it, so it files a request and
   // leaves attendance alone until a Safety Officer accepts it.
   it('holds a hand-typed LOGIN for review instead of opening a session', async () => {
-    const { svc, prisma, notifications } = buildService({});
+    const { svc, db, notifications } = buildService({});
     const res = await svc.handleTap(
       'org-1',
       makeDto({ source: TapSource.MANUAL, manual: { isBackup: true, reason: 'Forgot card' } }),
@@ -103,11 +166,10 @@ describe('AttendanceService.handleTap', () => {
     );
 
     expect(res.result).toBe('MANUAL_PENDING_APPROVAL');
-    expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
+    expect(inserted(db, attendanceSessions)).toBe(false);
     // The tap is still written — it is the evidence that someone typed it in.
-    expect(prisma.attendanceTap.create).toHaveBeenCalled();
-    expect(prisma.manualAttendanceRequest.create).toHaveBeenCalled();
-    expect(prisma.manualAttendanceRequest.create.mock.calls[0][0].data).toMatchObject({
+    expect(inserted(db, attendanceTaps)).toBe(true);
+    expect(db.wrote(manualAttendanceRequests)).toMatchObject({
       tapType: 'LOGIN',
       reason: 'Forgot card',
       sessionId: null,
@@ -116,19 +178,8 @@ describe('AttendanceService.handleTap', () => {
   });
 
   it('holds a hand-typed LOGOUT for review and leaves the session open', async () => {
-    const open = {
-      id: 'sess-1',
-      loginAt: new Date('2026-06-09T01:00:00Z'),
-      siteId: 'site-1',
-      shift: null,
-    };
-    const { svc, prisma } = buildService({
-      attendanceSession: {
-        findFirst: jest.fn().mockResolvedValue(open),
-        findUnique: jest.fn().mockResolvedValue(open),
-        create: jest.fn(),
-        update: jest.fn(),
-      },
+    const { svc, db } = buildService({
+      openSession: openSessionRow({ loginAt: new Date('2026-06-09T01:00:00Z') }),
     });
     const res = await svc.handleTap(
       'org-1',
@@ -137,23 +188,18 @@ describe('AttendanceService.handleTap', () => {
     );
 
     expect(res.result).toBe('MANUAL_PENDING_APPROVAL');
-    expect(prisma.attendanceSession.update).not.toHaveBeenCalled();
+    expect(updated(db, attendanceSessions)).toBe(false);
     // The logout pins the session it means to close, so approval cannot land on
     // a different one later.
-    expect(prisma.manualAttendanceRequest.create.mock.calls[0][0].data).toMatchObject({
+    expect(db.wrote(manualAttendanceRequests)).toMatchObject({
       tapType: 'LOGOUT',
       sessionId: 'sess-1',
     });
   });
 
   it('refuses a second hand-typed punch while one is still waiting', async () => {
-    const { svc, prisma } = buildService({
-      manualAttendanceRequest: {
-        findFirst: jest
-          .fn()
-          .mockResolvedValue({ tapType: 'LOGIN', createdAt: new Date('2026-06-09T02:00:00Z') }),
-        create: jest.fn(),
-      },
+    const { svc, db } = buildService({
+      pendingManual: { tapType: 'LOGIN', createdAt: new Date('2026-06-09T02:00:00Z') },
     });
 
     await expect(
@@ -162,54 +208,42 @@ describe('AttendanceService.handleTap', () => {
       }),
     ).rejects.toMatchObject({ code: 'MANUAL_REVIEW_PENDING' });
     // Nothing is written — the watchman is told at the gate.
-    expect(prisma.attendanceTap.create).not.toHaveBeenCalled();
-    expect(prisma.manualAttendanceRequest.create).not.toHaveBeenCalled();
+    expect(db.writes).toHaveLength(0);
   });
 
   it('still refuses a hand-typed login on an expired card', async () => {
-    const { svc, prisma } = buildService({
-      worker: {
-        findFirst: jest
-          .fn()
-          .mockResolvedValue({ ...baseWorker, validityTill: new Date('2026-06-01T00:00:00Z') }),
-      },
-    });
+    const { svc, db } = buildService({ worker: { validityTill: '2026-06-01' } });
 
     await expect(
       svc.handleTap('org-1', makeDto({ source: TapSource.MANUAL, manual: { isBackup: true } }), {
         deviceId: 'dev-1',
       }),
     ).rejects.toMatchObject({ code: 'CARD_EXPIRED' });
-    expect(prisma.manualAttendanceRequest.create).not.toHaveBeenCalled();
+    expect(inserted(db, manualAttendanceRequests)).toBe(false);
   });
 
   it('records a LOGIN in AUTO mode (creates an open session)', async () => {
-    const { svc, prisma } = buildService({});
+    const { svc, db } = buildService({});
     const res = await svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1', photoRoll: 99 });
     expect(res.result).toBe('LOGIN_RECORDED');
-    expect(prisma.attendanceSession.create).toHaveBeenCalled();
+    expect(inserted(db, attendanceSessions)).toBe(true);
   });
 
   describe('expired ID card', () => {
     // Tap is 09-Jun-2026 08:00 IST; the card lapsed at the end of 08-Jun.
-    const expiredWorker = { ...baseWorker, validityTill: new Date('2026-06-08T00:00:00.000Z') };
+    const expired = { validityTill: '2026-06-08' };
 
     it('refuses the LOGIN and records no tap at all', async () => {
-      const { svc, prisma } = buildService({
-        worker: { findFirst: jest.fn().mockResolvedValue(expiredWorker) },
-      });
+      const { svc, db } = buildService({ worker: expired });
 
       await expect(svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' })).rejects.toBeInstanceOf(
         AppException,
       );
-      expect(prisma.attendanceTap.create).not.toHaveBeenCalled();
-      expect(prisma.attendanceSession.create).not.toHaveBeenCalled();
+      expect(db.writes).toHaveLength(0);
     });
 
     it('names the worker and the expiry date so the gate can act on it', async () => {
-      const { svc } = buildService({
-        worker: { findFirst: jest.fn().mockResolvedValue(expiredWorker) },
-      });
+      const { svc } = buildService({ worker: expired });
       try {
         await svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' });
         throw new Error('expected the tap to be rejected');
@@ -224,26 +258,7 @@ describe('AttendanceService.handleTap', () => {
 
     it('still lets someone already on site tap out', async () => {
       // Trapping a worker inside the gate would be worse than a lapsed card.
-      const open = {
-        id: 'sess-1',
-        loginAt: new Date('2026-06-09T02:30:00Z'),
-        siteId: 'site-1',
-        shift: null,
-      };
-      const { svc } = buildService({
-        worker: { findFirst: jest.fn().mockResolvedValue(expiredWorker) },
-        attendanceSession: {
-          findFirst: jest.fn().mockResolvedValue(open),
-          findUnique: jest.fn().mockResolvedValue(open),
-          update: jest.fn().mockResolvedValue({
-            id: 'sess-1',
-            workedMinutes: 540,
-            overtimeMinutes: 0,
-            logoutAt: new Date(),
-          }),
-          create: jest.fn(),
-        },
-      });
+      const { svc } = buildService({ worker: expired, openSession: openSessionRow() });
       const res = await svc.handleTap(
         'org-1',
         makeDto({ clientEventTime: '2026-06-09T11:30:00Z' }),
@@ -253,36 +268,15 @@ describe('AttendanceService.handleTap', () => {
     });
 
     it('lets a card valid through today log in', async () => {
-      const validToday = { ...baseWorker, validityTill: new Date('2026-06-09T00:00:00.000Z') };
-      const { svc, prisma } = buildService({
-        worker: { findFirst: jest.fn().mockResolvedValue(validToday) },
-      });
+      const { svc, db } = buildService({ worker: { validityTill: '2026-06-09' } });
       const res = await svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1', photoRoll: 99 });
       expect(res.result).toBe('LOGIN_RECORDED');
-      expect(prisma.attendanceSession.create).toHaveBeenCalled();
+      expect(inserted(db, attendanceSessions)).toBe(true);
     });
   });
 
   it('records a LOGOUT when an open session exists', async () => {
-    const open = {
-      id: 'sess-1',
-      loginAt: new Date('2026-06-09T02:30:00Z'),
-      siteId: 'site-1',
-      shift: null,
-    };
-    const { svc } = buildService({
-      attendanceSession: {
-        findFirst: jest.fn().mockResolvedValue(open),
-        findUnique: jest.fn().mockResolvedValue(open),
-        update: jest.fn().mockResolvedValue({
-          id: 'sess-1',
-          workedMinutes: 540,
-          overtimeMinutes: 0,
-          logoutAt: new Date(),
-        }),
-        create: jest.fn(),
-      },
-    });
+    const { svc } = buildService({ openSession: openSessionRow() });
     const res = await svc.handleTap('org-1', makeDto({ clientEventTime: '2026-06-09T11:30:00Z' }), {
       deviceId: 'dev-1',
     });
@@ -291,13 +285,8 @@ describe('AttendanceService.handleTap', () => {
   });
 
   it('rejects a duplicate tap inside the cooldown window', async () => {
-    const lastTap = { clientEventTime: new Date('2026-06-09T02:30:00Z'), tapType: 'LOGIN' };
     const { svc } = buildService({
-      attendanceTap: {
-        findUnique: jest.fn().mockResolvedValue(null),
-        create: jest.fn(),
-        findFirst: jest.fn().mockResolvedValue(lastTap),
-      },
+      lastTap: { clientEventTime: new Date('2026-06-09T02:30:00Z'), tapType: 'LOGIN' },
     });
     await expect(
       svc.handleTap('org-1', makeDto({ clientEventTime: '2026-06-09T02:30:10Z' }), {
@@ -310,54 +299,34 @@ describe('AttendanceService.handleTap', () => {
 describe('AttendanceService.dashboardStats', () => {
   const user = { organizationId: 'org-1', role: 'SUPER_ADMIN', siteScopes: [] } as any;
 
-  /** UTC midnight of a business day, the way businessDate() returns it. */
-  const day = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
+  /** Today's business day as the service computes it, in stored 'YYYY-MM-DD'. */
+  const todayText = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+  const dayBefore = (d: string) =>
+    new Date(new Date(`${d}T00:00:00.000Z`).getTime() - 86_400_000).toISOString().slice(0, 10);
 
-  function buildStats(sessionRows: any[], workerGroups: any[], openRows: any[] = []) {
-    const prisma: any = {
-      organization: { findUnique: jest.fn().mockResolvedValue({ timezone: 'Asia/Kolkata' }) },
-      attendanceSession: {
-        // Three calls in order: open sessions, missed logouts, then the
-        // today+yesterday window that gate movement is tallied from.
-        findMany: jest
-          .fn()
-          .mockResolvedValueOnce(openRows)
-          .mockResolvedValueOnce([])
-          .mockResolvedValueOnce(sessionRows),
-      },
-      worker: { groupBy: jest.fn().mockResolvedValue(workerGroups) },
-    };
-    return new AttendanceService(prisma, {} as any, {} as any, {} as any);
+  /**
+   * The sessions table is read three times in order: open sessions, missed
+   * logouts, then the today+yesterday window gate movement is tallied from.
+   */
+  function buildStats(windowRows: any[], workforceGroups: any[], openRows: any[] = []) {
+    const db = drizzleDouble([
+      [organizations, [{ timezone: 'Asia/Kolkata' }]],
+      [attendanceSessions, (n) => (n === 0 ? openRows : n === 1 ? [] : windowRows)],
+      [workers, workforceGroups],
+    ]);
+    return new AttendanceService({ db: db.db } as any, {} as any, {} as any, {} as any);
   }
 
   it('counts people rather than sessions, so a worker who re-enters counts once', async () => {
     // Ramesh has two sessions today — he stepped out and came back.
-    const today = day(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10));
+    const today = todayText();
     const svc = buildStats(
       [
-        {
-          workerId: 'w1',
-          workDate: today,
-          state: 'CLOSED',
-          lateMinutes: 0,
-          worker: { category: 'WORKER' },
-        },
-        {
-          workerId: 'w1',
-          workDate: today,
-          state: 'OPEN',
-          lateMinutes: 0,
-          worker: { category: 'WORKER' },
-        },
-        {
-          workerId: 'w2',
-          workDate: today,
-          state: 'CLOSED',
-          lateMinutes: 15,
-          worker: { category: 'WORKER' },
-        },
+        { workerId: 'w1', workDate: today, state: 'CLOSED', lateMinutes: 0, category: 'WORKER' },
+        { workerId: 'w1', workDate: today, state: 'OPEN', lateMinutes: 0, category: 'WORKER' },
+        { workerId: 'w2', workDate: today, state: 'CLOSED', lateMinutes: 15, category: 'WORKER' },
       ],
-      [{ category: 'WORKER', _count: { _all: 10 } }],
+      [{ category: 'WORKER', count: 10 }],
     );
 
     const res = await svc.dashboardStats(user);
@@ -373,8 +342,8 @@ describe('AttendanceService.dashboardStats', () => {
     const svc = buildStats(
       [],
       [
-        { category: 'WORKER', _count: { _all: 120 } },
-        { category: 'STAFF', _count: { _all: 8 } },
+        { category: 'WORKER', count: 120 },
+        { category: 'STAFF', count: 8 },
       ],
     );
 
@@ -387,13 +356,15 @@ describe('AttendanceService.dashboardStats', () => {
   // The reason "on site" read 6 on one screen and 2 on another: four sessions
   // from the previous day were never scanned out.
   it('splits people on site into today and carried over from earlier days', async () => {
-    const today = day(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10));
-    const yesterday = new Date(today.getTime() - 86_400_000);
-    const person = (name: string, workDate: Date) => ({
-      loginAt: workDate,
+    const today = todayText();
+    const yesterday = dayBefore(today);
+    const person = (name: string, workDate: string) => ({
+      loginAt: new Date(`${workDate}T02:30:00.000Z`),
       workDate,
-      worker: { fullName: name, workerCode: name, category: 'WORKER' },
-      site: { name: 'Tower A' },
+      fullName: name,
+      workerCode: name,
+      category: 'WORKER',
+      siteName: 'Tower A',
     });
 
     const svc = buildStats(
@@ -424,16 +395,18 @@ describe('AttendanceService.dashboardStats', () => {
   });
 
   it('reports nothing carried over when every open session started today', async () => {
-    const today = day(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10));
+    const today = todayText();
     const svc = buildStats(
       [],
       [],
       [
         {
-          loginAt: today,
+          loginAt: new Date(`${today}T02:30:00.000Z`),
           workDate: today,
-          worker: { fullName: 'Ramesh', workerCode: 'W1', category: 'WORKER' },
-          site: { name: 'Tower A' },
+          fullName: 'Ramesh',
+          workerCode: 'W1',
+          category: 'WORKER',
+          siteName: 'Tower A',
         },
       ],
     );
@@ -444,30 +417,24 @@ describe('AttendanceService.dashboardStats', () => {
   });
 
   it('keeps yesterday separate from today so a card can show a real change', async () => {
-    const today = day(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10));
-    const yesterday = new Date(today.getTime() - 86_400_000);
+    const today = todayText();
+    const yesterday = dayBefore(today);
     const svc = buildStats(
       [
-        {
-          workerId: 'w1',
-          workDate: today,
-          state: 'OPEN',
-          lateMinutes: 0,
-          worker: { category: 'WORKER' },
-        },
+        { workerId: 'w1', workDate: today, state: 'OPEN', lateMinutes: 0, category: 'WORKER' },
         {
           workerId: 'w2',
           workDate: yesterday,
           state: 'CLOSED',
           lateMinutes: 0,
-          worker: { category: 'WORKER' },
+          category: 'WORKER',
         },
         {
           workerId: 'w3',
           workDate: yesterday,
           state: 'CLOSED',
           lateMinutes: 0,
-          worker: { category: 'WORKER' },
+          category: 'WORKER',
         },
       ],
       [],
@@ -488,77 +455,52 @@ describe('AttendanceService.loggedOutToday', () => {
   } as any;
 
   it('returns one latest logged-out row per person and excludes people currently on site', async () => {
-    const workerBackOnSite = {
-      id: 'w1',
-      fullName: 'Ramesh',
-      workerCode: 'W001',
+    const closed = (id: string, workerId: string, name: string, logoutAt: string) => ({
+      id,
+      loginAt: new Date('2026-07-14T02:30:00Z'),
+      logoutAt: new Date(logoutAt),
+      workedMinutes: 120,
+      workerId,
+      fullName: name,
+      workerCode: name,
       category: 'WORKER',
-    };
-    const workerGoneHome = { id: 'w2', fullName: 'Suresh', workerCode: 'W002', category: 'WORKER' };
+      designationName: null,
+      vendorName: null,
+      siteId: 'site-1',
+      siteName: 'Site 1',
+    });
+    // Newest logout first, which is the order the query returns them in.
     const closedRows = [
-      {
-        id: 'closed-w1',
-        loginAt: new Date('2026-07-14T02:30:00Z'),
-        logoutAt: new Date('2026-07-14T04:30:00Z'),
-        workedMinutes: 120,
-        worker: workerBackOnSite,
-        site: { id: 'site-1', name: 'Site 1' },
-      },
-      {
-        id: 'closed-w2-latest',
-        loginAt: new Date('2026-07-14T02:30:00Z'),
-        logoutAt: new Date('2026-07-14T11:30:00Z'),
-        workedMinutes: 540,
-        worker: workerGoneHome,
-        site: { id: 'site-1', name: 'Site 1' },
-      },
-      {
-        id: 'closed-w2-earlier',
-        loginAt: new Date('2026-07-14T01:30:00Z'),
-        logoutAt: new Date('2026-07-14T02:00:00Z'),
-        workedMinutes: 30,
-        worker: workerGoneHome,
-        site: { id: 'site-1', name: 'Site 1' },
-      },
+      closed('closed-w2-latest', 'w2', 'Suresh', '2026-07-14T11:30:00Z'),
+      closed('closed-w1', 'w1', 'Ramesh', '2026-07-14T04:30:00Z'),
+      closed('closed-w2-earlier', 'w2', 'Suresh', '2026-07-14T02:00:00Z'),
     ];
 
-    const findMany = jest
-      .fn()
-      .mockResolvedValueOnce([{ workerId: 'w1' }])
-      .mockResolvedValueOnce(closedRows);
-    const { svc } = buildService({
-      organization: { findUnique: jest.fn().mockResolvedValue({ timezone: 'Asia/Kolkata' }) },
-      attendanceSession: { findMany },
-    });
+    const db = drizzleDouble([
+      [organizations, [{ timezone: 'Asia/Kolkata' }]],
+      // Read 0 is who is still on site; read 1 is the day's closed rows.
+      [attendanceSessions, (n) => (n === 0 ? [{ workerId: 'w1' }] : closedRows)],
+    ]);
+    const svc = new AttendanceService({ db: db.db } as any, {} as any, {} as any, {} as any);
 
     const rows = await svc.loggedOutToday(user, 'all', undefined, '2026-07-14');
 
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe('closed-w2-latest');
-    expect(findMany).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        where: expect.objectContaining({ state: 'OPEN', siteId: { in: ['site-1'] } }),
-      }),
-    );
+    // Both reads stay inside the user's own sites.
+    expect(db.boundValues()).toContain('site-1');
   });
 });
 
 describe('AttendanceService.workerTapState', () => {
   it('reports the open session a *different* device opened, so this one scans OUT', async () => {
     const { svc } = buildService({
-      attendanceSession: {
-        findFirst: jest.fn().mockResolvedValue({
-          id: 'sess-9',
-          loginAt: new Date('2026-07-22T02:30:00Z'),
-          siteId: 'site-1',
-        }),
+      openSession: {
+        id: 'sess-9',
+        loginAt: new Date('2026-07-22T02:30:00Z'),
+        siteId: 'site-1',
       },
-      attendanceTap: {
-        findFirst: jest
-          .fn()
-          .mockResolvedValue({ clientEventTime: new Date('2026-07-22T02:30:00Z') }),
-      },
+      replayTap: { clientEventTime: new Date('2026-07-22T02:30:00Z') },
     });
 
     const state = await svc.workerTapState('org-1', 'w1');
@@ -587,77 +529,43 @@ describe('AttendanceService.workerTapState', () => {
  */
 describe('AttendanceService safety gap', () => {
   // Site runs a 10-minute gap; the worker logged in one minute before the tap.
-  const gappedSite = {
-    ...baseSite,
-    settings: { ...baseSite.settings, safetyGapMinutes: 10 },
-  };
-  const openSession = {
-    id: 'sess-1',
-    workerId: 'w1',
-    siteId: 'site-1',
-    state: 'OPEN',
-    loginAt: new Date('2026-06-09T02:29:00Z'),
-    workDate: new Date('2026-06-09T00:00:00Z'),
-    shift: null,
-  };
-
-  function buildGapped(over: any = {}) {
+  function buildGapped(over: Parameters<typeof buildService>[0] = {}) {
     return buildService({
-      site: {
-        findFirst: jest.fn().mockResolvedValue(gappedSite),
-        findUnique: jest.fn().mockResolvedValue(gappedSite),
-      },
-      attendanceSession: {
-        findFirst: jest.fn().mockResolvedValue(openSession),
-        findUnique: jest.fn().mockResolvedValue(openSession),
-        create: jest.fn(),
-        update: jest.fn().mockResolvedValue({ ...openSession, workedMinutes: 1 }),
-      },
-      attendanceTap: {
-        findUnique: jest.fn().mockResolvedValue(null),
-        create: jest.fn().mockResolvedValue({ id: 'tap-1' }),
-        findFirst: jest.fn().mockResolvedValue({
-          clientEventTime: new Date('2026-06-09T02:29:00Z'),
-          tapType: 'LOGIN',
-        }),
-      },
+      settings: { safetyGapMinutes: 10 },
+      openSession: openSessionRow({ loginAt: new Date('2026-06-09T02:29:00Z') }),
+      lastTap: { clientEventTime: new Date('2026-06-09T02:29:00Z'), tapType: 'LOGIN' },
+      logoutResult: { workedMinutes: 1 },
       ...over,
     });
   }
 
   it('refuses to close a session opened a minute ago, and records no tap', async () => {
-    const { svc, prisma } = buildGapped();
+    const { svc, db } = buildGapped();
 
     await expect(svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' })).rejects.toMatchObject({
       code: 'TAP_TOO_SOON',
     });
-    expect(prisma.attendanceTap.create).not.toHaveBeenCalled();
-    expect(prisma.attendanceSession.update).not.toHaveBeenCalled();
+    expect(db.writes).toHaveLength(0);
   });
 
   it('exempts visitors — a ten-minute site visit is a normal visit', async () => {
-    const { svc, prisma } = buildGapped({
-      worker: {
-        findFirst: jest.fn().mockResolvedValue({ ...baseWorker, category: 'VISITOR' }),
-      },
-    });
+    const { svc, db } = buildGapped({ worker: { category: 'VISITOR' } });
 
     const res = await svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' });
 
     expect(res.result).toBe('LOGOUT_RECORDED');
-    expect(prisma.attendanceSession.update).toHaveBeenCalled();
+    expect(updated(db, attendanceSessions)).toBe(true);
   });
 
   it('lets the watchman record it anyway, and keeps his reason', async () => {
-    const { svc, prisma } = buildGapped();
-    const audit: any = (svc as any).audit;
+    const { svc, db, audit } = buildGapped();
 
     const res = await svc.handleTap('org-1', makeDto({ override: { reason: 'Sent home sick' } }), {
       deviceId: 'dev-1',
     });
 
     expect(res.result).toBe('LOGOUT_RECORDED');
-    expect(prisma.attendanceSession.update).toHaveBeenCalled();
+    expect(updated(db, attendanceSessions)).toBe(true);
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'ATTENDANCE_SAFETY_GAP_OVERRIDE',
@@ -671,15 +579,8 @@ describe('AttendanceService safety gap', () => {
   // dropped. It is now a refusal the watchman can answer: he is at the gate and
   // can see whether it is one badge read twice or a second man who walked up.
   it('lets a confirmed override clear the duplicate cooldown as well', async () => {
-    const { svc, prisma } = buildGapped({
-      attendanceTap: {
-        findUnique: jest.fn().mockResolvedValue(null),
-        create: jest.fn().mockResolvedValue({ id: 'tap-1' }),
-        findFirst: jest.fn().mockResolvedValue({
-          clientEventTime: new Date('2026-06-09T02:29:50Z'),
-          tapType: 'LOGIN',
-        }),
-      },
+    const { svc, db } = buildGapped({
+      lastTap: { clientEventTime: new Date('2026-06-09T02:29:50Z'), tapType: 'LOGIN' },
     });
 
     // This fixture has the worker already on site, so the scan closes the
@@ -690,19 +591,12 @@ describe('AttendanceService safety gap', () => {
     });
 
     expect(res.result).toBe('LOGOUT_RECORDED');
-    expect(prisma.attendanceTap.create).toHaveBeenCalled();
+    expect(inserted(db, attendanceTaps)).toBe(true);
   });
 
   it('still refuses a duplicate when nobody overrode it', async () => {
     const { svc } = buildGapped({
-      attendanceTap: {
-        findUnique: jest.fn().mockResolvedValue(null),
-        create: jest.fn().mockResolvedValue({ id: 'tap-1' }),
-        findFirst: jest.fn().mockResolvedValue({
-          clientEventTime: new Date('2026-06-09T02:29:50Z'),
-          tapType: 'LOGIN',
-        }),
-      },
+      lastTap: { clientEventTime: new Date('2026-06-09T02:29:50Z'), tapType: 'LOGIN' },
     });
 
     await expect(svc.handleTap('org-1', makeDto(), { deviceId: 'dev-1' })).rejects.toMatchObject({
@@ -713,7 +607,7 @@ describe('AttendanceService safety gap', () => {
   // The prompt for a written reason was removed: watchmen were being asked to
   // justify a decision they had no vocabulary for. The override still audits.
   it('accepts an override with no reason attached', async () => {
-    const { svc, audit } = buildGapped({});
+    const { svc, audit } = buildGapped();
 
     const res = await svc.handleTap('org-1', makeDto({ override: {} }), {
       deviceId: 'dev-1',

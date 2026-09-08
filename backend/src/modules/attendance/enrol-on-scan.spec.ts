@@ -1,4 +1,6 @@
 import { AttendanceService } from './attendance.service';
+import { drizzleDouble } from '../../../test/drizzle-double';
+import { workerSiteAssignments } from '../../infra/d1/schema.generated';
 
 /**
  * Scanning somebody in at a site puts them on that site's list.
@@ -26,17 +28,13 @@ function enrol(svc: AttendanceService, workerId: string, siteId: string): Promis
 }
 
 function build(existing: { siteId: string }[]) {
-  const create = jest.fn().mockResolvedValue({});
-  const prisma: any = {
-    workerSiteAssignment: {
-      findMany: jest.fn().mockResolvedValue(existing),
-      create,
-    },
-  };
+  const db = drizzleDouble([[workerSiteAssignments, existing]]);
   const svc = Object.create(AttendanceService.prototype) as AttendanceService;
-  Object.defineProperty(svc, 'prisma', { value: prisma });
+  Object.defineProperty(svc, 'd1', { value: { db: db.db } });
   Object.defineProperty(svc, 'logger', { value: { log: jest.fn(), warn: jest.fn() } });
-  return { svc, create, prisma };
+  // The values handed to the insert — what the assertions below are about.
+  const create = db.db.values;
+  return { svc, create, db };
 }
 
 describe('AttendanceService.ensureSiteAssignment', () => {
@@ -46,9 +44,7 @@ describe('AttendanceService.ensureSiteAssignment', () => {
     await enrol(svc, WORKER, SITE);
 
     expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ workerId: WORKER, siteId: SITE, isPrimary: true }),
-      }),
+      expect.objectContaining({ workerId: WORKER, siteId: SITE, isPrimary: true }),
     );
   });
 
@@ -65,14 +61,14 @@ describe('AttendanceService.ensureSiteAssignment', () => {
 
     // Working a day at another site is an addition, not a correction of where
     // they normally are.
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ isPrimary: false }) }),
-    );
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ isPrimary: false }));
   });
 
   it('never lets a failed enrolment break the scan', async () => {
-    const { svc, prisma } = build([]);
-    prisma.workerSiteAssignment.findMany.mockRejectedValue(new Error('db down'));
+    const { svc, db } = build([]);
+    db.db.from.mockImplementation(() => {
+      throw new Error('db down');
+    });
     // The punch is the thing that must not fail; the list can catch up later.
     await expect(enrol(svc, WORKER, SITE)).resolves.toBeUndefined();
   });

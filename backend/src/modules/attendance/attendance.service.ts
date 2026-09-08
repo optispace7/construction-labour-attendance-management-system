@@ -1,20 +1,43 @@
 import { Injectable, Logger } from '@nestjs/common';
-import {
-  AttendanceTap,
-  PersonCategory,
-  Prisma,
-  SiteSettings,
-  TapSource,
-  Worker,
-} from '@prisma/client';
 import { DateTime } from 'luxon';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  ne,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { D1Service } from '../../infra/d1/d1.service';
+import {
+  attendanceSessions,
+  attendanceTaps,
+  designations,
+  correctionRequests,
+  manualAttendanceRequests,
+  organizations,
+  shifts,
+  siteSettings as siteSettingsTable,
+  sites,
+  vendors,
+  workerSiteAssignments,
+  workers,
+} from '../../infra/d1/schema.generated';
 import { RedisService } from '../../infra/redis/redis.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
-import { businessDate, minutesOfDay } from '../../common/time/time.util';
+import { businessDate, minutesOfDay, textToTimeOfDay } from '../../common/time/time.util';
 import { isCardExpired } from './engine/card-validity';
 import { computeWorkHours, ShiftConfig } from './engine/work-hours.engine';
 import { decideTap, distanceMeters, shouldVerifyPhoto } from './engine/tap-decision';
@@ -29,10 +52,131 @@ export interface TapContext {
   photoRoll?: number;
 }
 
+type Worker = typeof workers.$inferSelect;
+type AttendanceTap = typeof attendanceTaps.$inferSelect;
+type SiteSettings = typeof siteSettingsTable.$inferSelect;
+type PersonCategory = 'WORKER' | 'STAFF' | 'VISITOR';
+
+/**
+ * Prisma generated this enum; SQLite stores the column as text, so the values
+ * are written out. Kept as an object because the code reads `TapSource.QR`.
+ */
+const TapSource = {
+  NFC_UID: 'NFC_UID',
+  NFC_NDEF: 'NFC_NDEF',
+  QR: 'QR',
+  MANUAL: 'MANUAL',
+} as const;
+type TapSource = (typeof TapSource)[keyof typeof TapSource];
+
+type PhotoVerificationMode = 'ALWAYS' | 'NEVER' | 'RANDOM';
+
 type ResolvedWorker = Worker & {
   vendor: { name: string } | null;
   designation: { name: string } | null;
 };
+
+/**
+ * A business day as it is stored: 'YYYY-MM-DD'.
+ *
+ * work_date is a calendar day, not an instant, and it is text on SQLite for
+ * that reason — it is what attendance and every report group by, and a day
+ * given a time component drifts across the boundary at +05:30.
+ */
+function dayText(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/** One row of the manpower join, before it is nested for the tallying. */
+type ManpowerRow = {
+  workDate: string;
+  workedMinutes: number | null;
+  category: string;
+  vendorName: string | null;
+  designationName: string | null;
+};
+
+/** A stored 'YYYY-MM-DD' back as the UTC midnight Prisma used to hand over. */
+function toDate(day: string | null | undefined): Date | null {
+  return day ? new Date(`${day}T00:00:00.000Z`) : null;
+}
+
+/**
+ * The columns a session list needs about the person and the place.
+ *
+ * Prisma's nested `select` produced these through relations; a join produces
+ * one flat row, so the selection and the reshaping are kept together here
+ * rather than repeated at each of the four call sites.
+ */
+const PERSON_COLUMNS = {
+  workerId: workers.id,
+  fullName: workers.fullName,
+  photoUrl: workers.photoUrl,
+  workerCode: workers.workerCode,
+  category: workers.category,
+  designationName: designations.name,
+  vendorName: vendors.name,
+  siteId: sites.id,
+  siteName: sites.name,
+} as const;
+
+type PersonColumns = {
+  workerId: string;
+  fullName: string;
+  photoUrl: string | null;
+  workerCode: string;
+  category: string;
+  designationName: string | null;
+  vendorName: string | null;
+  siteId: string | null;
+  siteName: string | null;
+};
+
+/**
+ * One joined row back in the nested shape the panel and the app already read.
+ *
+ * Whatever else the caller selected — a session object under `session`, or the
+ * columns straight on the row — is carried through unchanged; only the person
+ * and site columns are folded into their nested objects.
+ */
+function sessionWithPeople<T extends PersonColumns & { session?: object }>(
+  r: T,
+): Omit<T, keyof typeof PERSON_COLUMNS | 'session'> &
+  (T['session'] extends object ? T['session'] : unknown) & {
+    worker: {
+      id: string;
+      fullName: string;
+      photoUrl: string | null;
+      workerCode: string;
+      category: string;
+      designation: { name: string } | null;
+      vendor: { name: string } | null;
+    };
+    site: { id: string; name: string | null } | null;
+  } {
+  const { session, ...rest } = r as T & { session?: Record<string, unknown> };
+  return {
+    ...(session ?? {}),
+    ...stripPersonColumns(rest),
+    worker: {
+      id: r.workerId,
+      fullName: r.fullName,
+      photoUrl: r.photoUrl,
+      workerCode: r.workerCode,
+      category: r.category,
+      designation: r.designationName ? { name: r.designationName } : null,
+      vendor: r.vendorName ? { name: r.vendorName } : null,
+    },
+    site: r.siteId ? { id: r.siteId, name: r.siteName } : null,
+  } as never;
+}
+
+/** The flat join columns, dropped once they have been nested. */
+function stripPersonColumns(row: Record<string, unknown>) {
+  const out = { ...row };
+  for (const k of Object.keys(PERSON_COLUMNS)) delete out[k];
+  return out;
+}
 
 /** Longest manpower window we will query in one go. */
 export const MANPOWER_MAX_DAYS = 92;
@@ -91,7 +235,7 @@ export class AttendanceService {
   private readonly logger = new Logger(AttendanceService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly redis: RedisService,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
@@ -162,37 +306,55 @@ export class AttendanceService {
   ): Promise<ResolvedWorker | null> {
     // Only ACTIVE people can punch: deleted workers, exited/expired visitor
     // passes and suspended workers are rejected (offline replays included).
-    const base = { organizationId, deletedAt: null, status: 'ACTIVE' as const };
-    const include = {
-      vendor: { select: { name: true } },
-      designation: { select: { name: true } },
-    } as const;
+    const base = [
+      eq(workers.organizationId, organizationId),
+      isNull(workers.deletedAt),
+      eq(workers.status, 'ACTIVE'),
+    ];
+
+    let match: SQL | undefined;
     if (source === TapSource.NFC_UID) {
-      return this.prisma.worker.findFirst({ where: { ...base, nfcUid: identifier }, include });
-    }
-    if (source === TapSource.QR) {
+      match = eq(workers.nfcUid, identifier);
+    } else if (source === TapSource.QR) {
       // QR badges encode the EMP-ID (worker code); fall back to the opaque
       // qrIdentifier for legacy/secure codes.
-      return this.prisma.worker.findFirst({
-        where: { ...base, OR: [{ workerCode: identifier }, { qrIdentifier: identifier }] },
-        include,
-      });
+      match = or(eq(workers.workerCode, identifier), eq(workers.qrIdentifier, identifier));
+    } else {
+      // NFC_NDEF and MANUAL resolve by worker code.
+      match = eq(workers.workerCode, identifier);
     }
-    // NFC_NDEF and MANUAL resolve by worker code.
-    return this.prisma.worker.findFirst({ where: { ...base, workerCode: identifier }, include });
+
+    // Prisma's include gave the vendor and designation names; the join gives
+    // them in one round trip, and left so a worker with neither still resolves
+    // — refusing a scan because somebody has no vendor would shut the gate.
+    const [row] = await this.d1.db
+      .select({ worker: workers, vendorName: vendors.name, designationName: designations.name })
+      .from(workers)
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .leftJoin(designations, eq(designations.id, workers.designationId))
+      .where(and(...base, match))
+      .limit(1);
+    if (!row) return null;
+    return {
+      ...row.worker,
+      vendor: row.vendorName ? { name: row.vendorName } : null,
+      designation: row.designationName ? { name: row.designationName } : null,
+    };
   }
 
   private toShiftConfig(shift: {
-    startTime: Date;
-    endTime: Date;
+    startTime: string;
+    endTime: string;
     isOvernight: boolean;
     lateGraceMinutes: number;
     earlyGraceMinutes: number;
     otThresholdMinutes: number;
   }): ShiftConfig {
     return {
-      startTimeMinutes: minutesOfDay(shift.startTime),
-      endTimeMinutes: minutesOfDay(shift.endTime),
+      // 'HH:MM:SS' text on SQLite, a time column on Postgres — read through the
+      // same converter the sites module uses so both give the same minute.
+      startTimeMinutes: minutesOfDay(textToTimeOfDay(shift.startTime)),
+      endTimeMinutes: minutesOfDay(textToTimeOfDay(shift.endTime)),
       isOvernight: shift.isOvernight,
       lateGraceMinutes: shift.lateGraceMinutes,
       earlyGraceMinutes: shift.earlyGraceMinutes,
@@ -208,40 +370,53 @@ export class AttendanceService {
    */
   async handleTap(organizationId: string, dto: TapDto, ctx: TapContext) {
     // 1. Idempotency: a tap with this eventId already processed → replay.
-    const existing = await this.prisma.attendanceTap.findUnique({
-      where: { organizationId_eventId: { organizationId, eventId: dto.eventId } },
-    });
+    const [existing] = await this.d1.db
+      .select()
+      .from(attendanceTaps)
+      .where(
+        and(
+          eq(attendanceTaps.organizationId, organizationId),
+          eq(attendanceTaps.eventId, dto.eventId),
+        ),
+      )
+      .limit(1);
     if (existing) {
       return this.replayResult(existing);
     }
 
-    const site = await this.prisma.site.findFirst({
-      where: { id: dto.siteId, organizationId },
-      include: { settings: true },
-    });
-    if (!site) throw Errors.notFound('Site');
-    const settings = site.settings ?? this.defaultSettings(dto.siteId);
+    const [siteRow] = await this.d1.db
+      .select({ site: sites, settings: siteSettingsTable })
+      .from(sites)
+      // Left, because a site whose settings row has not been written yet still
+      // has to admit scans — the defaults below stand in for it.
+      .leftJoin(siteSettingsTable, eq(siteSettingsTable.siteId, sites.id))
+      .where(and(eq(sites.id, dto.siteId), eq(sites.organizationId, organizationId)))
+      .limit(1);
+    if (!siteRow) throw Errors.notFound('Site');
+    const site = siteRow.site;
+    const settings = siteRow.settings ?? this.defaultSettings(dto.siteId);
 
     const worker = await this.resolveWorker(organizationId, dto.source, dto.identifier);
 
     // Unresolved identifier: persist the raw tap for later reconciliation.
     if (!worker) {
-      await this.prisma.attendanceTap.create({
-        data: {
-          eventId: dto.eventId,
-          organizationId,
-          siteId: dto.siteId,
-          deviceId: dto.deviceId,
-          rawIdentifier: dto.identifier,
-          tapSource: dto.source,
-          clientEventTime: new Date(dto.clientEventTime),
-          monotonicMs: dto.monotonicMs != null ? BigInt(dto.monotonicMs) : null,
-          latitude: dto.geo?.lat,
-          longitude: dto.geo?.lng,
-          geoAccuracyM: dto.geo?.accuracyM,
-          isManualBackup: dto.manual?.isBackup ?? false,
-          manualReason: dto.manual?.reason,
-        },
+      await this.d1.db.insert(attendanceTaps).values({
+        id: randomUUID(),
+        eventId: dto.eventId,
+        organizationId,
+        siteId: dto.siteId,
+        deviceId: dto.deviceId ?? null,
+        rawIdentifier: dto.identifier ?? null,
+        tapSource: dto.source,
+        clientEventTime: new Date(dto.clientEventTime),
+        monotonicMs: dto.monotonicMs != null ? Number(dto.monotonicMs) : null,
+        latitude: dto.geo?.lat ?? null,
+        longitude: dto.geo?.lng ?? null,
+        geoAccuracyM: dto.geo?.accuracyM ?? null,
+        isManualBackup: dto.manual?.isBackup ?? false,
+        manualReason: dto.manual?.reason ?? null,
+        serverReceivedAt: new Date(),
+        createdAt: new Date(),
       });
       throw Errors.workerNotFound(`Unresolved identifier: ${dto.identifier}`);
     }
@@ -263,24 +438,43 @@ export class AttendanceService {
     if (!lockToken) throw Errors.conflict('Another tap is being processed for this worker');
 
     try {
-      const openSession = await this.prisma.attendanceSession.findFirst({
-        where: { workerId: worker.id, state: 'OPEN' },
-      });
-      const lastTap = await this.prisma.attendanceTap.findFirst({
-        where: { workerId: worker.id },
-        orderBy: { clientEventTime: 'desc' },
-      });
+      const [openSession] = await this.d1.db
+        .select()
+        .from(attendanceSessions)
+        .where(
+          and(eq(attendanceSessions.workerId, worker.id), eq(attendanceSessions.state, 'OPEN')),
+        )
+        .limit(1);
+      const [lastTap] = await this.d1.db
+        .select()
+        .from(attendanceTaps)
+        .where(eq(attendanceTaps.workerId, worker.id))
+        .orderBy(desc(attendanceTaps.clientEventTime))
+        .limit(1);
 
       // A hand-typed punch already waiting on the Safety Officer blocks another
       // one for the same person. Checked before anything is written so the
       // watchman is told at the gate, not after a tap is on record.
       if (dto.manual?.isBackup) {
-        const waiting = await this.prisma.manualAttendanceRequest.findFirst({
-          where: { workerId: worker.id, status: 'PENDING' },
-          select: { tapType: true, createdAt: true },
-        });
+        const [waiting] = await this.d1.db
+          .select({
+            tapType: manualAttendanceRequests.tapType,
+            createdAt: manualAttendanceRequests.createdAt,
+          })
+          .from(manualAttendanceRequests)
+          .where(
+            and(
+              eq(manualAttendanceRequests.workerId, worker.id),
+              eq(manualAttendanceRequests.status, 'PENDING'),
+            ),
+          )
+          .limit(1);
         if (waiting) {
-          throw Errors.manualReviewPending(worker.fullName, waiting.tapType, waiting.createdAt);
+          throw Errors.manualReviewPending(
+            worker.fullName,
+            waiting.tapType as 'LOGIN' | 'LOGOUT',
+            waiting.createdAt,
+          );
         }
       }
 
@@ -290,7 +484,14 @@ export class AttendanceService {
         openSession
           ? { id: openSession.id, loginAt: openSession.loginAt, siteId: openSession.siteId }
           : null,
-        lastTap ? { clientEventTime: lastTap.clientEventTime, tapType: lastTap.tapType } : null,
+        lastTap
+          ? {
+              clientEventTime: lastTap.clientEventTime,
+              // Text on SQLite where Prisma had an enum; the values written are
+              // the enum's own, so the narrowing is a restatement, not a change.
+              tapType: lastTap.tapType as 'LOGIN' | 'LOGOUT' | null,
+            }
+          : null,
         this.safetyGapSeconds(settings, worker, dto),
         !!dto.override,
       );
@@ -320,11 +521,8 @@ export class AttendanceService {
         // the decision, so that someone already on site can still tap out and
         // close their session — trapping people inside the gate would be worse
         // than letting a lapsed card leave.
-        if (isCardExpired(worker.validityTill, tapTime, site.timezone)) {
-          throw Errors.cardExpired(
-            worker.fullName,
-            worker.validityTill!.toISOString().slice(0, 10),
-          );
+        if (isCardExpired(toDate(worker.validityTill), tapTime, site.timezone)) {
+          throw Errors.cardExpired(worker.fullName, worker.validityTill!);
         }
       }
 
@@ -413,49 +611,64 @@ export class AttendanceService {
    */
   private async fileManualRequest(
     organizationId: string,
-    site: { id: string },
+    site: { id: string; timezone: string },
     worker: ResolvedWorker,
     dto: TapDto,
     ctx: TapContext,
     tapTime: Date,
     intent: { tapType: 'LOGIN' | 'LOGOUT'; sessionId: string | null },
   ) {
-    const tap = await this.prisma.attendanceTap.create({
-      data: {
+    const tapId = randomUUID();
+    const requestId = randomUUID();
+    const now = new Date();
+
+    // The punch and the request it is waiting on are written together. A tap
+    // that landed without its request would be a hand-typed punch nobody can
+    // ever approve, and the worker would be stuck: blocked from typing another
+    // and with nothing on the officer's list.
+    await this.d1.db.batch([
+      this.d1.db.insert(attendanceTaps).values({
+        id: tapId,
         eventId: dto.eventId,
         organizationId,
         siteId: site.id,
-        deviceId: dto.deviceId,
+        deviceId: dto.deviceId ?? null,
         workerId: worker.id,
-        rawIdentifier: dto.identifier,
+        rawIdentifier: dto.identifier ?? null,
         tapSource: dto.source,
         tapType: intent.tapType,
         clientEventTime: tapTime,
-        monotonicMs: dto.monotonicMs != null ? BigInt(dto.monotonicMs) : null,
-        latitude: dto.geo?.lat,
-        longitude: dto.geo?.lng,
-        geoAccuracyM: dto.geo?.accuracyM,
-        photoCapturedUrl: dto.photoUrl,
+        monotonicMs: dto.monotonicMs != null ? Number(dto.monotonicMs) : null,
+        latitude: dto.geo?.lat ?? null,
+        longitude: dto.geo?.lng ?? null,
+        geoAccuracyM: dto.geo?.accuracyM ?? null,
+        photoCapturedUrl: dto.photoUrl ?? null,
         isManualBackup: true,
-        manualReason: dto.manual?.reason,
-      },
-    });
-
-    const request = await this.prisma.manualAttendanceRequest.create({
-      data: {
+        manualReason: dto.manual?.reason ?? null,
+        serverReceivedAt: now,
+        createdAt: now,
+      }),
+      this.d1.db.insert(manualAttendanceRequests).values({
+        id: requestId,
         organizationId,
         siteId: site.id,
         workerId: worker.id,
-        tapId: tap.id,
+        tapId,
         tapType: intent.tapType,
         // A logout pins the session it means to close; a login has none yet, so
         // the column is filled in on approval with the session it created.
         sessionId: intent.sessionId,
         recordedAt: tapTime,
-        reason: dto.manual?.reason,
-        deviceId: dto.deviceId,
-      },
-    });
+        reason: dto.manual?.reason ?? null,
+        deviceId: dto.deviceId ?? null,
+        status: 'PENDING',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    ] as never);
+
+    const tap = { id: tapId };
+    const request = { id: requestId };
 
     await this.maybeAuditManual(organizationId, ctx, worker.id, dto);
 
@@ -510,7 +723,7 @@ export class AttendanceService {
 
   private async doLogin(
     organizationId: string,
-    site: { id: string; timezone: string; settings: SiteSettings | null },
+    site: { id: string; timezone: string },
     settings: SiteSettings,
     worker: ResolvedWorker,
     dto: TapDto,
@@ -518,49 +731,61 @@ export class AttendanceService {
     tapTime: Date,
   ) {
     // Auto-close any stale open session from a previous business day (#5).
-    const stale = await this.prisma.attendanceSession.findFirst({
-      where: { workerId: worker.id, state: 'OPEN' },
-    });
+    const [stale] = await this.d1.db
+      .select()
+      .from(attendanceSessions)
+      .where(
+        and(eq(attendanceSessions.workerId, worker.id), eq(attendanceSessions.state, 'OPEN')),
+      )
+      .limit(1);
     if (stale) {
-      await this.prisma.attendanceSession.update({
-        where: { id: stale.id },
-        data: {
+      await this.d1.db
+        .update(attendanceSessions)
+        .set({
           state: 'AUTO_CLOSED',
           closedReason: 'auto-closed on next login',
           logoutAt: tapTime,
-        },
-      });
+          updatedAt: new Date(),
+        })
+        .where(eq(attendanceSessions.id, stale.id));
     }
 
     const roll = ctx.photoRoll ?? Math.floor(Math.random() * 100);
     const requiresPhoto = shouldVerifyPhoto(
-      settings.photoVerificationMode,
+      // Text on SQLite; the column only ever holds these three.
+      settings.photoVerificationMode as PhotoVerificationMode,
       settings.photoVerificationRandomPct,
       roll,
     );
     const workDate = businessDate(tapTime, site.timezone);
 
-    const tap = await this.prisma.attendanceTap.create({
-      data: {
+    const [tap] = await this.d1.db
+      .insert(attendanceTaps)
+      .values({
+        id: randomUUID(),
         eventId: dto.eventId,
         organizationId,
         siteId: site.id,
-        deviceId: dto.deviceId,
+        deviceId: dto.deviceId ?? null,
         workerId: worker.id,
-        rawIdentifier: dto.identifier,
+        rawIdentifier: dto.identifier ?? null,
         tapSource: dto.source,
         tapType: 'LOGIN',
         clientEventTime: tapTime,
-        monotonicMs: dto.monotonicMs != null ? BigInt(dto.monotonicMs) : null,
-        latitude: dto.geo?.lat,
-        longitude: dto.geo?.lng,
-        geoAccuracyM: dto.geo?.accuracyM,
+        // BigInt on Postgres; an ordinary integer column here, and the value is
+        // a millisecond counter that will not reach the limit of one.
+        monotonicMs: dto.monotonicMs != null ? Number(dto.monotonicMs) : null,
+        latitude: dto.geo?.lat ?? null,
+        longitude: dto.geo?.lng ?? null,
+        geoAccuracyM: dto.geo?.accuracyM ?? null,
         verifiedMode: settings.verificationMode,
-        photoCapturedUrl: dto.photoUrl,
+        photoCapturedUrl: dto.photoUrl ?? null,
         isManualBackup: dto.manual?.isBackup ?? false,
-        manualReason: dto.manual?.reason,
-      },
-    });
+        manualReason: dto.manual?.reason ?? null,
+        serverReceivedAt: new Date(),
+        createdAt: new Date(),
+      })
+      .returning();
 
     // MANUAL mode: persist the tap (durable) but defer session creation to confirm.
     if (settings.verificationMode === 'MANUAL') {
@@ -576,18 +801,23 @@ export class AttendanceService {
     }
 
     // AUTO mode: commit the session immediately.
-    const session = await this.prisma.attendanceSession.create({
-      data: {
+    const [session] = await this.d1.db
+      .insert(attendanceSessions)
+      .values({
+        id: randomUUID(),
         organizationId,
         workerId: worker.id,
         siteId: site.id,
-        shiftId: settings.defaultShiftId,
-        workDate,
+        shiftId: settings.defaultShiftId ?? null,
+        workDate: dayText(workDate),
         loginTapId: tap.id,
         loginAt: tapTime,
         state: 'OPEN',
-      },
-    });
+        isCrossSite: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .returning();
     await this.ensureSiteAssignment(worker.id, site.id);
     await this.maybeAuditManual(organizationId, ctx, worker.id, dto);
     await this.auditScan('ATTENDANCE_LOGIN', {
@@ -635,20 +865,25 @@ export class AttendanceService {
    */
   private async ensureSiteAssignment(workerId: string, siteId: string) {
     try {
-      const open = await this.prisma.workerSiteAssignment.findMany({
-        where: { workerId, endDate: null },
-        select: { siteId: true },
-      });
+      const open = await this.d1.db
+        .select({ siteId: workerSiteAssignments.siteId })
+        .from(workerSiteAssignments)
+        .where(
+          and(
+            eq(workerSiteAssignments.workerId, workerId),
+            isNull(workerSiteAssignments.endDate),
+          ),
+        );
       if (open.some((a) => a.siteId === siteId)) return;
-      await this.prisma.workerSiteAssignment.create({
-        data: {
-          workerId,
-          siteId,
-          startDate: new Date(),
-          // Their first site is the primary one; a second is an addition, not a
-          // correction of the first.
-          isPrimary: open.length === 0,
-        },
+      await this.d1.db.insert(workerSiteAssignments).values({
+        id: randomUUID(),
+        workerId,
+        siteId,
+        startDate: dayText(new Date()),
+        // Their first site is the primary one; a second is an addition, not a
+        // correction of the first.
+        isPrimary: open.length === 0,
+        createdAt: new Date(),
       });
       this.logger.log(`Enrolled worker ${workerId} at site ${siteId} on scan`);
     } catch (e) {
@@ -667,42 +902,51 @@ export class AttendanceService {
     tapTime: Date,
     sessionId: string,
   ) {
-    const session = await this.prisma.attendanceSession.findUnique({
-      where: { id: sessionId },
-      include: { shift: true },
-    });
-    if (!session) throw Errors.conflict('Open session disappeared');
+    const [row] = await this.d1.db
+      .select({ session: attendanceSessions, shift: shifts })
+      .from(attendanceSessions)
+      // Left, not inner: a session on a site with no shift configured still has
+      // to close — an inner join would drop it and lose the punch.
+      .leftJoin(shifts, eq(shifts.id, attendanceSessions.shiftId))
+      .where(eq(attendanceSessions.id, sessionId))
+      .limit(1);
+    if (!row) throw Errors.conflict('Open session disappeared');
+    const session = row.session;
 
-    const tap = await this.prisma.attendanceTap.create({
-      data: {
+    const [tap] = await this.d1.db
+      .insert(attendanceTaps)
+      .values({
+        id: randomUUID(),
         eventId: dto.eventId,
         organizationId,
         siteId: dto.siteId,
-        deviceId: dto.deviceId,
+        deviceId: dto.deviceId ?? null,
         workerId: worker.id,
-        rawIdentifier: dto.identifier,
+        rawIdentifier: dto.identifier ?? null,
         tapSource: dto.source,
         tapType: 'LOGOUT',
         clientEventTime: tapTime,
-        monotonicMs: dto.monotonicMs != null ? BigInt(dto.monotonicMs) : null,
-        latitude: dto.geo?.lat,
-        longitude: dto.geo?.lng,
-        geoAccuracyM: dto.geo?.accuracyM,
+        monotonicMs: dto.monotonicMs != null ? Number(dto.monotonicMs) : null,
+        latitude: dto.geo?.lat ?? null,
+        longitude: dto.geo?.lng ?? null,
+        geoAccuracyM: dto.geo?.accuracyM ?? null,
         isManualBackup: dto.manual?.isBackup ?? false,
-        manualReason: dto.manual?.reason,
-      },
-    });
+        manualReason: dto.manual?.reason ?? null,
+        serverReceivedAt: new Date(),
+        createdAt: new Date(),
+      })
+      .returning();
 
-    const shiftConfig = session.shift ? this.toShiftConfig(session.shift) : undefined;
+    const shiftConfig = row.shift ? this.toShiftConfig(row.shift) : undefined;
     const hours = computeWorkHours(session.loginAt, tapTime, site.timezone, shiftConfig);
     // Visitors are unpaid — login/logout is recorded purely for the register,
     // so overtime never applies to them.
     if (worker.category === 'VISITOR') hours.overtimeMinutes = 0;
     const isCrossSite = dto.siteId !== session.siteId;
 
-    const updated = await this.prisma.attendanceSession.update({
-      where: { id: session.id },
-      data: {
+    const [updated] = await this.d1.db
+      .update(attendanceSessions)
+      .set({
         logoutTapId: tap.id,
         logoutAt: tapTime,
         state: 'CLOSED',
@@ -712,8 +956,10 @@ export class AttendanceService {
         earlyLeaveMinutes: hours.earlyLeaveMinutes,
         logoutSiteId: isCrossSite ? dto.siteId : null,
         isCrossSite,
-      },
-    });
+        updatedAt: new Date(),
+      })
+      .where(eq(attendanceSessions.id, session.id))
+      .returning();
 
     await this.maybeAuditManual(organizationId, ctx, worker.id, dto);
     await this.auditScan('ATTENDANCE_LOGOUT', {
@@ -725,7 +971,7 @@ export class AttendanceService {
       sessionId: updated.id,
       at: tapTime,
       extra: {
-        workDate: session.workDate?.toISOString().slice(0, 10) ?? null,
+        workDate: session.workDate ?? null,
         workedMinutes: updated.workedMinutes,
         isCrossSite,
       },
@@ -784,10 +1030,21 @@ export class AttendanceService {
     },
   ) {
     try {
-      const pending = await this.prisma.manualAttendanceRequest.findFirst({
-        where: { organizationId, workerId: worker.id, status: 'PENDING' },
-        select: { id: true, tapType: true, recordedAt: true },
-      });
+      const [pending] = await this.d1.db
+        .select({
+          id: manualAttendanceRequests.id,
+          tapType: manualAttendanceRequests.tapType,
+          recordedAt: manualAttendanceRequests.recordedAt,
+        })
+        .from(manualAttendanceRequests)
+        .where(
+          and(
+            eq(manualAttendanceRequests.organizationId, organizationId),
+            eq(manualAttendanceRequests.workerId, worker.id),
+            eq(manualAttendanceRequests.status, 'PENDING'),
+          ),
+        )
+        .limit(1);
       if (!pending) return;
 
       const scannedAt = DateTime.fromJSDate(scan.at, { zone: scan.timezone }).toFormat(
@@ -801,16 +1058,17 @@ export class AttendanceService {
         `${scan.tapType === 'LOGIN' ? 'in' : 'out'} at ${scannedAt}, so this typed entry was no ` +
         'longer needed. Attendance follows the scan.';
 
-      await this.prisma.manualAttendanceRequest.update({
-        where: { id: pending.id },
+      await this.d1.db
+        .update(manualAttendanceRequests)
         // REJECTED, not APPROVED: the typed punch never became attendance. The
         // null reviewer is what tells the queue a person did not decide this.
-        data: {
+        .set({
           status: 'REJECTED',
           reviewedAt: new Date(),
           reviewNotes: note,
-        },
-      });
+          updatedAt: new Date(),
+        })
+        .where(eq(manualAttendanceRequests.id, pending.id));
 
       await this.audit.record({
         organizationId,
@@ -853,21 +1111,52 @@ export class AttendanceService {
    */
   async workerTapState(organizationId: string, workerId: string) {
     if (!workerId) throw Errors.validation({ message: 'workerId is required' });
-    const [session, lastTap, pendingManual] = await Promise.all([
-      this.prisma.attendanceSession.findFirst({
-        where: { organizationId, workerId, state: 'OPEN' },
-        select: { id: true, loginAt: true, siteId: true },
-      }),
-      this.prisma.attendanceTap.findFirst({
-        where: { organizationId, workerId },
-        orderBy: { clientEventTime: 'desc' },
-        select: { clientEventTime: true, tapType: true },
-      }),
-      this.prisma.manualAttendanceRequest.findFirst({
-        where: { organizationId, workerId, status: 'PENDING' },
-        select: { id: true, tapType: true, recordedAt: true },
-      }),
+    const [sessionRows, lastTapRows, pendingRows] = await Promise.all([
+      this.d1.db
+        .select({
+          id: attendanceSessions.id,
+          loginAt: attendanceSessions.loginAt,
+          siteId: attendanceSessions.siteId,
+        })
+        .from(attendanceSessions)
+        .where(
+          and(
+            eq(attendanceSessions.organizationId, organizationId),
+            eq(attendanceSessions.workerId, workerId),
+            eq(attendanceSessions.state, 'OPEN'),
+          ),
+        )
+        .limit(1),
+      this.d1.db
+        .select({ clientEventTime: attendanceTaps.clientEventTime, tapType: attendanceTaps.tapType })
+        .from(attendanceTaps)
+        .where(
+          and(
+            eq(attendanceTaps.organizationId, organizationId),
+            eq(attendanceTaps.workerId, workerId),
+          ),
+        )
+        .orderBy(desc(attendanceTaps.clientEventTime))
+        .limit(1),
+      this.d1.db
+        .select({
+          id: manualAttendanceRequests.id,
+          tapType: manualAttendanceRequests.tapType,
+          recordedAt: manualAttendanceRequests.recordedAt,
+        })
+        .from(manualAttendanceRequests)
+        .where(
+          and(
+            eq(manualAttendanceRequests.organizationId, organizationId),
+            eq(manualAttendanceRequests.workerId, workerId),
+            eq(manualAttendanceRequests.status, 'PENDING'),
+          ),
+        )
+        .limit(1),
     ]);
+    const session = sessionRows[0];
+    const lastTap = lastTapRows[0];
+    const pendingManual = pendingRows[0];
     return {
       workerId,
       openSessionId: session?.id ?? null,
@@ -900,11 +1189,13 @@ export class AttendanceService {
    */
   async siteConfig(user: AuthUser, siteId: string) {
     if (!siteId) throw Errors.validation({ message: 'siteId is required' });
-    const site = await this.prisma.site.findFirst({
-      where: { id: siteId, organizationId: user.organizationId },
-      include: { settings: true },
-    });
-    if (!site) throw Errors.notFound('Site');
+    const [siteRow] = await this.d1.db
+      .select({ site: sites, settings: siteSettingsTable })
+      .from(sites)
+      .leftJoin(siteSettingsTable, eq(siteSettingsTable.siteId, sites.id))
+      .where(and(eq(sites.id, siteId), eq(sites.organizationId, user.organizationId)))
+      .limit(1);
+    if (!siteRow) throw Errors.notFound('Site');
     if (
       user.role !== 'SUPER_ADMIN' &&
       user.siteScopes.length > 0 &&
@@ -912,7 +1203,7 @@ export class AttendanceService {
     ) {
       throw Errors.forbidden('Site not in your scope');
     }
-    const settings = site.settings ?? this.defaultSettings(siteId);
+    const settings = siteRow.settings ?? this.defaultSettings(siteId);
     return {
       siteId,
       verificationMode: settings.verificationMode,
@@ -932,11 +1223,21 @@ export class AttendanceService {
    * same blind spot at the site boundary.
    */
   async openSessions(organizationId: string) {
-    const rows = await this.prisma.attendanceSession.findMany({
-      where: { organizationId, state: 'OPEN' },
-      select: { id: true, workerId: true, loginAt: true, siteId: true },
-      take: 5000,
-    });
+    const rows = await this.d1.db
+      .select({
+        id: attendanceSessions.id,
+        workerId: attendanceSessions.workerId,
+        loginAt: attendanceSessions.loginAt,
+        siteId: attendanceSessions.siteId,
+      })
+      .from(attendanceSessions)
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, organizationId),
+          eq(attendanceSessions.state, 'OPEN'),
+        ),
+      )
+      .limit(5000);
     return { data: rows.map((r) => ({ ...r, sessionId: r.id })) };
   }
 
@@ -962,9 +1263,16 @@ export class AttendanceService {
 
   /** Finalize a MANUAL-mode login after the watchman confirms the face match. */
   async confirm(organizationId: string, eventId: string, ctx: TapContext) {
-    const tap = await this.prisma.attendanceTap.findUnique({
-      where: { organizationId_eventId: { organizationId, eventId } },
-    });
+    const [tap] = await this.d1.db
+      .select()
+      .from(attendanceTaps)
+      .where(
+        and(
+          eq(attendanceTaps.organizationId, organizationId),
+          eq(attendanceTaps.eventId, eventId),
+        ),
+      )
+      .limit(1);
     if (!tap || tap.tapType !== 'LOGIN' || !tap.workerId) {
       throw Errors.notFound('Login tap');
     }
@@ -976,53 +1284,64 @@ export class AttendanceService {
         'This punch was entered by hand and is waiting for a Safety Officer to accept it.',
       );
     }
-    const existing = await this.prisma.attendanceSession.findFirst({
-      where: { loginTapId: tap.id },
-    });
+    const [existing] = await this.d1.db
+      .select()
+      .from(attendanceSessions)
+      .where(eq(attendanceSessions.loginTapId, tap.id))
+      .limit(1);
     if (existing) {
       return { result: 'LOGIN_RECORDED', sessionId: existing.id, loginAt: existing.loginAt };
     }
 
-    const site = await this.prisma.site.findUnique({
-      where: { id: tap.siteId },
-      include: { settings: true },
-    });
+    const [siteRow] = await this.d1.db
+      .select({ site: sites, settings: siteSettingsTable })
+      .from(sites)
+      .leftJoin(siteSettingsTable, eq(siteSettingsTable.siteId, sites.id))
+      .where(eq(sites.id, tap.siteId))
+      .limit(1);
+    const site = siteRow?.site ?? null;
     const workDate = businessDate(tap.clientEventTime, site?.timezone ?? 'Asia/Kolkata');
 
-    const session = await this.prisma.attendanceSession.create({
-      data: {
+    const [session] = await this.d1.db
+      .insert(attendanceSessions)
+      .values({
+        id: randomUUID(),
         organizationId,
         workerId: tap.workerId,
         siteId: tap.siteId,
-        shiftId: site?.settings?.defaultShiftId ?? null,
-        workDate,
+        shiftId: siteRow?.settings?.defaultShiftId ?? null,
+        workDate: dayText(workDate),
         loginTapId: tap.id,
         loginAt: tap.clientEventTime,
         state: 'OPEN',
-      },
-    });
+        isCrossSite: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .returning();
     await this.ensureSiteAssignment(tap.workerId, tap.siteId);
     await this.auditScan('ATTENDANCE_LOGIN', {
       organizationId,
       workerId: tap.workerId,
       ctx,
-      source: tap.tapSource,
+      source: tap.tapSource as TapSource,
       siteId: tap.siteId,
       sessionId: session.id,
       at: tap.clientEventTime,
       extra: { workDate: workDate.toISOString().slice(0, 10), verificationMode: 'MANUAL' },
     });
-    const worker = await this.prisma.worker.findUnique({
-      where: { id: tap.workerId },
-      select: { id: true, fullName: true },
-    });
+    const [worker] = await this.d1.db
+      .select({ id: workers.id, fullName: workers.fullName })
+      .from(workers)
+      .where(eq(workers.id, tap.workerId))
+      .limit(1);
     if (worker) {
       await this.supersedePendingManual(organizationId, worker, ctx, {
         tapType: 'LOGIN',
         at: tap.clientEventTime,
         sessionId: session.id,
         timezone: site?.timezone ?? 'Asia/Kolkata',
-        source: tap.tapSource,
+        source: tap.tapSource as TapSource,
       });
     }
     return { result: 'LOGIN_RECORDED', sessionId: session.id, loginAt: session.loginAt };
@@ -1037,39 +1356,54 @@ export class AttendanceService {
     };
   }
 
+  /**
+   * The site and category conditions the dashboard methods all share.
+   *
+   * A category condition reads the joined worker row, so any query using it
+   * must join `workers` — every caller here already does.
+   */
+  private scopeFilters(user: AuthUser, siteId?: string, category?: string): SQL[] {
+    const filters: SQL[] = [];
+    if (siteId && siteId !== 'all') {
+      filters.push(eq(attendanceSessions.siteId, siteId));
+    } else if (user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0) {
+      filters.push(inArray(attendanceSessions.siteId, user.siteScopes));
+    }
+    if (category && category !== 'all') {
+      filters.push(eq(workers.category, category as PersonCategory));
+    }
+    return filters;
+  }
+
+  /** The organization's timezone, which every business-day calculation needs. */
+  private async orgTimezone(organizationId: string): Promise<string> {
+    const [org] = await this.d1.db
+      .select({ timezone: organizations.timezone })
+      .from(organizations)
+      .where(eq(organizations.id, organizationId))
+      .limit(1);
+    return org?.timezone ?? 'Asia/Kolkata';
+  }
+
   /** Open sessions; siteId omitted (or 'all') = every site in the caller's scope. */
   async activeSessions(user: AuthUser, siteId?: string, category?: string) {
-    const siteFilter =
-      siteId && siteId !== 'all'
-        ? { siteId }
-        : user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0
-          ? { siteId: { in: user.siteScopes } }
-          : {};
-    const categoryFilter =
-      category && category !== 'all' ? { worker: { category: category as PersonCategory } } : {};
-    return this.prisma.attendanceSession.findMany({
-      where: {
-        organizationId: user.organizationId,
-        state: 'OPEN',
-        ...siteFilter,
-        ...categoryFilter,
-      },
-      include: {
-        worker: {
-          select: {
-            id: true,
-            fullName: true,
-            photoUrl: true,
-            workerCode: true,
-            category: true,
-            designation: { select: { name: true } },
-            vendor: { select: { name: true } },
-          },
-        },
-        site: { select: { id: true, name: true } },
-      },
-      orderBy: { loginAt: 'asc' },
-    });
+    const filters: SQL[] = [
+      eq(attendanceSessions.organizationId, user.organizationId),
+      eq(attendanceSessions.state, 'OPEN'),
+      ...this.scopeFilters(user, siteId, category),
+    ];
+
+    const rows = await this.d1.db
+      .select({ session: attendanceSessions, ...PERSON_COLUMNS })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .leftJoin(designations, eq(designations.id, workers.designationId))
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .leftJoin(sites, eq(sites.id, attendanceSessions.siteId))
+      .where(and(...filters))
+      .orderBy(asc(attendanceSessions.loginAt));
+
+    return rows.map(sessionWithPeople);
   }
 
   /**
@@ -1079,75 +1413,59 @@ export class AttendanceService {
    * nobody scanned out of those, so they belong in the missed-logout list.
    */
   async loggedOutToday(user: AuthUser, siteId?: string, category?: string, dateStr?: string) {
-    const org = await this.prisma.organization.findUnique({
-      where: { id: user.organizationId },
-      select: { timezone: true },
-    });
-    const date = dateStr
-      ? new Date(dateStr)
-      : businessDate(new Date(), org?.timezone ?? 'Asia/Kolkata');
+    const timezone = await this.orgTimezone(user.organizationId);
+    const date = dateStr ? new Date(dateStr) : businessDate(new Date(), timezone);
 
-    const siteFilter =
-      siteId && siteId !== 'all'
-        ? { siteId }
-        : user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0
-          ? { siteId: { in: user.siteScopes } }
-          : {};
-    const categoryFilter =
-      category && category !== 'all' ? { worker: { category: category as PersonCategory } } : {};
+    const scope = this.scopeFilters(user, siteId, category);
 
-    const openSessions = await this.prisma.attendanceSession.findMany({
-      where: {
-        organizationId: user.organizationId,
-        state: 'OPEN',
-        ...siteFilter,
-        ...categoryFilter,
-      },
-      select: { workerId: true },
-    });
+    const openSessions = await this.d1.db
+      .select({ workerId: attendanceSessions.workerId })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, user.organizationId),
+          eq(attendanceSessions.state, 'OPEN'),
+          ...scope,
+        ),
+      );
     const openWorkerIds = new Set(openSessions.map((s) => s.workerId));
 
-    const closedSessions = await this.prisma.attendanceSession.findMany({
-      where: {
-        organizationId: user.organizationId,
-        workDate: date,
-        state: 'CLOSED',
-        logoutAt: { not: null },
-        ...siteFilter,
-        ...categoryFilter,
-      },
-      select: {
-        id: true,
-        loginAt: true,
-        logoutAt: true,
-        workedMinutes: true,
-        worker: {
-          select: {
-            id: true,
-            fullName: true,
-            photoUrl: true,
-            workerCode: true,
-            category: true,
-            designation: { select: { name: true } },
-            vendor: { select: { name: true } },
-          },
-        },
-        site: { select: { id: true, name: true } },
-      },
-      orderBy: { logoutAt: 'desc' },
-    });
+    const closedSessions = await this.d1.db
+      .select({
+        id: attendanceSessions.id,
+        loginAt: attendanceSessions.loginAt,
+        logoutAt: attendanceSessions.logoutAt,
+        workedMinutes: attendanceSessions.workedMinutes,
+        ...PERSON_COLUMNS,
+      })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .leftJoin(designations, eq(designations.id, workers.designationId))
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .leftJoin(sites, eq(sites.id, attendanceSessions.siteId))
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, user.organizationId),
+          eq(attendanceSessions.workDate, dayText(date)),
+          eq(attendanceSessions.state, 'CLOSED'),
+          isNotNull(attendanceSessions.logoutAt),
+          ...scope,
+        ),
+      )
+      .orderBy(desc(attendanceSessions.logoutAt));
 
     // The headline counts unique people for today. Keep this table/count on
     // the same basis: latest logout per person, excluding people currently
     // open in the same selected scope (they came back after logging out).
     const seenWorkerIds = new Set<string>();
-    return closedSessions.filter((session) => {
-      if (openWorkerIds.has(session.worker.id) || seenWorkerIds.has(session.worker.id)) {
-        return false;
-      }
-      seenWorkerIds.add(session.worker.id);
-      return true;
-    });
+    return closedSessions
+      .filter((row) => {
+        if (openWorkerIds.has(row.workerId) || seenWorkerIds.has(row.workerId)) return false;
+        seenWorkerIds.add(row.workerId);
+        return true;
+      })
+      .map(sessionWithPeople);
   }
 
   /**
@@ -1156,43 +1474,40 @@ export class AttendanceService {
    * = all sites in the caller's scope; category omitted/'all' = everyone.
    */
   async daySummary(user: AuthUser, siteId?: string, dateStr?: string, category?: string) {
-    const org = await this.prisma.organization.findUnique({
-      where: { id: user.organizationId },
-      select: { timezone: true },
-    });
-    const date = dateStr
-      ? new Date(dateStr)
-      : businessDate(new Date(), org?.timezone ?? 'Asia/Kolkata');
+    const timezone = await this.orgTimezone(user.organizationId);
+    const date = dateStr ? new Date(dateStr) : businessDate(new Date(), timezone);
 
-    const siteFilter =
-      siteId && siteId !== 'all'
-        ? { siteId }
-        : user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0
-          ? { siteId: { in: user.siteScopes } }
-          : {};
-    const categoryFilter =
-      category && category !== 'all' ? { worker: { category: category as PersonCategory } } : {};
-
-    const sessions = await this.prisma.attendanceSession.findMany({
-      where: {
-        organizationId: user.organizationId,
-        workDate: date,
-        state: { not: 'VOID' },
-        ...siteFilter,
-        ...categoryFilter,
+    const rows = await this.d1.db
+      .select({
+        workerId: attendanceSessions.workerId,
+        state: attendanceSessions.state,
+        category: workers.category,
+        designationName: designations.name,
+        vendorName: vendors.name,
+      })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .leftJoin(designations, eq(designations.id, workers.designationId))
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, user.organizationId),
+          eq(attendanceSessions.workDate, dayText(date)),
+          ne(attendanceSessions.state, 'VOID'),
+          ...this.scopeFilters(user, siteId, category),
+        ),
+      );
+    // The counting below reads the nested shape Prisma returned, so the flat
+    // join rows are put back into it rather than the counting being rewritten.
+    const sessions = rows.map((r) => ({
+      workerId: r.workerId,
+      state: r.state,
+      worker: {
+        category: r.category,
+        designation: r.designationName ? { name: r.designationName } : null,
+        vendor: r.vendorName ? { name: r.vendorName } : null,
       },
-      select: {
-        workerId: true,
-        state: true,
-        worker: {
-          select: {
-            category: true,
-            designation: { select: { name: true } },
-            vendor: { select: { name: true } },
-          },
-        },
-      },
-    });
+    }));
 
     // A person may have several sessions in a day — count each once.
     const seen = new Map<
@@ -1253,18 +1568,22 @@ export class AttendanceService {
    */
   async daySummaryPdf(user: AuthUser, siteId?: string, dateStr?: string, category?: string) {
     const summary = await this.daySummary(user, siteId, dateStr, category);
-    const [org, site] = await Promise.all([
-      this.prisma.organization.findUnique({
-        where: { id: user.organizationId },
-        select: { name: true },
-      }),
+    const [orgRows, siteRows] = await Promise.all([
+      this.d1.db
+        .select({ name: organizations.name })
+        .from(organizations)
+        .where(eq(organizations.id, user.organizationId))
+        .limit(1),
       siteId && siteId !== 'all'
-        ? this.prisma.site.findFirst({
-            where: { id: siteId, organizationId: user.organizationId },
-            select: { name: true },
-          })
-        : Promise.resolve(null),
+        ? this.d1.db
+            .select({ name: sites.name })
+            .from(sites)
+            .where(and(eq(sites.id, siteId), eq(sites.organizationId, user.organizationId)))
+            .limit(1)
+        : Promise.resolve([]),
     ]);
+    const org = orgRows[0] ?? null;
+    const site = siteRows[0] ?? null;
 
     const buffer = await renderDaySummaryPdf(
       {
@@ -1299,23 +1618,33 @@ export class AttendanceService {
    */
   private async registeredWorkforce(user: AuthUser) {
     const scoped = user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0;
-    const rows = await this.prisma.worker.groupBy({
-      by: ['category'],
-      where: {
-        organizationId: user.organizationId,
-        deletedAt: null,
-        status: 'ACTIVE',
-        ...(scoped
-          ? { assignments: { some: { siteId: { in: user.siteScopes }, endDate: null } } }
-          : {}),
-      },
-      _count: { _all: true },
-    });
+    const filters: SQL[] = [
+      eq(workers.organizationId, user.organizationId),
+      isNull(workers.deletedAt),
+      eq(workers.status, 'ACTIVE'),
+    ];
+    // Prisma's `assignments: { some: ... }` — an EXISTS, which is what it
+    // compiled to. Written as one so a worker on two scoped sites is still
+    // counted once.
+    if (scoped) {
+      filters.push(
+        sql`exists (select 1 from ${workerSiteAssignments} wsa
+              where wsa.worker_id = ${workers.id}
+                and wsa.end_date is null
+                and wsa.site_id in ${user.siteScopes})`,
+      );
+    }
+
+    const rows = await this.d1.db
+      .select({ category: workers.category, count: sql<number>`count(*)`.as('count') })
+      .from(workers)
+      .where(and(...filters))
+      .groupBy(workers.category);
 
     const byCategory: Record<string, number> = { WORKER: 0, STAFF: 0, VISITOR: 0 };
-    for (const r of rows) byCategory[r.category] = r._count._all;
+    for (const r of rows) byCategory[r.category] = Number(r.count);
     return {
-      total: rows.reduce((sum, r) => sum + r._count._all, 0),
+      total: rows.reduce((sum, r) => sum + Number(r.count), 0),
       byCategory,
     };
   }
@@ -1332,39 +1661,40 @@ export class AttendanceService {
    * logout taps, so the three figures always reconcile on screen.
    */
   private async gateMovement(user: AuthUser, tz: string) {
-    const scopeFilter =
-      user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0
-        ? { siteId: { in: user.siteScopes } }
-        : {};
     const today = businessDate(new Date(), tz);
     const yesterday = businessDate(new Date(Date.now() - 24 * 3600 * 1000), tz);
 
-    const sessions = await this.prisma.attendanceSession.findMany({
-      where: {
-        organizationId: user.organizationId,
-        workDate: { in: [today, yesterday] },
-        state: { not: 'VOID' },
-        ...scopeFilter,
-      },
-      select: {
-        workerId: true,
-        workDate: true,
-        state: true,
-        lateMinutes: true,
-        worker: { select: { category: true } },
-      },
-      take: 20000,
-    });
+    const sessions = await this.d1.db
+      .select({
+        workerId: attendanceSessions.workerId,
+        workDate: attendanceSessions.workDate,
+        state: attendanceSessions.state,
+        lateMinutes: attendanceSessions.lateMinutes,
+        category: workers.category,
+      })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, user.organizationId),
+          inArray(attendanceSessions.workDate, [dayText(today), dayText(yesterday)]),
+          ne(attendanceSessions.state, 'VOID'),
+          ...this.scopeFilters(user),
+        ),
+      )
+      .limit(20000);
 
     const tally = (day: Date) => {
       const turnedUp = new Set<string>();
       const stillHere = new Set<string>();
       const late = new Set<string>();
-      const workers = new Set<string>();
+      const workerIds = new Set<string>();
       for (const s of sessions) {
-        if (s.workDate.getTime() !== day.getTime()) continue;
+        // Both sides are 'YYYY-MM-DD' now, so this is a string comparison
+        // rather than the instant comparison Prisma's Date column needed.
+        if (s.workDate !== dayText(day)) continue;
         turnedUp.add(s.workerId);
-        if (s.worker.category === 'WORKER') workers.add(s.workerId);
+        if (s.category === 'WORKER') workerIds.add(s.workerId);
         if (s.state === 'OPEN') stillHere.add(s.workerId);
         if ((s.lateMinutes ?? 0) > 0) late.add(s.workerId);
       }
@@ -1373,7 +1703,7 @@ export class AttendanceService {
         onSite: stillHere.size,
         checkedOut: turnedUp.size - stillHere.size,
         lateArrivals: late.size,
-        workersCheckedIn: workers.size,
+        workersCheckedIn: workerIds.size,
       };
     };
 
@@ -1392,45 +1722,59 @@ export class AttendanceService {
    * yesterday's so the cards can show a real change.
    */
   async dashboardStats(user: AuthUser) {
-    const org = await this.prisma.organization.findUnique({
-      where: { id: user.organizationId },
-      select: { timezone: true },
-    });
-    const tz = org?.timezone ?? 'Asia/Kolkata';
-    const scopeFilter =
-      user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0
-        ? { siteId: { in: user.siteScopes } }
-        : {};
+    const tz = await this.orgTimezone(user.organizationId);
 
-    const select = {
-      loginAt: true,
-      workDate: true,
-      worker: { select: { fullName: true, workerCode: true, category: true } },
-      site: { select: { name: true } },
+    // The columns both lists below read, kept in one place as Prisma's shared
+    // `select` was.
+    const columns = {
+      loginAt: attendanceSessions.loginAt,
+      workDate: attendanceSessions.workDate,
+      fullName: workers.fullName,
+      workerCode: workers.workerCode,
+      category: workers.category,
+      siteName: sites.name,
     } as const;
 
-    const open = await this.prisma.attendanceSession.findMany({
-      where: { organizationId: user.organizationId, state: 'OPEN', ...scopeFilter },
-      select,
-      orderBy: { loginAt: 'asc' },
-    });
+    const open = await this.d1.db
+      .select(columns)
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .leftJoin(sites, eq(sites.id, attendanceSessions.siteId))
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, user.organizationId),
+          eq(attendanceSessions.state, 'OPEN'),
+          ...this.scopeFilters(user),
+        ),
+      )
+      .orderBy(asc(attendanceSessions.loginAt));
 
     const yesterday = businessDate(new Date(Date.now() - 24 * 3600 * 1000), tz);
     // Missed logouts = sessions auto-closed on next login (yesterday) plus
     // sessions still OPEN that the forgot-logout monitor has flagged (they are
     // no longer auto-closed — an admin/safety officer must act on them).
-    const missed = await this.prisma.attendanceSession.findMany({
-      where: {
-        organizationId: user.organizationId,
-        OR: [
-          { state: 'AUTO_CLOSED', workDate: yesterday },
-          { state: 'OPEN', forgotLogoutNotifiedAt: { not: null } },
-        ],
-        ...scopeFilter,
-      },
-      select,
-      orderBy: { loginAt: 'asc' },
-    });
+    const missed = await this.d1.db
+      .select(columns)
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .leftJoin(sites, eq(sites.id, attendanceSessions.siteId))
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, user.organizationId),
+          or(
+            and(
+              eq(attendanceSessions.state, 'AUTO_CLOSED'),
+              eq(attendanceSessions.workDate, dayText(yesterday)),
+            ),
+            and(
+              eq(attendanceSessions.state, 'OPEN'),
+              isNotNull(attendanceSessions.forgotLogoutNotifiedAt),
+            ),
+          ),
+          ...this.scopeFilters(user),
+        ),
+      )
+      .orderBy(asc(attendanceSessions.loginAt));
 
     const today = businessDate(new Date(), tz);
     /**
@@ -1442,7 +1786,7 @@ export class AttendanceService {
      * does not. Marking each person lets both dashboards show the split instead
      * of leaving people to work out the difference themselves.
      */
-    const isCarriedOver = (s: (typeof open)[number]) => s.workDate.getTime() < today.getTime();
+    const isCarriedOver = (s: (typeof open)[number]) => s.workDate < dayText(today);
 
     type Row = (typeof open)[number];
     const bucket = (rows: Row[]) => {
@@ -1461,16 +1805,16 @@ export class AttendanceService {
         }
       > = {};
       for (const s of rows) {
-        const cat = s.worker.category;
+        const cat = s.category;
         const b = (byCategory[cat] ??= { count: 0, people: [] });
         b.count += 1;
         if (b.people.length < 200) {
           b.people.push({
-            fullName: s.worker.fullName,
-            workerCode: s.worker.workerCode,
-            siteName: s.site?.name ?? null,
+            fullName: s.fullName,
+            workerCode: s.workerCode,
+            siteName: s.siteName ?? null,
             loginAt: s.loginAt,
-            workDate: s.workDate.toISOString().slice(0, 10),
+            workDate: s.workDate,
             carriedOver: isCarriedOver(s),
           });
         }
@@ -1510,16 +1854,14 @@ export class AttendanceService {
    * by site and today's vendor-wise attendance.
    */
   async dashboardCharts(user: AuthUser, range: { from?: string; to?: string } = {}) {
-    const org = await this.prisma.organization.findUnique({
-      where: { id: user.organizationId },
-      select: { timezone: true },
-    });
-    const tz = org?.timezone ?? 'Asia/Kolkata';
-    const scopeFilter =
-      user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0
-        ? { siteId: { in: user.siteScopes } }
-        : {};
-    const orgScope = { organizationId: user.organizationId, ...scopeFilter };
+    const tz = await this.orgTimezone(user.organizationId);
+    const orgScope: SQL[] = [
+      eq(attendanceSessions.organizationId, user.organizationId),
+      ...this.scopeFilters(user),
+    ];
+    // Manpower charts count labour only — staff and visitors are on site but
+    // are not manpower, so they are filtered out at the query.
+    const labourOnly = eq(workers.category, 'WORKER');
 
     const today = businessDate(new Date(), tz);
     // The vendor trend spans 30 days; every other series is "now" or "today".
@@ -1528,75 +1870,84 @@ export class AttendanceService {
     // the 30-day vendor window entirely, so it gets a query of its own.
     const { start: rangeStart, end: rangeEnd } = resolveManpowerRange(range.from, range.to, today);
 
-    const [windowSessions, openNow, pendingCorrections, todaySessions, rangeSessions] =
+    // The columns the four manpower queries share.
+    const manpowerColumns = {
+      workDate: attendanceSessions.workDate,
+      workedMinutes: attendanceSessions.workedMinutes,
+      category: workers.category,
+      vendorName: vendors.name,
+      designationName: designations.name,
+    } as const;
+    /** The manpower join, which every one of those queries needs. */
+    const manpowerFrom = () =>
+      this.d1.db
+        .select(manpowerColumns)
+        .from(attendanceSessions)
+        .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+        .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+        .leftJoin(designations, eq(designations.id, workers.designationId));
+
+    const [windowRows, openNowRows, pendingCorrections, todayRows, rangeRows] =
       await Promise.all([
-        // Manpower charts count labour only — staff and visitors are on site but
-        // are not manpower, so they are filtered out at the query.
-        this.prisma.attendanceSession.findMany({
-          where: { ...orgScope, workDate: { gte: from }, worker: { category: 'WORKER' } },
-          select: {
-            workDate: true,
-            workedMinutes: true,
-            worker: {
-              select: {
-                category: true,
-                vendor: { select: { name: true } },
-                designation: { select: { name: true } },
-              },
-            },
-          },
-          take: 20000,
-        }),
-        this.prisma.attendanceSession.findMany({
-          where: { ...orgScope, state: 'OPEN' },
-          select: {
-            site: { select: { name: true } },
-            worker: { select: { category: true } },
-          },
-        }),
-        this.prisma.correctionRequest.findMany({
-          where: { ...orgScope, status: 'PENDING' },
-          select: { siteId: true },
-        }),
+        manpowerFrom()
+          .where(and(...orgScope, gte(attendanceSessions.workDate, dayText(from)), labourOnly))
+          .limit(20000),
+        this.d1.db
+          .select({ siteName: sites.name, category: workers.category })
+          .from(attendanceSessions)
+          .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+          .leftJoin(sites, eq(sites.id, attendanceSessions.siteId))
+          .where(and(...orgScope, eq(attendanceSessions.state, 'OPEN'))),
+        this.d1.db
+          .select({ siteId: correctionRequests.siteId })
+          .from(correctionRequests)
+          .where(
+            and(
+              eq(correctionRequests.organizationId, user.organizationId),
+              eq(correctionRequests.status, 'PENDING'),
+              ...(user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0
+                ? [inArray(correctionRequests.siteId, user.siteScopes)]
+                : []),
+            ),
+          ),
         // Today's labour, kept as its own query rather than sliced off the 30-day
         // window so a large org hitting that query's row cap cannot skew today.
-        this.prisma.attendanceSession.findMany({
-          where: { ...orgScope, workDate: today, worker: { category: 'WORKER' } },
-          select: {
-            workedMinutes: true,
-            worker: {
-              select: {
-                category: true,
-                vendor: { select: { name: true } },
-                designation: { select: { name: true } },
-              },
-            },
-          },
-          take: 5000,
-        }),
+        manpowerFrom()
+          .where(and(...orgScope, eq(attendanceSessions.workDate, dayText(today)), labourOnly))
+          .limit(5000),
         // The manpower panel's window: trend, by-trade and by-vendor are all
         // tallied across these days rather than a single day.
-        this.prisma.attendanceSession.findMany({
-          where: {
-            ...orgScope,
-            workDate: { gte: rangeStart, lte: rangeEnd },
-            worker: { category: 'WORKER' },
-          },
-          select: {
-            workDate: true,
-            workedMinutes: true,
-            worker: {
-              select: {
-                category: true,
-                vendor: { select: { name: true } },
-                designation: { select: { name: true } },
-              },
-            },
-          },
-          take: 20000,
-        }),
+        manpowerFrom()
+          .where(
+            and(
+              ...orgScope,
+              gte(attendanceSessions.workDate, dayText(rangeStart)),
+              lte(attendanceSessions.workDate, dayText(rangeEnd)),
+              labourOnly,
+            ),
+          )
+          .limit(20000),
       ]);
 
+    const nest = (rows: ManpowerRow[]) =>
+      rows.map((r) => ({
+        workDate: r.workDate,
+        workedMinutes: r.workedMinutes,
+        worker: {
+          category: r.category,
+          vendor: r.vendorName ? { name: r.vendorName } : null,
+          designation: r.designationName ? { name: r.designationName } : null,
+        },
+      }));
+    const windowSessions = nest(windowRows);
+    const todaySessions = nest(todayRows);
+    const rangeSessions = nest(rangeRows);
+    const openNow = openNowRows.map((r) => ({
+      site: r.siteName ? { name: r.siteName } : null,
+      worker: { category: r.category },
+    }));
+
+    // Both sides are 'YYYY-MM-DD' text now; a stored day needs no conversion.
     const dayKey = (d: Date) => d.toISOString().slice(0, 10);
 
     // Vendor-wise man-days per day across the window — one line per vendor.
@@ -1621,7 +1972,7 @@ export class AttendanceService {
     for (const s of windowSessions) {
       const name = vendorGroupLabel(s.worker);
       const designation = s.worker.designation?.name?.trim() || 'No designation';
-      const day = dayKey(s.workDate);
+      const day = s.workDate;
       if (!dayIndex.has(day)) continue;
       let cube = perVendor.get(name);
       if (!cube) {
@@ -1694,7 +2045,7 @@ export class AttendanceService {
     const rangeIndex = new Map(rangeDays.map((d, i) => [d, i]));
     const manpowerTrend = new Array<number>(rangeDays.length).fill(0);
     for (const s of rangeSessions) {
-      const i = rangeIndex.get(dayKey(s.workDate));
+      const i = rangeIndex.get(s.workDate);
       if (i !== undefined) manpowerTrend[i] += 1;
     }
 
@@ -1738,11 +2089,11 @@ export class AttendanceService {
       correctionsBySite: await (async () => {
         const siteNames = new Map(
           (
-            await this.prisma.site.findMany({
-              where: { organizationId: user.organizationId },
-              select: { id: true, name: true },
-            })
-          ).map((s) => [s.id, s.name]),
+            await this.d1.db
+              .select({ id: sites.id, name: sites.name })
+              .from(sites)
+              .where(eq(sites.organizationId, user.organizationId))
+          ).map((row) => [row.id, row.name] as const),
         );
         return tally(pendingCorrections, (c) => siteNames.get(c.siteId) ?? 'Unknown site').map(
           ([name, count]) => ({ site: name, pending: count }),
@@ -1761,21 +2112,30 @@ export class AttendanceService {
     const from = new Date(Date.UTC(year, mon - 1, 1));
     const to = new Date(Date.UTC(year, mon, 1));
 
-    const worker = await this.prisma.worker.findFirst({
-      where: { id: workerId, organizationId },
-      select: { id: true, fullName: true, photoUrl: true },
-    });
+    const [worker] = await this.d1.db
+      .select({ id: workers.id, fullName: workers.fullName, photoUrl: workers.photoUrl })
+      .from(workers)
+      .where(and(eq(workers.id, workerId), eq(workers.organizationId, organizationId)))
+      .limit(1);
     if (!worker) throw Errors.workerNotFound();
 
-    const sessions = await this.prisma.attendanceSession.findMany({
-      where: { workerId, organizationId, workDate: { gte: from, lt: to } },
-      orderBy: { workDate: 'asc' },
-    });
+    const sessions = await this.d1.db
+      .select()
+      .from(attendanceSessions)
+      .where(
+        and(
+          eq(attendanceSessions.workerId, workerId),
+          eq(attendanceSessions.organizationId, organizationId),
+          gte(attendanceSessions.workDate, dayText(from)),
+          lt(attendanceSessions.workDate, dayText(to)),
+        ),
+      )
+      .orderBy(asc(attendanceSessions.workDate));
 
     const totalMinutes = sessions.reduce((s, x) => s + (x.workedMinutes ?? 0), 0);
     const overtime = sessions.reduce((s, x) => s + (x.overtimeMinutes ?? 0), 0);
     const lateArrivals = sessions.filter((x) => (x.lateMinutes ?? 0) > 0).length;
-    const workedDays = new Set(sessions.map((x) => x.workDate.toISOString().slice(0, 10))).size;
+    const workedDays = new Set(sessions.map((x) => x.workDate)).size;
     const daysInMonth = new Date(Date.UTC(year, mon, 0)).getUTCDate();
 
     return {
@@ -1786,7 +2146,7 @@ export class AttendanceService {
       absentDays: Math.max(0, daysInMonth - workedDays),
       lateArrivals,
       daily: sessions.map((x) => ({
-        date: x.workDate.toISOString().slice(0, 10),
+        date: x.workDate,
         loginAt: x.loginAt,
         logoutAt: x.logoutAt,
         workedMinutes: x.workedMinutes,
@@ -1798,6 +2158,3 @@ export class AttendanceService {
     };
   }
 }
-
-// Re-export Prisma type to satisfy unused import lint when tree-shaken.
-export type { Prisma };

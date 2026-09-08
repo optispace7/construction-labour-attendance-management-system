@@ -1,5 +1,5 @@
 import { ApiProperty, PartialType } from '@nestjs/swagger';
-import { CredentialKind, PersonCategory, WorkerStatus } from '@prisma/client';
+import { CredentialKind, PersonCategory, WorkerStatus } from '../../../common/enums';
 import {
   ArrayMaxSize,
   ArrayNotEmpty,

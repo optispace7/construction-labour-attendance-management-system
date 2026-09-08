@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { CorrectionStatus } from '@prisma/client';
+import { CorrectionStatus } from '../../common/enums';
 import { CorrectionsService } from './corrections.service';
 import { CreateCorrectionDto, ReviewCorrectionDto } from './dto/correction.dto';
 import { RequirePermissions } from '../../common/rbac/rbac.decorators';

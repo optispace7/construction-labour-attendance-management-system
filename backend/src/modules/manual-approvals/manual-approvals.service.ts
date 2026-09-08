@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { ManualApprovalStatus } from '@prisma/client';
+import { ManualApprovalStatus } from '../../common/enums';
 import { DateTime } from 'luxon';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { AuditService } from '../../common/audit/audit.service';

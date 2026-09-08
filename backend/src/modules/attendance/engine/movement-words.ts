@@ -1,4 +1,4 @@
-import { TapSource } from '@prisma/client';
+import { TapSource } from '../../../common/enums';
 
 /**
  * What moved a session, in the words the person reading it uses.

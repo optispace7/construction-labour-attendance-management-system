@@ -31,21 +31,21 @@ function build(over: any = {}) {
   const taps = over.taps ?? 1247;
 
   // The service reads the device with its owner's role joined, so the double
-  // answers with the row shape that join produces.
-  const double = drizzleDouble([], {});
+  // holds the row shape that join produces.
+  const double = drizzleDouble([
+    [devicesTable, device ? [{ device, ownerRole: device.user?.role ?? null }] : []],
+  ]);
+
+  // The order the writes actually happened in — the revoke has to land before
+  // the delete, so a failed delete still leaves the device locked out.
   const order: string[] = [];
-  double.db.then = jest.fn((resolve: (rows: any[]) => unknown) =>
-    Promise.resolve(device ? [{ device, ownerRole: device.user?.role ?? null }] : []).then(
-      resolve,
-    ),
-  ) as any;
+  const update = double.db.update;
   double.db.update = jest.fn((t: unknown) => {
     // Only an update to devices is the pre-delete revoke. The stamp inside the
     // batch is an update too, on attendance_taps, and counting it here made
     // the ordering assertion see a revoke that never happened.
     if (t === devicesTable) order.push('revoke');
-    double.writes.push({ kind: 'update', table: t });
-    return double.db;
+    return update(t);
   }) as any;
   double.db.batch = jest.fn((stmts: unknown[]) => {
     order.push('stamp', 'delete');

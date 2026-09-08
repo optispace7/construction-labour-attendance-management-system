@@ -1,4 +1,4 @@
-import { UserRole } from '@prisma/client';
+import { UserRole } from '../../common/enums';
 
 /** All permissions in the system (see docs/01-architecture.md §3.2). */
 export enum Permission {

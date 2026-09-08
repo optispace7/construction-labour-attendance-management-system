@@ -1,4 +1,4 @@
-import { PersonCategory, SafetyMetric } from '@prisma/client';
+import { PersonCategory, SafetyMetric } from '../../common/enums';
 
 /**
  * The safety board's metric catalogue: what each one is called, whether it is

@@ -1,5 +1,5 @@
 import { WorkersController } from './workers.controller';
-import { UserRole } from '@prisma/client';
+import { UserRole } from '../../common/enums';
 
 /**
  * The reveal gate must read the role→permission table, not a hardcoded list of

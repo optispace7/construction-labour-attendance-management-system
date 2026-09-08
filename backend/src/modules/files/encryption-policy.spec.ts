@@ -1,4 +1,4 @@
-import { PhotoKind } from '@prisma/client';
+import { PhotoKind } from '../../common/enums';
 
 /**
  * Which image kinds are stored in the clear.

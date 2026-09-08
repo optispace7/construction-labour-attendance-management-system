@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Param, Patch, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { DeviceStatus } from '@prisma/client';
+import { DeviceStatus } from '../../common/enums';
 import { IsEnum, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 import { DevicesService } from './devices.service';
 import { RequirePermissions } from '../../common/rbac/rbac.decorators';

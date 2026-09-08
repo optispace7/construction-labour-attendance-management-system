@@ -1,6 +1,16 @@
 import { Injectable } from '@nestjs/common';
 import { DateTime } from 'luxon';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, asc, eq, inArray, isNull, ne, notInArray, type SQL } from 'drizzle-orm';
+import { D1Service } from '../../infra/d1/d1.service';
+import {
+  attendanceSessions,
+  designations,
+  organizations,
+  shifts,
+  sites,
+  vendors,
+  workers,
+} from '../../infra/d1/schema.generated';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
@@ -8,32 +18,71 @@ import { businessDate } from '../../common/time/time.util';
 import { computeWorkHours, ShiftConfig } from './engine/work-hours.engine';
 import { BulkLogoutDto, BulkReopenDto, EditSessionDto } from './dto/session-admin.dto';
 
-/** A session as the fix panel shows it. */
-const SESSION_SELECT = {
-  id: true,
-  workerId: true,
-  siteId: true,
-  workDate: true,
-  loginAt: true,
-  logoutAt: true,
-  state: true,
-  workedMinutes: true,
-  overtimeMinutes: true,
-  closedReason: true,
-  loginTapId: true,
-  logoutTapId: true,
-  worker: {
-    select: {
-      id: true,
-      fullName: true,
-      workerCode: true,
-      category: true,
-      designation: { select: { name: true } },
-      vendor: { select: { name: true } },
-    },
-  },
-  site: { select: { id: true, name: true, timezone: true } },
+/**
+ * A session as the fix panel shows it.
+ *
+ * Prisma's nested `select` came back nested; a join comes back flat, so the
+ * columns and the reshaping sit together and every caller gets the same object
+ * it always did.
+ */
+const SESSION_COLUMNS = {
+  id: attendanceSessions.id,
+  workerId: attendanceSessions.workerId,
+  siteId: attendanceSessions.siteId,
+  workDate: attendanceSessions.workDate,
+  loginAt: attendanceSessions.loginAt,
+  logoutAt: attendanceSessions.logoutAt,
+  state: attendanceSessions.state,
+  workedMinutes: attendanceSessions.workedMinutes,
+  overtimeMinutes: attendanceSessions.overtimeMinutes,
+  closedReason: attendanceSessions.closedReason,
+  loginTapId: attendanceSessions.loginTapId,
+  logoutTapId: attendanceSessions.logoutTapId,
+  workerFullName: workers.fullName,
+  workerCode: workers.workerCode,
+  workerCategory: workers.category,
+  designationName: designations.name,
+  vendorName: vendors.name,
+  siteName: sites.name,
+  siteTimezone: sites.timezone,
 } as const;
+
+type SessionRow = {
+  [K in keyof typeof SESSION_COLUMNS]: K extends 'workDate'
+    ? string
+    : K extends 'loginAt'
+      ? Date
+      : unknown;
+};
+
+/** One flat join row back in the nested shape the panel already reads. */
+function nestSession<T extends Record<string, unknown>>(r: T) {
+  return {
+    id: r.id as string,
+    workerId: r.workerId as string,
+    siteId: r.siteId as string,
+    workDate: r.workDate as string,
+    loginAt: r.loginAt as Date,
+    logoutAt: r.logoutAt as Date | null,
+    state: r.state as string,
+    workedMinutes: r.workedMinutes as number | null,
+    overtimeMinutes: r.overtimeMinutes as number | null,
+    closedReason: r.closedReason as string | null,
+    loginTapId: r.loginTapId as string | null,
+    logoutTapId: r.logoutTapId as string | null,
+    worker: {
+      id: r.workerId as string,
+      fullName: r.workerFullName as string,
+      workerCode: r.workerCode as string,
+      category: r.workerCategory as string,
+      designation: r.designationName ? { name: r.designationName as string } : null,
+      vendor: r.vendorName ? { name: r.vendorName as string } : null,
+    },
+    site: r.siteId
+      ? { id: r.siteId as string, name: r.siteName as string, timezone: r.siteTimezone as string }
+      : null,
+  };
+}
 
 /**
  * Super-admin repairs to attendance records.
@@ -51,22 +100,34 @@ const SESSION_SELECT = {
 @Injectable()
 export class SessionAdminService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly audit: AuditService,
   ) {}
 
+  /** The session join every read here shares. */
+  private sessionQuery() {
+    return this.d1.db
+      .select(SESSION_COLUMNS)
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .leftJoin(designations, eq(designations.id, workers.designationId))
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .leftJoin(sites, eq(sites.id, attendanceSessions.siteId));
+  }
+
   /** Sites this user may touch; SUPER_ADMIN is unscoped. */
-  private scope(user: AuthUser) {
+  private scope(user: AuthUser): SQL[] {
     return user.role !== 'SUPER_ADMIN' && user.siteScopes.length > 0
-      ? { siteId: { in: user.siteScopes } }
-      : {};
+      ? [inArray(attendanceSessions.siteId, user.siteScopes)]
+      : [];
   }
 
   private async orgTimezone(organizationId: string): Promise<string> {
-    const org = await this.prisma.organization.findUnique({
-      where: { id: organizationId },
-      select: { timezone: true },
-    });
+    const [org] = await this.d1.db
+      .select({ timezone: organizations.timezone })
+      .from(organizations)
+      .where(eq(organizations.id, organizationId))
+      .limit(1);
     return org?.timezone ?? 'Asia/Kolkata';
   }
 
@@ -76,16 +137,17 @@ export class SessionAdminService {
     const workDate = date ? new Date(`${date}T00:00:00.000Z`) : businessDate(new Date(), tz);
     if (Number.isNaN(workDate.getTime())) throw Errors.businessRule('Invalid date');
 
-    const sessions = await this.prisma.attendanceSession.findMany({
-      where: {
-        organizationId: user.organizationId,
-        workDate,
-        ...this.scope(user),
-        ...(siteId && siteId !== 'all' ? { siteId } : {}),
-      },
-      select: SESSION_SELECT,
-      orderBy: [{ worker: { workerCode: 'asc' } }, { loginAt: 'asc' }],
-    });
+    const rows = await this.sessionQuery()
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, user.organizationId),
+          eq(attendanceSessions.workDate, workDate.toISOString().slice(0, 10)),
+          ...this.scope(user),
+          ...(siteId && siteId !== 'all' ? [eq(attendanceSessions.siteId, siteId)] : []),
+        ),
+      )
+      .orderBy(asc(workers.workerCode), asc(attendanceSessions.loginAt));
+    const sessions = rows.map(nestSession);
 
     // A worker with two rows on one day is nearly always a mis-scan, so flag it
     // for the operator rather than making them spot it in a long table.
@@ -101,20 +163,33 @@ export class SessionAdminService {
   }
 
   private async loadSession(user: AuthUser, id: string) {
-    const session = await this.prisma.attendanceSession.findFirst({
-      where: { id, organizationId: user.organizationId, ...this.scope(user) },
-      select: SESSION_SELECT,
-    });
-    if (!session) throw Errors.notFound('Attendance session');
-    return session;
+    const [row] = await this.sessionQuery()
+      .where(
+        and(
+          eq(attendanceSessions.id, id),
+          eq(attendanceSessions.organizationId, user.organizationId),
+          ...this.scope(user),
+        ),
+      )
+      .limit(1);
+    if (!row) throw Errors.notFound('Attendance session');
+    return nestSession(row);
   }
 
   /** The shift's rules, so a corrected session is scored like a scanned one. */
   private async shiftConfig(shiftId: string | null): Promise<ShiftConfig | undefined> {
     if (!shiftId) return undefined;
-    const shift = await this.prisma.shift.findUnique({ where: { id: shiftId } });
+    const [shift] = await this.d1.db
+      .select()
+      .from(shifts)
+      .where(eq(shifts.id, shiftId))
+      .limit(1);
     if (!shift) return undefined;
-    const mins = (t: Date) => t.getUTCHours() * 60 + t.getUTCMinutes();
+    // 'HH:MM:SS' text on SQLite, where Prisma handed over a Date.
+    const mins = (t: string) => {
+      const [h, m] = t.split(':').map((n) => parseInt(n, 10));
+      return (h || 0) * 60 + (m || 0);
+    };
     return {
       startTimeMinutes: mins(shift.startTime),
       endTimeMinutes: mins(shift.endTime),
@@ -134,10 +209,12 @@ export class SessionAdminService {
    */
   async edit(user: AuthUser, id: string, dto: EditSessionDto) {
     const session = await this.loadSession(user, id);
-    const full = await this.prisma.attendanceSession.findUniqueOrThrow({
-      where: { id },
-      select: { shiftId: true },
-    });
+    const [full] = await this.d1.db
+      .select({ shiftId: attendanceSessions.shiftId })
+      .from(attendanceSessions)
+      .where(eq(attendanceSessions.id, id))
+      .limit(1);
+    if (!full) throw Errors.notFound('Attendance session');
 
     const loginAt = dto.loginAt ? new Date(dto.loginAt) : session.loginAt;
     const logoutAt =
@@ -151,23 +228,37 @@ export class SessionAdminService {
 
     let workerId = session.workerId;
     if (dto.workerId && dto.workerId !== session.workerId) {
-      const target = await this.prisma.worker.findFirst({
-        where: { id: dto.workerId, organizationId: user.organizationId, deletedAt: null },
-        select: { id: true, fullName: true, workerCode: true },
-      });
+      const [target] = await this.d1.db
+        .select({ id: workers.id, fullName: workers.fullName, workerCode: workers.workerCode })
+        .from(workers)
+        .where(
+          and(
+            eq(workers.id, dto.workerId),
+            eq(workers.organizationId, user.organizationId),
+            isNull(workers.deletedAt),
+          ),
+        )
+        .limit(1);
       if (!target) throw Errors.notFound('Worker');
 
       // One OPEN session per worker is a DB constraint; catching it here lets us
       // say which record is in the way instead of surfacing a Postgres error.
-      const clash = await this.prisma.attendanceSession.findFirst({
-        where: {
-          workerId: target.id,
-          workDate: session.workDate,
-          id: { not: session.id },
-          ...(logoutAt === null ? { state: 'OPEN' } : {}),
-        },
-        select: { id: true, state: true, loginAt: true },
-      });
+      const [clash] = await this.d1.db
+        .select({
+          id: attendanceSessions.id,
+          state: attendanceSessions.state,
+          loginAt: attendanceSessions.loginAt,
+        })
+        .from(attendanceSessions)
+        .where(
+          and(
+            eq(attendanceSessions.workerId, target.id),
+            eq(attendanceSessions.workDate, session.workDate),
+            ne(attendanceSessions.id, session.id),
+            ...(logoutAt === null ? [eq(attendanceSessions.state, 'OPEN')] : []),
+          ),
+        )
+        .limit(1);
       if (clash) {
         throw Errors.businessRule(
           `${target.workerCode} ${target.fullName} already has ${
@@ -183,15 +274,21 @@ export class SessionAdminService {
     // record is in the way rather than letting Postgres raise the constraint.
     const reopening = logoutAt === null && session.state !== 'OPEN';
     if (reopening) {
-      const openElsewhere = await this.prisma.attendanceSession.findFirst({
-        where: { workerId, state: 'OPEN', id: { not: session.id } },
-        select: { workDate: true },
-      });
+      const [openElsewhere] = await this.d1.db
+        .select({ workDate: attendanceSessions.workDate })
+        .from(attendanceSessions)
+        .where(
+          and(
+            eq(attendanceSessions.workerId, workerId),
+            eq(attendanceSessions.state, 'OPEN'),
+            ne(attendanceSessions.id, session.id),
+          ),
+        )
+        .limit(1);
       if (openElsewhere) {
         throw Errors.businessRule(
-          `This person is already shown as on site on ${openElsewhere.workDate
-            .toISOString()
-            .slice(0, 10)}. Close that record first.`,
+          `This person is already shown as on site on ${openElsewhere.workDate}. ` +
+            'Close that record first.',
         );
       }
     }
@@ -205,9 +302,9 @@ export class SessionAdminService {
         )
       : null;
 
-    const updated = await this.prisma.attendanceSession.update({
-      where: { id },
-      data: {
+    await this.d1.db
+      .update(attendanceSessions)
+      .set({
         workerId,
         loginAt,
         logoutAt,
@@ -219,9 +316,12 @@ export class SessionAdminService {
         ...(logoutAt && session.state === 'OPEN' ? { closedReason: 'ADMIN_EDIT' } : {}),
         // A reopened session has not been closed by anything any more.
         ...(logoutAt === null ? { closedReason: null } : {}),
-      },
-      select: SESSION_SELECT,
-    });
+        updatedAt: new Date(),
+      })
+      .where(eq(attendanceSessions.id, id));
+    // Read back through the same join, so the caller gets the nested shape
+    // Prisma's `select` on the update returned.
+    const updated = await this.loadSession(user, id);
 
     await this.audit.record({
       organizationId: user.organizationId,
@@ -259,7 +359,7 @@ export class SessionAdminService {
   async remove(user: AuthUser, id: string, reason: string) {
     const session = await this.loadSession(user, id);
 
-    await this.prisma.attendanceSession.delete({ where: { id } });
+    await this.d1.db.delete(attendanceSessions).where(eq(attendanceSessions.id, id));
 
     await this.audit.record({
       organizationId: user.organizationId,
@@ -303,18 +403,27 @@ export class SessionAdminService {
     const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(dto.time);
     if (!match) throw Errors.businessRule('Give the logout time as HH:mm, for example 18:05');
 
-    const open = await this.prisma.attendanceSession.findMany({
-      where: {
-        organizationId: user.organizationId,
-        workDate,
-        state: 'OPEN',
-        ...this.scope(user),
-        ...(dto.siteId && dto.siteId !== 'all' ? { siteId: dto.siteId } : {}),
-        ...(dto.sessionIds?.length ? { id: { in: dto.sessionIds } } : {}),
-      },
-      select: { ...SESSION_SELECT, shiftId: true },
-      orderBy: [{ worker: { workerCode: 'asc' } }],
-    });
+    const openRows = await this.d1.db
+      .select({ ...SESSION_COLUMNS, shiftId: attendanceSessions.shiftId })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .leftJoin(designations, eq(designations.id, workers.designationId))
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .leftJoin(sites, eq(sites.id, attendanceSessions.siteId))
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, user.organizationId),
+          eq(attendanceSessions.workDate, workDate.toISOString().slice(0, 10)),
+          eq(attendanceSessions.state, 'OPEN'),
+          ...this.scope(user),
+          ...(dto.siteId && dto.siteId !== 'all'
+            ? [eq(attendanceSessions.siteId, dto.siteId)]
+            : []),
+          ...(dto.sessionIds?.length ? [inArray(attendanceSessions.id, dto.sessionIds)] : []),
+        ),
+      )
+      .orderBy(asc(workers.workerCode));
+    const open = openRows.map((r) => ({ ...nestSession(r), shiftId: r.shiftId }));
 
     const closed: Array<{
       id: string;
@@ -362,9 +471,9 @@ export class SessionAdminService {
       );
 
       if (!dto.dryRun) {
-        await this.prisma.attendanceSession.update({
-          where: { id: s.id },
-          data: {
+        await this.d1.db
+          .update(attendanceSessions)
+          .set({
             logoutAt,
             state: 'CLOSED',
             workedMinutes: hours.workedMinutes,
@@ -372,8 +481,9 @@ export class SessionAdminService {
             lateMinutes: hours.lateMinutes,
             earlyLeaveMinutes: hours.earlyLeaveMinutes,
             closedReason: 'ADMIN_BULK_LOGOUT',
-          },
-        });
+            updatedAt: new Date(),
+          })
+          .where(eq(attendanceSessions.id, s.id));
         await this.audit.record({
           organizationId: user.organizationId,
           actorUserId: user.userId,
@@ -430,25 +540,38 @@ export class SessionAdminService {
    * whole batch. `dryRun` returns the same shape without writing.
    */
   async bulkReopen(user: AuthUser, dto: BulkReopenDto) {
-    const sessions = await this.prisma.attendanceSession.findMany({
-      where: {
-        id: { in: dto.sessionIds },
-        organizationId: user.organizationId,
-        ...this.scope(user),
-      },
-      select: SESSION_SELECT,
-      orderBy: [{ worker: { workerCode: 'asc' } }],
-    });
+    const sessionRows = await this.sessionQuery()
+      .where(
+        and(
+          inArray(attendanceSessions.id, dto.sessionIds),
+          eq(attendanceSessions.organizationId, user.organizationId),
+          ...this.scope(user),
+        ),
+      )
+      .orderBy(asc(workers.workerCode));
+    const sessions = sessionRows.map(nestSession);
+    if (!sessions.length) return { dryRun: dto.dryRun ?? false, reopened: [], skipped: [] };
 
     // Everyone who already holds an open session — they cannot take another.
-    const openAlready = await this.prisma.attendanceSession.findMany({
-      where: {
-        workerId: { in: sessions.map((s) => s.workerId) },
-        state: 'OPEN',
-        id: { notIn: sessions.map((s) => s.id) },
-      },
-      select: { workerId: true, workDate: true },
-    });
+    const openAlready = await this.d1.db
+      .select({
+        workerId: attendanceSessions.workerId,
+        workDate: attendanceSessions.workDate,
+      })
+      .from(attendanceSessions)
+      .where(
+        and(
+          inArray(
+            attendanceSessions.workerId,
+            sessions.map((s) => s.workerId),
+          ),
+          eq(attendanceSessions.state, 'OPEN'),
+          notInArray(
+            attendanceSessions.id,
+            sessions.map((s) => s.id),
+          ),
+        ),
+      );
     const blocked = new Map(openAlready.map((s) => [s.workerId, s.workDate]));
 
     const reopened: Array<{
@@ -482,7 +605,7 @@ export class SessionAdminService {
           workerCode: s.worker.workerCode,
           fullName: s.worker.fullName,
           reason: clash
-            ? `Already on site from ${clash.toISOString().slice(0, 10)}`
+            ? `Already on site from ${clash}`
             : 'Another record for this person is being reopened',
         });
         continue;
@@ -490,9 +613,9 @@ export class SessionAdminService {
       claimed.add(s.workerId);
 
       if (!dto.dryRun) {
-        await this.prisma.attendanceSession.update({
-          where: { id: s.id },
-          data: {
+        await this.d1.db
+          .update(attendanceSessions)
+          .set({
             logoutAt: null,
             state: 'OPEN',
             workedMinutes: null,
@@ -500,8 +623,9 @@ export class SessionAdminService {
             lateMinutes: null,
             earlyLeaveMinutes: null,
             closedReason: null,
-          },
-        });
+            updatedAt: new Date(),
+          })
+          .where(eq(attendanceSessions.id, s.id));
         await this.audit.record({
           organizationId: user.organizationId,
           actorUserId: user.userId,

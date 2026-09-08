@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { ManualApprovalStatus } from '@prisma/client';
+import { ManualApprovalStatus } from '../../../common/enums';
 import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class ReviewManualDto {

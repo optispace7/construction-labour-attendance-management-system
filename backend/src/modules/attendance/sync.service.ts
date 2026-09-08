@@ -1,9 +1,13 @@
 import { Injectable } from '@nestjs/common';
-import { SyncEventStatus } from '@prisma/client';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { randomUUID } from 'node:crypto';
+import { D1Service } from '../../infra/d1/d1.service';
+import { syncBatches, syncEvents } from '../../infra/d1/schema.generated';
 import { AttendanceService, TapContext } from './attendance.service';
 import { AppException } from '../../common/errors/app.exception';
 import { TapDto } from './dto/attendance.dto';
+
+/** Prisma's enum, spelled out — the column is text on SQLite. */
+export type SyncEventStatus = 'ACCEPTED' | 'DUPLICATE' | 'CONFLICT' | 'REJECTED';
 
 export interface EventResult {
   eventId: string;
@@ -15,7 +19,7 @@ export interface EventResult {
 @Injectable()
 export class SyncService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly attendance: AttendanceService,
   ) {}
 
@@ -94,25 +98,39 @@ export class SyncService {
       rejected: results.filter((r) => r.status === 'REJECTED').length,
     };
 
-    const batch = await this.prisma.syncBatch.create({
-      data: {
+    const batchId = randomUUID();
+    const now = new Date();
+    // Prisma's nested create; here the batch and its events go in one atomic
+    // batch, so a receipt can never exist without the events it summarises.
+    const writes: unknown[] = [
+      this.d1.db.insert(syncBatches).values({
+        id: batchId,
         deviceId,
         eventCount: events.length,
         accepted: summary.accepted,
         duplicates: summary.duplicates,
         conflicts: summary.conflicts,
         rejected: summary.rejected,
-        events: {
-          create: results.map((r) => ({
+        receivedAt: now,
+      }),
+    ];
+    if (results.length) {
+      writes.push(
+        this.d1.db.insert(syncEvents).values(
+          results.map((r) => ({
+            id: randomUUID(),
+            batchId,
             eventId: r.eventId,
             status: r.status,
-            detail: r.detail,
-            tapId: r.tapId,
+            detail: r.detail ?? null,
+            tapId: r.tapId ?? null,
+            createdAt: now,
           })),
-        },
-      },
-    });
+        ),
+      );
+    }
+    await this.d1.db.batch(writes as never);
 
-    return { batchId: batch.id, summary, results };
+    return { batchId, summary, results };
   }
 }

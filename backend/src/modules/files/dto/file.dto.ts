@@ -1,6 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsIn, IsOptional, IsString } from 'class-validator';
-import { PhotoKind } from '@prisma/client';
+import { PhotoKind } from '../../../common/enums';
 
 export const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 export const PHOTO_KINDS: PhotoKind[] = ['PROFILE', 'AADHAAR_FRONT', 'AADHAAR_BACK', 'ID_PROOF'];

@@ -1,4 +1,4 @@
-import { SafetyMetric } from '@prisma/client';
+import { SafetyMetric } from '../../common/enums';
 import {
   AUTOMATED_METRICS,
   METRIC_CATALOG,

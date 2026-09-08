@@ -1,4 +1,4 @@
-import { SafetyMetric } from '@prisma/client';
+import { SafetyMetric } from '../../../common/enums';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,

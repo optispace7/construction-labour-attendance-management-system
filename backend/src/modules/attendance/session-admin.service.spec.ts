@@ -1,15 +1,26 @@
 import { SessionAdminService } from './session-admin.service';
+import { drizzleDouble } from '../../../test/drizzle-double';
+import {
+  attendanceSessions,
+  organizations,
+  shifts,
+  workers,
+} from '../../infra/d1/schema.generated';
 
 const user: any = { userId: 'u1', organizationId: 'org1', role: 'SUPER_ADMIN', siteScopes: [] };
-const site = { id: 'site1', name: 'Brigade WTC', timezone: 'Asia/Kolkata' };
-const workDate = new Date(Date.UTC(2026, 6, 21)); // 2026-07-21
+const WORK_DATE = '2026-07-21';
 
+/**
+ * A session as the join returns it: one flat row, which the service nests.
+ * The panel's shape is asserted through what comes back, not through this.
+ */
 function session(over: Partial<any> = {}) {
+  const { worker, ...rest } = over as any;
   return {
     id: 's1',
     workerId: 'w34',
     siteId: 'site1',
-    workDate,
+    workDate: WORK_DATE,
     loginAt: new Date('2026-07-21T05:00:00Z'), // 10:30 IST
     logoutAt: null,
     state: 'OPEN',
@@ -18,53 +29,64 @@ function session(over: Partial<any> = {}) {
     closedReason: null,
     loginTapId: null,
     logoutTapId: null,
-    worker: { id: 'w34', fullName: 'Shattappa Kusale', workerCode: 'W-0034' },
-    site,
-    ...over,
+    workerFullName: 'Shattappa Kusale',
+    workerCode: 'W-0034',
+    workerCategory: 'WORKER',
+    designationName: null,
+    vendorName: null,
+    siteName: 'Brigade WTC',
+    siteTimezone: 'Asia/Kolkata',
+    ...(worker
+      ? { workerFullName: worker.fullName, workerCode: worker.workerCode, workerId: worker.id ?? 'w34' }
+      : {}),
+    ...rest,
   };
 }
 
-function harness(over: Partial<any> = {}) {
+/**
+ * The service against a Drizzle double.
+ *
+ * `sessions` is given the read index, because the sessions table is read
+ * several times in one call for different reasons — the session being edited,
+ * its shift, a clashing record — and each test says which read is which.
+ */
+function harness(
+  sessions: (n: number) => any[] = () => [],
+  over: { worker?: any; shift?: any } = {},
+) {
   const audit: any = { record: jest.fn() };
-  const prisma: any = {
-    organization: { findUnique: jest.fn().mockResolvedValue({ timezone: 'Asia/Kolkata' }) },
-    shift: { findUnique: jest.fn().mockResolvedValue(null) },
-    worker: { findFirst: jest.fn() },
-    attendanceSession: {
-      findFirst: jest.fn(),
-      findMany: jest.fn(),
-      findUniqueOrThrow: jest.fn().mockResolvedValue({ shiftId: null }),
-      update: jest.fn((args: any) => Promise.resolve({ ...session(), ...args.data })),
-      delete: jest.fn(),
-    },
-    ...over,
-  };
-  return { prisma, audit, svc: new SessionAdminService(prisma, audit) };
+  const db = drizzleDouble([
+    [organizations, [{ timezone: 'Asia/Kolkata' }]],
+    [shifts, over.shift ? [over.shift] : []],
+    [workers, over.worker ? [over.worker] : []],
+    [attendanceSessions, sessions],
+  ]);
+  return { db, audit, svc: new SessionAdminService({ db: db.db } as any, audit) };
 }
+
+/** The values of the update against the sessions table, if there was one. */
+const patch = (db: ReturnType<typeof harness>['db']) => db.wrote(attendanceSessions) as any;
+const updates = (db: ReturnType<typeof harness>['db']) =>
+  db.writes.filter((w) => w.kind === 'update' && w.table === attendanceSessions);
 
 describe('SessionAdminService.edit — moving a session to the right worker', () => {
   it('reassigns the worker, keeps the times, and audits the before/after', async () => {
-    const { prisma, audit, svc } = harness();
-    prisma.attendanceSession.findFirst
-      .mockResolvedValueOnce(session()) // loadSession
-      .mockResolvedValueOnce(null); // no clashing record for the target
-    prisma.worker.findFirst.mockResolvedValue({
-      id: 'w59',
-      fullName: 'Yallappa',
+    const moved = session({
+      workerId: 'w59',
+      workerFullName: 'Yallappa',
       workerCode: 'W-0059',
     });
-    prisma.attendanceSession.update.mockResolvedValue(
-      session({
-        workerId: 'w59',
-        worker: { id: 'w59', fullName: 'Yallappa', workerCode: 'W-0059' },
-      }),
+    // 0 loadSession, 1 the session's shiftId, 2 a clashing record, 3 the read
+    // back after the update.
+    const { db, audit, svc } = harness(
+      (n) => (n === 0 ? [session()] : n === 1 ? [{ shiftId: null }] : n === 2 ? [] : [moved]),
+      { worker: { id: 'w59', fullName: 'Yallappa', workerCode: 'W-0059' } },
     );
 
     await svc.edit(user, 's1', { workerId: 'w59', reason: 'W-0034 was not on site' });
 
-    const data = prisma.attendanceSession.update.mock.calls[0][0].data;
-    expect(data.workerId).toBe('w59');
-    expect(data.loginAt).toEqual(new Date('2026-07-21T05:00:00Z'));
+    expect(patch(db).workerId).toBe('w59');
+    expect(patch(db).loginAt).toEqual(new Date('2026-07-21T05:00:00Z'));
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'ATTENDANCE_SESSION_EDIT',
@@ -76,26 +98,25 @@ describe('SessionAdminService.edit — moving a session to the right worker', ()
   });
 
   it('refuses when the target worker already has a record that day', async () => {
-    const { prisma, svc } = harness();
-    prisma.attendanceSession.findFirst
-      .mockResolvedValueOnce(session())
-      .mockResolvedValueOnce({ id: 's2', state: 'OPEN', loginAt: new Date() });
-    prisma.worker.findFirst.mockResolvedValue({
-      id: 'w59',
-      fullName: 'Yallappa',
-      workerCode: 'W-0059',
-    });
+    const { db, svc } = harness(
+      (n) =>
+        n === 0
+          ? [session()]
+          : n === 1
+            ? [{ shiftId: null }]
+            : [{ id: 's2', state: 'OPEN', loginAt: new Date() }],
+      { worker: { id: 'w59', fullName: 'Yallappa', workerCode: 'W-0059' } },
+    );
 
     await expect(svc.edit(user, 's1', { workerId: 'w59', reason: 'swap' })).rejects.toMatchObject({
       code: 'BUSINESS_RULE',
       detail: expect.stringMatching(/already has an open session/),
     });
-    expect(prisma.attendanceSession.update).not.toHaveBeenCalled();
+    expect(updates(db)).toHaveLength(0);
   });
 
   it('rejects a logout that lands before the login', async () => {
-    const { prisma, svc } = harness();
-    prisma.attendanceSession.findFirst.mockResolvedValueOnce(session());
+    const { svc } = harness((n) => (n === 0 ? [session()] : [{ shiftId: null }]));
 
     await expect(
       svc.edit(user, 's1', { logoutAt: '2026-07-21T04:00:00Z', reason: 'typo' }),
@@ -103,37 +124,34 @@ describe('SessionAdminService.edit — moving a session to the right worker', ()
   });
 
   it('recomputes hours and closes the session when a logout time is set', async () => {
-    const { prisma, svc } = harness();
-    prisma.attendanceSession.findFirst.mockResolvedValueOnce(session());
+    const { db, svc } = harness((n) =>
+      n === 0 ? [session()] : n === 1 ? [{ shiftId: null }] : [session()],
+    );
 
     await svc.edit(user, 's1', { logoutAt: '2026-07-21T12:35:00Z', reason: 'left at 18:05' });
 
-    const data = prisma.attendanceSession.update.mock.calls[0][0].data;
-    expect(data.state).toBe('CLOSED');
-    expect(data.workedMinutes).toBe(455); // 10:30 → 18:05 IST
-    expect(data.overtimeMinutes).toBe(0); // under the 8h default day
+    expect(patch(db).state).toBe('CLOSED');
+    expect(patch(db).workedMinutes).toBe(455); // 10:30 → 18:05 IST
+    expect(patch(db).overtimeMinutes).toBe(0); // under the 8h default day
   });
 });
 
 describe('SessionAdminService.bulkLogout — the end-of-shift sweep', () => {
   const open = [
-    {
-      ...session({ id: 'a', worker: { fullName: 'Viresh', workerCode: 'W-0010' } }),
-      shiftId: null,
-    },
+    { ...session({ id: 'a', workerFullName: 'Viresh', workerCode: 'W-0010' }), shiftId: null },
     {
       ...session({
         id: 'b',
         loginAt: new Date('2026-07-21T12:54:50Z'), // 18:24 IST — after the sweep time
-        worker: { fullName: 'Verash', workerCode: 'W-0012' },
+        workerFullName: 'Verash',
+        workerCode: 'W-0012',
       }),
       shiftId: null,
     },
   ];
 
   it('closes what it can and reports who was skipped, without writing on a dry run', async () => {
-    const { prisma, audit, svc } = harness();
-    prisma.attendanceSession.findMany.mockResolvedValue(open);
+    const { db, audit, svc } = harness(() => open);
 
     const result = await svc.bulkLogout(user, {
       date: '2026-07-21',
@@ -151,23 +169,24 @@ describe('SessionAdminService.bulkLogout — the end-of-shift sweep', () => {
         reason: 'Logged in after this time — tick "next morning" for a night shift',
       }),
     ]);
-    expect(prisma.attendanceSession.update).not.toHaveBeenCalled();
+    expect(updates(db)).toHaveLength(0);
     expect(audit.record).not.toHaveBeenCalled();
   });
 
   it('stamps the morning after the work date when told the shift ran overnight', async () => {
-    const { prisma, audit, svc } = harness();
     // A night man: in at 20:20 IST on the 21st, still open.
-    prisma.attendanceSession.findMany.mockResolvedValue([
+    const night = [
       {
         ...session({
           id: 'n',
           loginAt: new Date('2026-07-21T14:50:00Z'),
-          worker: { fullName: 'Kailu', workerCode: 'W-0084' },
+          workerFullName: 'Kailu',
+          workerCode: 'W-0084',
         }),
         shiftId: null,
       },
-    ]);
+    ];
+    const { audit, svc } = harness(() => night);
 
     const sameDay = await svc.bulkLogout(user, {
       date: '2026-07-21',
@@ -195,17 +214,15 @@ describe('SessionAdminService.bulkLogout — the end-of-shift sweep', () => {
   });
 
   it('writes the closures and one audit row each when not a dry run', async () => {
-    const { prisma, audit, svc } = harness();
-    prisma.attendanceSession.findMany.mockResolvedValue(open);
+    const { db, audit, svc } = harness(() => open);
 
     await svc.bulkLogout(user, { date: '2026-07-21', time: '18:05', reason: 'shift ended' });
 
-    expect(prisma.attendanceSession.update).toHaveBeenCalledTimes(1);
-    const data = prisma.attendanceSession.update.mock.calls[0][0].data;
-    expect(data.state).toBe('CLOSED');
-    expect(data.closedReason).toBe('ADMIN_BULK_LOGOUT');
+    expect(updates(db)).toHaveLength(1);
+    expect(patch(db).state).toBe('CLOSED');
+    expect(patch(db).closedReason).toBe('ADMIN_BULK_LOGOUT');
     // 18:05 IST is 12:35 UTC on the same work date.
-    expect(data.logoutAt.toISOString()).toBe('2026-07-21T12:35:00.000Z');
+    expect(patch(db).logoutAt.toISOString()).toBe('2026-07-21T12:35:00.000Z');
     expect(audit.record).toHaveBeenCalledTimes(1);
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'ATTENDANCE_SESSION_BULK_LOGOUT', reason: 'shift ended' }),
@@ -229,7 +246,8 @@ describe('SessionAdminService.bulkReopen — undoing a stray logout', () => {
       state: 'CLOSED',
       workedMinutes: 1,
       closedReason: 'SCAN',
-      worker: { id: 'w5', fullName: 'Hemanth B U', workerCode: 'W-0005' },
+      workerFullName: 'Hemanth B U',
+      workerCode: 'W-0005',
     }),
     session({
       id: 'b',
@@ -237,15 +255,14 @@ describe('SessionAdminService.bulkReopen — undoing a stray logout', () => {
       logoutAt: new Date('2026-07-21T05:31:00Z'),
       state: 'CLOSED',
       workedMinutes: 1,
-      worker: { id: 'w58', fullName: 'Basanta Kumar Satapathy', workerCode: 'W-0058' },
+      workerFullName: 'Basanta Kumar Satapathy',
+      workerCode: 'W-0058',
     }),
   ];
 
   it('clears the logout and the hours it produced, and audits each row', async () => {
-    const { prisma, audit, svc } = harness();
-    prisma.attendanceSession.findMany
-      .mockResolvedValueOnce(closed) // the chosen sessions
-      .mockResolvedValueOnce([]); // nobody is open elsewhere
+    // 0 the chosen sessions, 1 whoever is open elsewhere (nobody).
+    const { db, audit, svc } = harness((n) => (n === 0 ? closed : []));
 
     const result = await svc.bulkReopen(user, {
       sessionIds: ['a', 'b'],
@@ -254,8 +271,7 @@ describe('SessionAdminService.bulkReopen — undoing a stray logout', () => {
 
     expect(result.reopened.map((r) => r.workerCode)).toEqual(['W-0005', 'W-0058']);
     expect(result.skipped).toEqual([]);
-    const data = prisma.attendanceSession.update.mock.calls[0][0].data;
-    expect(data).toMatchObject({
+    expect(patch(db)).toMatchObject({
       logoutAt: null,
       state: 'OPEN',
       workedMinutes: null,
@@ -273,8 +289,7 @@ describe('SessionAdminService.bulkReopen — undoing a stray logout', () => {
   });
 
   it('writes nothing on a dry run', async () => {
-    const { prisma, audit, svc } = harness();
-    prisma.attendanceSession.findMany.mockResolvedValueOnce(closed).mockResolvedValueOnce([]);
+    const { db, audit, svc } = harness((n) => (n === 0 ? closed : []));
 
     const result = await svc.bulkReopen(user, {
       sessionIds: ['a', 'b'],
@@ -283,15 +298,14 @@ describe('SessionAdminService.bulkReopen — undoing a stray logout', () => {
     });
 
     expect(result.reopened).toHaveLength(2);
-    expect(prisma.attendanceSession.update).not.toHaveBeenCalled();
+    expect(updates(db)).toHaveLength(0);
     expect(audit.record).not.toHaveBeenCalled();
   });
 
   it('skips anyone already on site rather than breaking the one-open-session rule', async () => {
-    const { prisma, svc } = harness();
-    prisma.attendanceSession.findMany
-      .mockResolvedValueOnce(closed)
-      .mockResolvedValueOnce([{ workerId: 'w58', workDate: new Date(Date.UTC(2026, 6, 22)) }]);
+    const { db, svc } = harness((n) =>
+      n === 0 ? closed : [{ workerId: 'w58', workDate: '2026-07-22' }],
+    );
 
     const result = await svc.bulkReopen(user, { sessionIds: ['a', 'b'], reason: 'undo' });
 
@@ -302,16 +316,21 @@ describe('SessionAdminService.bulkReopen — undoing a stray logout', () => {
         reason: 'Already on site from 2026-07-22',
       }),
     ]);
-    expect(prisma.attendanceSession.update).toHaveBeenCalledTimes(1);
+    expect(updates(db)).toHaveLength(1);
   });
 
   it('reopens only the first of two records for the same person', async () => {
-    const { prisma, svc } = harness();
     const twice = [
       closed[0],
-      session({ id: 'c', workerId: 'w5', state: 'CLOSED', worker: closed[0].worker }),
+      session({
+        id: 'c',
+        workerId: 'w5',
+        state: 'CLOSED',
+        workerFullName: 'Hemanth B U',
+        workerCode: 'W-0005',
+      }),
     ];
-    prisma.attendanceSession.findMany.mockResolvedValueOnce(twice).mockResolvedValueOnce([]);
+    const { svc } = harness((n) => (n === 0 ? twice : []));
 
     const result = await svc.bulkReopen(user, { sessionIds: ['a', 'c'], reason: 'undo' });
 
@@ -322,12 +341,14 @@ describe('SessionAdminService.bulkReopen — undoing a stray logout', () => {
 
 describe('SessionAdminService.remove', () => {
   it('deletes the session and keeps the whole record in the audit row', async () => {
-    const { prisma, audit, svc } = harness();
-    prisma.attendanceSession.findFirst.mockResolvedValue(session());
+    const { db, audit, svc } = harness(() => [session()]);
 
     await svc.remove(user, 's1', 'duplicate scan');
 
-    expect(prisma.attendanceSession.delete).toHaveBeenCalledWith({ where: { id: 's1' } });
+    expect(db.writes).toContainEqual(
+      expect.objectContaining({ kind: 'delete', table: attendanceSessions }),
+    );
+    expect(db.boundValues()).toContain('s1');
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'ATTENDANCE_SESSION_DELETE',
