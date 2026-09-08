@@ -1,5 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, eq, gt } from 'drizzle-orm';
+import { D1Service } from '../../infra/d1/d1.service';
+import { notifications, organizations } from '../../infra/d1/schema.generated';
 import { MailService } from '../../common/mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService, STORAGE_WARN_PCT, STORAGE_CRITICAL_PCT } from './storage.service';
@@ -21,7 +23,7 @@ export class StorageMonitor implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly storage: StorageService,
     private readonly notifications: NotificationsService,
     private readonly mail: MailService,
@@ -49,7 +51,7 @@ export class StorageMonitor implements OnModuleInit, OnModuleDestroy {
         pct >= STORAGE_CRITICAL_PCT ? 'CRITICAL' : pct >= STORAGE_WARN_PCT ? 'WARNING' : null;
       if (!level) return;
 
-      const orgs = await this.prisma.organization.findMany({ select: { id: true } });
+      const orgs = await this.d1.db.select({ id: organizations.id }).from(organizations);
       for (const org of orgs) {
         await this.notifyOrg(org.id, level, used, limit, pct);
       }
@@ -66,13 +68,17 @@ export class StorageMonitor implements OnModuleInit, OnModuleDestroy {
     pct: number,
   ) {
     const type = level === 'CRITICAL' ? 'STORAGE_CRITICAL' : 'STORAGE_WARNING';
-    const recent = await this.prisma.notification.findFirst({
-      where: {
-        organizationId,
-        type,
-        createdAt: { gt: new Date(Date.now() - RENOTIFY_AFTER_MS) },
-      },
-    });
+    const [recent] = await this.d1.db
+      .select({ id: notifications.id })
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.organizationId, organizationId),
+          eq(notifications.type, type),
+          gt(notifications.createdAt, new Date(Date.now() - RENOTIFY_AFTER_MS)),
+        ),
+      )
+      .limit(1);
     if (recent) return; // already alerted this level recently
 
     const gb = (n: number) => (n / 1024 / 1024 / 1024).toFixed(2);

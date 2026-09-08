@@ -1,7 +1,19 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Workbook } from 'exceljs';
 import { DateTime } from 'luxon';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { D1Service } from '../../infra/d1/d1.service';
+import { chunked, chunkedWrite } from '../../infra/d1/chunked';
+import {
+  attendanceSessions,
+  attendanceTaps,
+  designations,
+  photoBlobs,
+  sites,
+  vendors,
+  workerSiteAssignments,
+  workers,
+} from '../../infra/d1/schema.generated';
 import { CryptoService } from '../../common/crypto/crypto.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
@@ -41,7 +53,7 @@ export class StorageService {
   private readonly backups = new Map<string, number>();
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly crypto: CryptoService,
     private readonly audit: AuditService,
   ) {}
@@ -54,11 +66,29 @@ export class StorageService {
     return Number.isFinite(n) && n > 0 ? n : null;
   }
 
-  /** Total bytes consumed by the Postgres database (works on any host). */
+  /**
+   * Total bytes the database occupies.
+   *
+   * pg_database_size() has no equivalent on D1, but it does not need one: D1
+   * reports the database's size on the metadata of every query it answers, so
+   * the cheapest query there is carries the figure back.
+   *
+   * The PRAGMA fallback is for a D1 that stops reporting it, and for the
+   * SQLite the tests run against — page_count times page_size is the same
+   * number by a different route.
+   */
   async usedBytes(): Promise<number> {
-    const rows = await this.prisma.$queryRaw<{ size: bigint }[]>`
-      SELECT pg_database_size(current_database()) AS size`;
-    return Number(rows[0]?.size ?? 0);
+    const probe = (await this.d1.d1.prepare('SELECT 1').all()) as unknown as {
+      meta?: { size_after?: number };
+    };
+    const reported = probe?.meta?.size_after;
+    if (typeof reported === 'number' && reported > 0) return reported;
+
+    const [pages, pageSize] = await Promise.all([
+      this.d1.d1.prepare('PRAGMA page_count').first<{ page_count: number }>(),
+      this.d1.d1.prepare('PRAGMA page_size').first<{ page_size: number }>(),
+    ]);
+    return Number(pages?.page_count ?? 0) * Number(pageSize?.page_size ?? 0);
   }
 
   async usage(user: AuthUser) {
@@ -89,19 +119,25 @@ export class StorageService {
 
   /** Per-site freeable-space breakdown, oldest site first. */
   async siteUsage(organizationId: string): Promise<SiteUsage[]> {
-    const sites = await this.prisma.site.findMany({
-      where: { organizationId },
-      orderBy: { createdAt: 'asc' },
-      select: { id: true, name: true, code: true, isActive: true, createdAt: true },
-    });
+    const siteRows = await this.d1.db
+      .select({
+        id: sites.id,
+        name: sites.name,
+        code: sites.code,
+        isActive: sites.isActive,
+        createdAt: sites.createdAt,
+      })
+      .from(sites)
+      .where(eq(sites.organizationId, organizationId))
+      .orderBy(asc(sites.createdAt));
 
     const out: SiteUsage[] = [];
-    for (let i = 0; i < sites.length; i++) {
-      const s = sites[i];
+    for (let i = 0; i < siteRows.length; i++) {
+      const s = siteRows[i];
       const [imageBytes, sessionCount, tapCount] = await Promise.all([
         this.siteImageBytes(organizationId, s.id),
-        this.prisma.attendanceSession.count({ where: { organizationId, siteId: s.id } }),
-        this.prisma.attendanceTap.count({ where: { organizationId, siteId: s.id } }),
+        this.countRows(attendanceSessions, organizationId, s.id),
+        this.countRows(attendanceTaps, organizationId, s.id),
       ]);
       const attendanceBytesEstimate = sessionCount * SESSION_BYTES + tapCount * TAP_BYTES;
       out.push({
@@ -121,24 +157,46 @@ export class StorageService {
     return out;
   }
 
+  /** How many rows one site holds in a table that carries org and site. */
+  private async countRows(
+    table: typeof attendanceSessions | typeof attendanceTaps,
+    organizationId: string,
+    siteId: string,
+  ): Promise<number> {
+    const [row] = await this.d1.db
+      .select({ count: sql<number>`count(*)`.as('count') })
+      .from(table)
+      .where(and(eq(table.organizationId, organizationId), eq(table.siteId, siteId)));
+    return Number(row?.count ?? 0);
+  }
+
   /**
    * Blob ids of images owned by workers assigned EXCLUSIVELY to this site
    * (so deleting them never strips a photo from a worker still on another site).
    */
   private async exclusiveSiteBlobIds(organizationId: string, siteId: string): Promise<string[]> {
-    const workers = await this.prisma.worker.findMany({
-      where: { organizationId, assignments: { some: { siteId } } },
-      select: {
-        photoUrl: true,
-        aadhaarFrontPhotoId: true,
-        aadhaarBackPhotoId: true,
-        assignments: { select: { siteId: true } },
-      },
-    });
+    // Everyone on this site, with a count of the sites they are on. A worker
+    // whose only assignment is this one owns their photos exclusively; anyone
+    // else keeps theirs, which is the whole point of the check.
+    const people = await this.d1.db
+      .select({
+        photoUrl: workers.photoUrl,
+        aadhaarFrontPhotoId: workers.aadhaarFrontPhotoId,
+        aadhaarBackPhotoId: workers.aadhaarBackPhotoId,
+        siteCount: sql<number>`(
+          select count(distinct wsa2.site_id) from worker_site_assignments wsa2
+           where wsa2.worker_id = ${workers.id}
+        )`.as('siteCount'),
+      })
+      .from(workers)
+      .innerJoin(workerSiteAssignments, eq(workerSiteAssignments.workerId, workers.id))
+      .where(
+        and(eq(workers.organizationId, organizationId), eq(workerSiteAssignments.siteId, siteId)),
+      );
+
     const ids = new Set<string>();
-    for (const w of workers) {
-      const exclusive = w.assignments.every((a) => a.siteId === siteId);
-      if (!exclusive) continue;
+    for (const w of people) {
+      if (Number(w.siteCount) !== 1) continue;
       if (w.photoUrl?.startsWith('/files/')) ids.add(w.photoUrl.slice('/files/'.length));
       if (w.aadhaarFrontPhotoId) ids.add(w.aadhaarFrontPhotoId);
       if (w.aadhaarBackPhotoId) ids.add(w.aadhaarBackPhotoId);
@@ -149,11 +207,24 @@ export class StorageService {
   private async siteImageBytes(organizationId: string, siteId: string): Promise<number> {
     const ids = await this.exclusiveSiteBlobIds(organizationId, siteId);
     if (ids.length === 0) return 0;
-    const agg = await this.prisma.photoBlob.aggregate({
-      where: { organizationId, id: { in: ids } },
-      _sum: { sizeBytes: true },
-    });
-    return agg._sum.sizeBytes ?? 0;
+    const sums = await chunked(ids, (batch) =>
+      this.d1.db
+        .select({ total: sql<number>`coalesce(sum(${photoBlobs.sizeBytes}), 0)`.as('total') })
+        .from(photoBlobs)
+        .where(and(eq(photoBlobs.organizationId, organizationId), inArray(photoBlobs.id, batch))),
+    );
+    return sums.reduce((n, r) => n + Number(r.total ?? 0), 0);
+  }
+
+  /** One of this organization's sites, or a 404. */
+  private async ownSite(organizationId: string, siteId: string) {
+    const [site] = await this.d1.db
+      .select()
+      .from(sites)
+      .where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId)))
+      .limit(1);
+    if (!site) throw Errors.notFound('Site');
+    return site;
   }
 
   // ---- Backup -------------------------------------------------------------
@@ -165,24 +236,54 @@ export class StorageService {
    */
   async backup(user: AuthUser, siteId: string): Promise<{ filename: string; buffer: Buffer }> {
     if (user.role !== 'SUPER_ADMIN') throw Errors.forbidden('Super admin only');
-    const site = await this.prisma.site.findFirst({
-      where: { id: siteId, organizationId: user.organizationId },
-    });
-    if (!site) throw Errors.notFound('Site');
+    const site = await this.ownSite(user.organizationId, siteId);
 
-    const workers = await this.prisma.worker.findMany({
-      where: { organizationId: user.organizationId, assignments: { some: { siteId } } },
-      include: { vendor: { select: { name: true } }, designation: { select: { name: true } } },
-    });
-    const sessions = await this.prisma.attendanceSession.findMany({
-      where: { organizationId: user.organizationId, siteId },
-      include: { worker: { select: { fullName: true, workerCode: true } } },
-      orderBy: { loginAt: 'asc' },
-      take: 50_000,
-    });
-    const vendors = await this.prisma.vendor.findMany({
-      where: { organizationId: user.organizationId },
-    });
+    const workerRows = await this.d1.db
+      .select({ worker: workers, vendorName: vendors.name, designationName: designations.name })
+      .from(workers)
+      // Joined through the assignment rather than filtered by a list of ids:
+      // the roll of a real site is hundreds of people, and D1 binds at most a
+      // hundred parameters.
+      .innerJoin(workerSiteAssignments, eq(workerSiteAssignments.workerId, workers.id))
+      .leftJoin(vendors, eq(vendors.id, workers.vendorId))
+      .leftJoin(designations, eq(designations.id, workers.designationId))
+      .where(
+        and(
+          eq(workers.organizationId, user.organizationId),
+          eq(workerSiteAssignments.siteId, siteId),
+        ),
+      );
+    const workerList = workerRows.map((r) => ({
+      ...r.worker,
+      vendor: r.vendorName ? { name: r.vendorName } : null,
+      designation: r.designationName ? { name: r.designationName } : null,
+    }));
+
+    const sessionRows = await this.d1.db
+      .select({
+        session: attendanceSessions,
+        workerFullName: workers.fullName,
+        workerCode: workers.workerCode,
+      })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .where(
+        and(
+          eq(attendanceSessions.organizationId, user.organizationId),
+          eq(attendanceSessions.siteId, siteId),
+        ),
+      )
+      .orderBy(asc(attendanceSessions.loginAt))
+      .limit(50_000);
+    const sessions = sessionRows.map((r) => ({
+      ...r.session,
+      worker: { fullName: r.workerFullName, workerCode: r.workerCode },
+    }));
+
+    const vendorList = await this.d1.db
+      .select()
+      .from(vendors)
+      .where(eq(vendors.organizationId, user.organizationId));
 
     const wb = new Workbook();
     wb.creator = 'CLAMS';
@@ -211,7 +312,7 @@ export class StorageService {
       { header: 'Join Date', key: 'join', width: 12 },
       { header: 'Status', key: 'status', width: 10 },
     ];
-    for (const w of workers) {
+    for (const w of workerList) {
       ws.addRow({
         code: w.workerCode,
         name: w.fullName,
@@ -220,7 +321,7 @@ export class StorageService {
         desig: w.designation?.name ?? '',
         vendor: w.vendor?.name ?? '',
         mobile: w.mobileNumber ?? '',
-        dob: w.dateOfBirth ? DateTime.fromJSDate(w.dateOfBirth).toFormat('yyyy-LL-dd') : '',
+        dob: w.dateOfBirth ?? '',
         gender: w.gender ?? '',
         blood: w.bloodGroup ?? '',
         aadhaar: this.safeDecrypt(w.aadhaarCiphertext),
@@ -232,7 +333,7 @@ export class StorageService {
         esi: w.esiNumber ?? '',
         emgName: w.emergencyContactName ?? '',
         emgNum: w.emergencyContactNumber ?? '',
-        join: w.joinDate ? DateTime.fromJSDate(w.joinDate).toFormat('yyyy-LL-dd') : '',
+        join: w.joinDate ?? '',
         status: w.status,
       });
     }
@@ -251,7 +352,8 @@ export class StorageService {
     ];
     for (const s of sessions) {
       as.addRow({
-        date: DateTime.fromJSDate(s.workDate).toFormat('yyyy-LL-dd'),
+        // Already 'YYYY-MM-DD' — a calendar day, stored as text.
+        date: s.workDate,
         code: s.worker.workerCode,
         name: s.worker.fullName,
         in: s.loginAt ? DateTime.fromJSDate(s.loginAt).toFormat('yyyy-LL-dd HH:mm') : '',
@@ -268,7 +370,7 @@ export class StorageService {
       { header: 'Name', key: 'name', width: 24 },
       { header: 'Code', key: 'code', width: 14 },
     ];
-    for (const v of vendors) vs.addRow({ name: v.name, code: (v as { code?: string }).code ?? '' });
+    for (const v of vendorList) vs.addRow({ name: v.name, code: (v as { code?: string }).code ?? '' });
     vs.getRow(1).font = { bold: true };
 
     const buffer = Buffer.from(await wb.xlsx.writeBuffer());
@@ -281,7 +383,7 @@ export class StorageService {
       action: 'SITE_DATA_BACKUP',
       entityType: 'Site',
       entityId: siteId,
-      newValue: { workers: workers.length, sessions: sessions.length },
+      newValue: { workers: workerList.length, sessions: sessions.length },
     });
 
     const stamp = DateTime.now().toFormat('yyyyLLdd-HHmm');
@@ -307,10 +409,7 @@ export class StorageService {
    */
   async purge(user: AuthUser, siteId: string) {
     if (user.role !== 'SUPER_ADMIN') throw Errors.forbidden('Super admin only');
-    const site = await this.prisma.site.findFirst({
-      where: { id: siteId, organizationId: user.organizationId },
-    });
-    if (!site) throw Errors.notFound('Site');
+    const site = await this.ownSite(user.organizationId, siteId);
 
     const backedUpAt = this.backups.get(siteId);
     if (!backedUpAt || Date.now() - backedUpAt > BACKUP_VALID_MS) {
@@ -323,33 +422,62 @@ export class StorageService {
     // Read the object keys before the rows are deleted — afterwards there is
     // nothing left to say where the images were, and they would sit in the
     // bucket for ever, still holding this site's Aadhaar photos.
-    const storageKeys = blobIds.length
-      ? (
-          await this.prisma.photoBlob.findMany({
-            where: { organizationId: user.organizationId, id: { in: blobIds } },
-            select: { storageKey: true },
-          })
-        )
-          .map((b) => b.storageKey)
-          .filter((k): k is string => Boolean(k))
-      : [];
+    const storageKeys = (
+      await chunked(blobIds, (batch) =>
+        this.d1.db
+          .select({ storageKey: photoBlobs.storageKey })
+          .from(photoBlobs)
+          .where(
+            and(
+              eq(photoBlobs.organizationId, user.organizationId),
+              inArray(photoBlobs.id, batch),
+            ),
+          ),
+      )
+    )
+      .map((b) => b.storageKey)
+      .filter((k): k is string => Boolean(k));
     const before = await this.usedBytes();
 
-    const [taps, sessions, blobs] = await this.prisma.$transaction([
-      this.prisma.attendanceTap.deleteMany({
-        where: { organizationId: user.organizationId, siteId },
-      }),
-      this.prisma.attendanceSession.deleteMany({
-        where: { organizationId: user.organizationId, siteId },
-      }),
-      blobIds.length
-        ? this.prisma.photoBlob.deleteMany({
-            where: { organizationId: user.organizationId, id: { in: blobIds } },
-          })
-        : this.prisma.photoBlob.deleteMany({
-            where: { id: '00000000-0000-0000-0000-000000000000' },
-          }),
-    ]);
+    // The taps and the sessions go together, as they did in the transaction:
+    // a site left with taps but no sessions, or the reverse, is a half-purged
+    // site nobody could reason about.
+    const results = (await this.d1.db.batch([
+      this.d1.db
+        .delete(attendanceTaps)
+        .where(
+          and(
+            eq(attendanceTaps.organizationId, user.organizationId),
+            eq(attendanceTaps.siteId, siteId),
+          ),
+        ),
+      this.d1.db
+        .delete(attendanceSessions)
+        .where(
+          and(
+            eq(attendanceSessions.organizationId, user.organizationId),
+            eq(attendanceSessions.siteId, siteId),
+          ),
+        ),
+    ] as never)) as unknown as { meta?: { changes?: number } }[];
+    const taps = { count: results[0]?.meta?.changes ?? 0 };
+    const sessions = { count: results[1]?.meta?.changes ?? 0 };
+
+    // The blobs are their own chunked pass: the id list is as long as the
+    // site's roll, and one batch cannot carry it.
+    let blobCount = 0;
+    await chunkedWrite(blobIds, async (batch) => {
+      const r = (await this.d1.db
+        .delete(photoBlobs)
+        .where(
+          and(
+            eq(photoBlobs.organizationId, user.organizationId),
+            inArray(photoBlobs.id, batch),
+          ),
+        )) as unknown as { meta?: { changes?: number } };
+      blobCount += r?.meta?.changes ?? 0;
+    });
+    const blobs = { count: blobCount };
 
     // The rows are gone; now the objects. Failures here are logged rather than
     // raised: the purge has already happened and its audit entry is about to be
@@ -364,18 +492,39 @@ export class StorageService {
     // Null out worker photo references whose blobs we just removed.
     if (blobIds.length) {
       const urls = blobIds.map((id) => `/files/${id}`);
-      await this.prisma.worker.updateMany({
-        where: { organizationId: user.organizationId, photoUrl: { in: urls } },
-        data: { photoUrl: null },
-      });
-      await this.prisma.worker.updateMany({
-        where: { organizationId: user.organizationId, aadhaarFrontPhotoId: { in: blobIds } },
-        data: { aadhaarFrontPhotoId: null },
-      });
-      await this.prisma.worker.updateMany({
-        where: { organizationId: user.organizationId, aadhaarBackPhotoId: { in: blobIds } },
-        data: { aadhaarBackPhotoId: null },
-      });
+      await chunkedWrite(urls, (batch) =>
+        this.d1.db
+          .update(workers)
+          .set({ photoUrl: null })
+          .where(
+            and(
+              eq(workers.organizationId, user.organizationId),
+              inArray(workers.photoUrl, batch),
+            ),
+          ),
+      );
+      await chunkedWrite(blobIds, (batch) =>
+        this.d1.db
+          .update(workers)
+          .set({ aadhaarFrontPhotoId: null })
+          .where(
+            and(
+              eq(workers.organizationId, user.organizationId),
+              inArray(workers.aadhaarFrontPhotoId, batch),
+            ),
+          ),
+      );
+      await chunkedWrite(blobIds, (batch) =>
+        this.d1.db
+          .update(workers)
+          .set({ aadhaarBackPhotoId: null })
+          .where(
+            and(
+              eq(workers.organizationId, user.organizationId),
+              inArray(workers.aadhaarBackPhotoId, batch),
+            ),
+          ),
+      );
     }
 
     this.backups.delete(siteId);
