@@ -8,7 +8,7 @@ import type { Config } from 'drizzle-kit';
  * Migrate, which does not cover D1 at all.
  */
 export default {
-  schema: './src/infra/d1/schema.ts',
+  schema: './src/infra/d1/schema.generated.ts',
   out: './drizzle',
   dialect: 'sqlite',
   driver: 'd1-http',
