@@ -1,5 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, desc, eq, gt, isNotNull } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { D1Service } from '../../infra/d1/d1.service';
+import { devices, organizations, sites, sosEvents } from '../../infra/d1/schema.generated';
 import { MailService } from '../../common/mail/mail.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
@@ -15,7 +18,7 @@ export class SosService {
   private readonly logger = new Logger(SosService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly mail: MailService,
     private readonly notifications: NotificationsService,
     private readonly push: PushService,
@@ -31,27 +34,42 @@ export class SosService {
     // Short per-device cooldown so a stuck/abused button can't flood alerts,
     // but a responder can re-raise quickly if the first wasn't acknowledged.
     if (dto.deviceUid) {
-      const recent = await this.prisma.sosEvent.findFirst({
-        where: { deviceUid: dto.deviceUid, createdAt: { gt: new Date(Date.now() - 15_000) } },
-        select: { id: true },
-      });
+      const [recent] = await this.d1.db
+        .select({ id: sosEvents.id })
+        .from(sosEvents)
+        .where(
+          and(
+            eq(sosEvents.deviceUid, dto.deviceUid),
+            gt(sosEvents.createdAt, new Date(Date.now() - 15_000)),
+          ),
+        )
+        .limit(1);
       if (recent) throw Errors.rateLimited();
     }
 
     let site: { id: string; name: string; organizationId: string } | null = null;
 
     if (dto.siteId) {
-      site = await this.prisma.site.findFirst({
-        where: { id: dto.siteId, isActive: true },
-        select: { id: true, name: true, organizationId: true },
-      });
+      [site] = await this.d1.db
+        .select({ id: sites.id, name: sites.name, organizationId: sites.organizationId })
+        .from(sites)
+        .where(and(eq(sites.id, dto.siteId), eq(sites.isActive, true)))
+        .limit(1);
     }
 
     if (!site && dto.latitude != null && dto.longitude != null) {
-      const candidates = await this.prisma.site.findMany({
-        where: { isActive: true, latitude: { not: null }, longitude: { not: null } },
-        select: { id: true, name: true, organizationId: true, latitude: true, longitude: true },
-      });
+      const candidates = await this.d1.db
+        .select({
+          id: sites.id,
+          name: sites.name,
+          organizationId: sites.organizationId,
+          latitude: sites.latitude,
+          longitude: sites.longitude,
+        })
+        .from(sites)
+        .where(
+          and(eq(sites.isActive, true), isNotNull(sites.latitude), isNotNull(sites.longitude)),
+        );
       let best: { site: (typeof candidates)[number]; dist: number } | null = null;
       for (const c of candidates) {
         const dist = distanceMeters(c.latitude!, c.longitude!, dto.latitude, dto.longitude);
@@ -62,45 +80,50 @@ export class SosService {
 
     let device: { organizationId: string; siteId: string | null } | null = null;
     if (!site && dto.deviceUid) {
-      device = await this.prisma.device.findFirst({
-        where: { deviceUid: dto.deviceUid },
-        select: { organizationId: true, siteId: true },
-      });
+      [device] = await this.d1.db
+        .select({ organizationId: devices.organizationId, siteId: devices.siteId })
+        .from(devices)
+        .where(eq(devices.deviceUid, dto.deviceUid))
+        .limit(1);
       if (device?.siteId) {
-        site = await this.prisma.site.findFirst({
-          where: { id: device.siteId },
-          select: { id: true, name: true, organizationId: true },
-        });
+        [site] = await this.d1.db
+          .select({ id: sites.id, name: sites.name, organizationId: sites.organizationId })
+          .from(sites)
+          .where(eq(sites.id, device.siteId))
+          .limit(1);
       }
     }
 
-    const organizationId =
-      site?.organizationId ??
-      device?.organizationId ??
-      (
-        await this.prisma.organization.findFirst({
-          where: { isActive: true },
-          select: { id: true },
-        })
-      )?.id;
+    const [anyOrg] =
+      site || device
+        ? []
+        : await this.d1.db
+            .select({ id: organizations.id })
+            .from(organizations)
+            .where(eq(organizations.isActive, true))
+            .limit(1);
+    const organizationId = site?.organizationId ?? device?.organizationId ?? anyOrg?.id;
     if (!organizationId) throw Errors.notFound('Organization');
 
-    const event = await this.prisma.sosEvent.create({
-      data: {
+    const [event] = await this.d1.db
+      .insert(sosEvents)
+      .values({
+        id: randomUUID(),
         organizationId,
         siteId: site?.id ?? null,
         siteName: site?.name ?? null,
-        latitude: dto.latitude,
-        longitude: dto.longitude,
-        geoAccuracyM: dto.accuracyM,
-        deviceUid: dto.deviceUid,
-        deviceName: dto.deviceName,
-        senderName: dto.senderName,
-        senderRole: dto.senderRole,
-        senderEmail: dto.senderEmail,
-        message: dto.message,
-      },
-    });
+        latitude: dto.latitude ?? null,
+        longitude: dto.longitude ?? null,
+        geoAccuracyM: dto.accuracyM ?? null,
+        deviceUid: dto.deviceUid ?? null,
+        deviceName: dto.deviceName ?? null,
+        senderName: dto.senderName ?? null,
+        senderRole: dto.senderRole ?? null,
+        senderEmail: dto.senderEmail ?? null,
+        message: dto.message ?? null,
+        createdAt: new Date(),
+      })
+      .returning();
 
     const where = site?.name ?? 'Unknown location';
     const mapsLink =
@@ -177,21 +200,26 @@ export class SosService {
   }
 
   list(user: AuthUser) {
-    return this.prisma.sosEvent.findMany({
-      where: { organizationId: user.organizationId },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    });
+    return this.d1.db
+      .select()
+      .from(sosEvents)
+      .where(eq(sosEvents.organizationId, user.organizationId))
+      .orderBy(desc(sosEvents.createdAt))
+      .limit(50);
   }
 
   async acknowledge(user: AuthUser, id: string) {
-    const event = await this.prisma.sosEvent.findFirst({
-      where: { id, organizationId: user.organizationId },
-    });
+    const [event] = await this.d1.db
+      .select()
+      .from(sosEvents)
+      .where(and(eq(sosEvents.id, id), eq(sosEvents.organizationId, user.organizationId)))
+      .limit(1);
     if (!event) throw Errors.notFound('SOS event');
-    return this.prisma.sosEvent.update({
-      where: { id },
-      data: { acknowledgedBy: user.userId, acknowledgedAt: new Date() },
-    });
+    const [updated] = await this.d1.db
+      .update(sosEvents)
+      .set({ acknowledgedBy: user.userId, acknowledgedAt: new Date() })
+      .where(eq(sosEvents.id, id))
+      .returning();
+    return updated;
   }
 }

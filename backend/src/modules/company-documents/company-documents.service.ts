@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { DateTime } from 'luxon';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, asc, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
+import { D1Service } from '../../infra/d1/d1.service';
+import { companyDocuments, organizations, sites } from '../../infra/d1/schema.generated';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
@@ -22,34 +23,61 @@ const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
 const PDF_MAGIC = '%PDF-';
 
 /** Row shape for list/response — everything except the bytes. */
-const META_SELECT = {
-  id: true,
-  siteId: true,
-  site: { select: { name: true } },
-  name: true,
-  fileName: true,
-  mimeType: true,
-  sizeBytes: true,
-  validUntil: true,
-  remindDaysBefore: true,
-  reminderSentFor: true,
-  uploadedBy: true,
-  createdAt: true,
-  updatedAt: true,
-} satisfies Prisma.CompanyDocumentSelect;
+const META_COLUMNS = {
+  id: companyDocuments.id,
+  siteId: companyDocuments.siteId,
+  siteName: sites.name,
+  name: companyDocuments.name,
+  fileName: companyDocuments.fileName,
+  mimeType: companyDocuments.mimeType,
+  sizeBytes: companyDocuments.sizeBytes,
+  validUntil: companyDocuments.validUntil,
+  remindDaysBefore: companyDocuments.remindDaysBefore,
+  reminderSentFor: companyDocuments.reminderSentFor,
+  uploadedBy: companyDocuments.uploadedBy,
+  createdAt: companyDocuments.createdAt,
+  updatedAt: companyDocuments.updatedAt,
+} as const;
 
-type DocumentMeta = Prisma.CompanyDocumentGetPayload<{ select: typeof META_SELECT }>;
+/**
+ * One document's metadata as the join returns it.
+ *
+ * The two date columns are DATE on Postgres and text here, so they arrive as
+ * 'YYYY-MM-DD' rather than as the UTC midnight Prisma produced. Everything
+ * downstream formats them to exactly that string anyway.
+ */
+type DocumentMeta = {
+  id: string;
+  siteId: string;
+  siteName: string | null;
+  name: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  validUntil: string | null;
+  remindDaysBefore: number;
+  reminderSentFor: string | null;
+  uploadedBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
 
-/** "2026-12-31" → the UTC midnight a DATE column round-trips unchanged. */
-export function parseDay(iso: string): Date {
+/**
+ * "2026-12-31" validated and returned as itself.
+ *
+ * The column is a calendar day, and it is text on SQLite for that reason — a
+ * day given a time component drifts across the boundary at +05:30. This used
+ * to hand back the UTC midnight a DATE column round-tripped.
+ */
+export function parseDay(iso: string): string {
   const d = DateTime.fromISO(iso, { zone: 'utc' }).startOf('day');
   if (!d.isValid) throw Errors.validation({ message: `Invalid date: ${iso}` });
-  return d.toJSDate();
+  return d.toFormat('yyyy-LL-dd');
 }
 
-/** A DATE column back to "2026-12-31" — read in UTC, never the server's zone. */
-export function formatDay(value: Date | null): string | null {
-  return value ? DateTime.fromJSDate(value, { zone: 'utc' }).toFormat('yyyy-LL-dd') : null;
+/** The stored day, which is already "2026-12-31". */
+export function formatDay(value: string | null): string | null {
+  return value ?? null;
 }
 
 /**
@@ -59,8 +87,8 @@ export function formatDay(value: Date | null): string | null {
  * zone before the subtraction, so the answer is a count of calendar days and
  * never the off-by-one an offset would introduce.
  */
-export function daysUntil(validUntil: Date, timezone: string): number {
-  const due = DateTime.fromJSDate(validUntil, { zone: 'utc' });
+export function daysUntil(validUntil: string, timezone: string): number {
+  const due = DateTime.fromISO(validUntil, { zone: 'utc' });
   const dueLocal = DateTime.fromObject(
     { year: due.year, month: due.month, day: due.day },
     { zone: timezone },
@@ -74,7 +102,7 @@ export class CompanyDocumentsService {
   private readonly logger = new Logger(CompanyDocumentsService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly audit: AuditService,
   ) {}
 
@@ -86,25 +114,39 @@ export class CompanyDocumentsService {
    * the Safety Officer — a role that is routinely pinned to one site — was let
    * in to read these.
    */
-  private scopeWhere(user: AuthUser): Prisma.CompanyDocumentWhereInput {
-    if (user.role === 'SUPER_ADMIN' || user.siteScopes.length === 0) return {};
-    return { siteId: { in: user.siteScopes } };
+  private scopeWhere(user: AuthUser): SQL[] {
+    if (user.role === 'SUPER_ADMIN' || user.siteScopes.length === 0) return [];
+    return [inArray(companyDocuments.siteId, user.siteScopes)];
+  }
+
+  /** The metadata join, which every read of a document shares. */
+  private metaQuery() {
+    return this.d1.db
+      .select(META_COLUMNS)
+      .from(companyDocuments)
+      .leftJoin(sites, eq(sites.id, companyDocuments.siteId));
   }
 
   /** Soonest expiry first; undated documents sit at the bottom. */
   async list(user: AuthUser, siteId?: string) {
     const [rows, timezone] = await Promise.all([
-      this.prisma.companyDocument.findMany({
-        // AND rather than one flat object: both fragments key on `siteId`, and
-        // spreading them would let the requested site quietly overwrite — and
-        // so escape — the caller's scope.
-        where: {
-          organizationId: user.organizationId,
-          AND: [this.scopeWhere(user), siteId ? { siteId } : {}],
-        },
-        orderBy: [{ validUntil: { sort: 'asc', nulls: 'last' } }, { createdAt: 'desc' }],
-        select: META_SELECT,
-      }),
+      this.metaQuery()
+        // Both conditions key on siteId and both are applied — the requested
+        // site narrows the caller's scope, it cannot widen past it.
+        .where(
+          and(
+            eq(companyDocuments.organizationId, user.organizationId),
+            ...this.scopeWhere(user),
+            ...(siteId ? [eq(companyDocuments.siteId, siteId)] : []),
+          ),
+        )
+        // Undated documents sit at the bottom. SQLite sorts NULL first, so the
+        // nulls-last that Prisma expressed as an option is spelled out here.
+        .orderBy(
+          sql`case when ${companyDocuments.validUntil} is null then 1 else 0 end`,
+          asc(companyDocuments.validUntil),
+          desc(companyDocuments.createdAt),
+        ),
       this.timezone(user.organizationId),
     ]);
     return rows.map((r) => this.toResponse(r, timezone));
@@ -112,10 +154,11 @@ export class CompanyDocumentsService {
 
   /** The site must be one of this organization's — a UUID alone proves nothing. */
   private async assertSite(user: AuthUser, siteId: string) {
-    const site = await this.prisma.site.findFirst({
-      where: { id: siteId, organizationId: user.organizationId },
-      select: { id: true },
-    });
+    const [site] = await this.d1.db
+      .select({ id: sites.id })
+      .from(sites)
+      .where(and(eq(sites.id, siteId), eq(sites.organizationId, user.organizationId)))
+      .limit(1);
     if (!site) throw Errors.notFound('Site');
   }
 
@@ -153,24 +196,26 @@ export class CompanyDocumentsService {
       await blobStore.put(storageKey, raw, dto.mimeType);
     }
 
-    const doc = await this.prisma.companyDocument.create({
-      data: {
-        id,
-        organizationId: user.organizationId,
-        siteId: dto.siteId,
-        // The file's own name is the opening suggestion; the client renames it.
-        name: (dto.name?.trim() || defaultName(dto.fileName)).slice(0, 160),
-        fileName: dto.fileName,
-        mimeType: dto.mimeType,
-        storageKey: useStore ? storageKey : null,
-        data: useStore ? null : raw,
-        sizeBytes: raw.length,
-        validUntil: dto.validUntil ? parseDay(dto.validUntil) : null,
-        remindDaysBefore: dto.remindDaysBefore ?? DEFAULT_REMIND_DAYS_BEFORE,
-        uploadedBy: user.userId,
-      },
-      select: META_SELECT,
+    const now = new Date();
+    await this.d1.db.insert(companyDocuments).values({
+      id,
+      organizationId: user.organizationId,
+      siteId: dto.siteId,
+      // The file's own name is the opening suggestion; the client renames it.
+      name: (dto.name?.trim() || defaultName(dto.fileName)).slice(0, 160),
+      fileName: dto.fileName,
+      mimeType: dto.mimeType,
+      storageKey: useStore ? storageKey : null,
+      data: useStore ? null : raw,
+      sizeBytes: raw.length,
+      validUntil: dto.validUntil ? parseDay(dto.validUntil) : null,
+      remindDaysBefore: dto.remindDaysBefore ?? DEFAULT_REMIND_DAYS_BEFORE,
+      uploadedBy: user.userId,
+      createdAt: now,
+      updatedAt: now,
     });
+    // Read back through the join, which is what carries the site's name.
+    const doc = await this.getMeta(user, id);
 
     await this.audit.record({
       organizationId: user.organizationId,
@@ -187,10 +232,10 @@ export class CompanyDocumentsService {
   async update(user: AuthUser, id: string, dto: UpdateCompanyDocumentDto) {
     const before = await this.getMeta(user, id);
 
-    const data: Prisma.CompanyDocumentUpdateInput = {};
+    const data: Record<string, unknown> = { updatedAt: new Date() };
     if (dto.siteId !== undefined) {
       await this.assertSite(user, dto.siteId);
-      data.site = { connect: { id: dto.siteId } };
+      data.siteId = dto.siteId;
     }
     if (dto.name !== undefined) data.name = dto.name.trim();
     if (dto.validUntil !== undefined) {
@@ -204,11 +249,8 @@ export class CompanyDocumentsService {
       data.expirySentFor = null;
     }
 
-    const doc = await this.prisma.companyDocument.update({
-      where: { id },
-      data,
-      select: META_SELECT,
-    });
+    await this.d1.db.update(companyDocuments).set(data).where(eq(companyDocuments.id, id));
+    const doc = await this.getMeta(user, id);
 
     await this.audit.record({
       organizationId: user.organizationId,
@@ -225,11 +267,12 @@ export class CompanyDocumentsService {
 
   async remove(user: AuthUser, id: string) {
     const before = await this.getMeta(user, id);
-    const stored = await this.prisma.companyDocument.findUnique({
-      where: { id },
-      select: { storageKey: true },
-    });
-    await this.prisma.companyDocument.delete({ where: { id } });
+    const [stored] = await this.d1.db
+      .select({ storageKey: companyDocuments.storageKey })
+      .from(companyDocuments)
+      .where(eq(companyDocuments.id, id))
+      .limit(1);
+    await this.d1.db.delete(companyDocuments).where(eq(companyDocuments.id, id));
     if (stored?.storageKey) {
       // After the row, deliberately: a failure here leaves an unreferenced
       // object, where the reverse order leaves a document that lists but
@@ -252,12 +295,24 @@ export class CompanyDocumentsService {
 
   /** The file itself, for streaming back to the browser. */
   async file(user: AuthUser, id: string) {
-    const doc = await this.prisma.companyDocument.findFirst({
+    const [doc] = await this.d1.db
+      .select({
+        fileName: companyDocuments.fileName,
+        mimeType: companyDocuments.mimeType,
+        storageKey: companyDocuments.storageKey,
+        data: companyDocuments.data,
+      })
+      .from(companyDocuments)
       // Scoped like the list: a document the caller cannot see listed is not
       // one they can open by pasting its id either.
-      where: { id, organizationId: user.organizationId, ...this.scopeWhere(user) },
-      select: { fileName: true, mimeType: true, storageKey: true, data: true },
-    });
+      .where(
+        and(
+          eq(companyDocuments.id, id),
+          eq(companyDocuments.organizationId, user.organizationId),
+          ...this.scopeWhere(user),
+        ),
+      )
+      .limit(1);
     if (!doc) throw Errors.notFound('Document');
     // Documents uploaded before the move still carry their bytes in the column.
     const data = await readStoredBytes(doc);
@@ -266,19 +321,24 @@ export class CompanyDocumentsService {
   }
 
   private async getMeta(user: AuthUser, id: string): Promise<DocumentMeta> {
-    const doc = await this.prisma.companyDocument.findFirst({
-      where: { id, organizationId: user.organizationId },
-      select: META_SELECT,
-    });
+    const [doc] = await this.metaQuery()
+      .where(
+        and(
+          eq(companyDocuments.id, id),
+          eq(companyDocuments.organizationId, user.organizationId),
+        ),
+      )
+      .limit(1);
     if (!doc) throw Errors.notFound('Document');
     return doc;
   }
 
   private async timezone(organizationId: string): Promise<string> {
-    const org = await this.prisma.organization.findUnique({
-      where: { id: organizationId },
-      select: { timezone: true },
-    });
+    const [org] = await this.d1.db
+      .select({ timezone: organizations.timezone })
+      .from(organizations)
+      .where(eq(organizations.id, organizationId))
+      .limit(1);
     return org?.timezone ?? 'Asia/Kolkata';
   }
 
@@ -289,22 +349,19 @@ export class CompanyDocumentsService {
    */
   private toResponse(doc: DocumentMeta, timezone: string) {
     const daysUntilExpiry = doc.validUntil ? daysUntil(doc.validUntil, timezone) : null;
-    const { site, ...rest } = doc;
     return {
-      ...rest,
+      ...doc,
       // Flattened: every caller wants the name beside the row, none of them
       // want to reach through a nested object for it.
-      siteName: site?.name ?? null,
+      siteName: doc.siteName ?? null,
       validUntil: formatDay(doc.validUntil),
       reminderSentFor: formatDay(doc.reminderSentFor),
       daysUntilExpiry,
       remindOn:
         doc.validUntil && daysUntilExpiry !== null
-          ? formatDay(
-              DateTime.fromJSDate(doc.validUntil, { zone: 'utc' })
-                .minus({ days: doc.remindDaysBefore })
-                .toJSDate(),
-            )
+          ? DateTime.fromISO(doc.validUntil, { zone: 'utc' })
+              .minus({ days: doc.remindDaysBefore })
+              .toFormat('yyyy-LL-dd')
           : null,
     };
   }

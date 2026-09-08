@@ -1,6 +1,8 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Prisma, UserRole } from '@prisma/client';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, eq, isNotNull, isNull, ne, or } from 'drizzle-orm';
+import { UserRole } from '../../common/enums';
+import { D1Service } from '../../infra/d1/d1.service';
+import { companyDocuments, organizations, sites } from '../../infra/d1/schema.generated';
 import { MailService } from '../../common/mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { daysUntil, formatDay } from './company-documents.service';
@@ -18,7 +20,8 @@ interface DueDocument {
   /** Named in the alert: a licence lapsing exposes one project, not all of them. */
   siteId: string;
   siteName: string;
-  validUntil: Date;
+  /** A calendar day as stored: 'YYYY-MM-DD'. */
+  validUntil: string;
   daysLeft: number;
 }
 
@@ -37,7 +40,7 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly mail: MailService,
     private readonly notifications: NotificationsService,
   ) {}
@@ -56,9 +59,9 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
 
   async check() {
     try {
-      const orgs = await this.prisma.organization.findMany({
-        select: { id: true, timezone: true },
-      });
+      const orgs = await this.d1.db
+        .select({ id: organizations.id, timezone: organizations.timezone })
+        .from(organizations);
       for (const org of orgs) {
         await this.checkOrg(org);
       }
@@ -68,20 +71,26 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
   }
 
   private async checkOrg(org: { id: string; timezone: string }) {
-    const docs = await this.prisma.companyDocument.findMany({
-      where: { organizationId: org.id, validUntil: { not: null } },
-      // The already-sent columns are deliberately not read here: whether a mail
-      // is still owed is decided by the conditional update in claim(), which is
-      // what makes two replicas racing on the same row safe.
-      select: {
-        id: true,
-        name: true,
-        validUntil: true,
-        remindDaysBefore: true,
-        siteId: true,
-        site: { select: { name: true } },
-      },
-    });
+    // The already-sent columns are deliberately not read here: whether a mail
+    // is still owed is decided by the conditional update in claim(), which is
+    // what makes two replicas racing on the same row safe.
+    const docs = await this.d1.db
+      .select({
+        id: companyDocuments.id,
+        name: companyDocuments.name,
+        validUntil: companyDocuments.validUntil,
+        remindDaysBefore: companyDocuments.remindDaysBefore,
+        siteId: companyDocuments.siteId,
+        siteName: sites.name,
+      })
+      .from(companyDocuments)
+      .leftJoin(sites, eq(sites.id, companyDocuments.siteId))
+      .where(
+        and(
+          eq(companyDocuments.organizationId, org.id),
+          isNotNull(companyDocuments.validUntil),
+        ),
+      );
 
     const expiring: DueDocument[] = [];
     const expired: DueDocument[] = [];
@@ -93,7 +102,7 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
         id: doc.id,
         name: doc.name,
         siteId: doc.siteId,
-        siteName: doc.site?.name?.trim() ?? '',
+        siteName: doc.siteName?.trim() ?? '',
         validUntil: doc.validUntil,
         daysLeft,
       };
@@ -119,16 +128,18 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
   private async claim(
     id: string,
     column: 'reminderSentFor' | 'expirySentFor',
-    validUntil: Date,
+    validUntil: string,
   ): Promise<boolean> {
-    const claimed = await this.prisma.companyDocument.updateMany({
-      where: {
-        id,
-        OR: [{ [column]: null }, { [column]: { not: validUntil } }],
-      } as Prisma.CompanyDocumentWhereInput,
-      data: { [column]: validUntil },
-    });
-    return claimed.count > 0;
+    const col = companyDocuments[column];
+    // The row is ours when the update touched it — D1 reports that as the
+    // change count, the same way Prisma reported it as `count`.
+    const result = (await this.d1.db
+      .update(companyDocuments)
+      .set({ [column]: validUntil })
+      .where(
+        and(eq(companyDocuments.id, id), or(isNull(col), ne(col, validUntil))),
+      )) as unknown as { meta?: { changes?: number } };
+    return (result?.meta?.changes ?? 0) > 0;
   }
 
   /** One notification per document (each is its own to-do), one mail per batch. */
@@ -207,12 +218,17 @@ export class DocumentExpiryMonitor implements OnModuleInit, OnModuleDestroy {
     const column = hasExpired ? 'expirySentFor' : 'reminderSentFor';
     for (const doc of docs) {
       try {
-        await this.prisma.companyDocument.updateMany({
+        await this.d1.db
+          .update(companyDocuments)
+          .set({ [column]: null })
           // Only if it still holds the value we wrote: a renewal in the
           // meantime has already re-armed it, and must not be undone.
-          where: { id: doc.id, [column]: doc.validUntil } as Prisma.CompanyDocumentWhereInput,
-          data: { [column]: null },
-        });
+          .where(
+            and(
+              eq(companyDocuments.id, doc.id),
+              eq(companyDocuments[column], doc.validUntil),
+            ),
+          );
       } catch (e) {
         this.logger.error(`Could not re-arm ${doc.name}: ${(e as Error).message}`);
       }
