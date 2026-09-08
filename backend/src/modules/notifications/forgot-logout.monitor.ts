@@ -1,6 +1,16 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Prisma, UserRole } from '@prisma/client';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { D1Service } from '../../infra/d1/d1.service';
+import {
+  attendanceSessions,
+  notifications,
+  pushTokens,
+  sites,
+  sosEvents,
+  users,
+  workers,
+} from '../../infra/d1/schema.generated';
 import { MailService } from '../../common/mail/mail.service';
 import { PushService } from '../../common/push/push.service';
 import { businessDate } from '../../common/time/time.util';
@@ -32,7 +42,7 @@ export class ForgotLogoutMonitor implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly mail: MailService,
     private readonly push: PushService,
     private readonly notifications: NotificationsService,
@@ -65,14 +75,28 @@ export class ForgotLogoutMonitor implements OnModuleInit, OnModuleDestroy {
     const hours = Number(process.env.FORGOT_LOGOUT_AFTER_HOURS ?? 12);
     const cutoff = new Date(Date.now() - hours * 3600_000);
 
-    const stale = await this.prisma.attendanceSession.findMany({
-      where: { state: 'OPEN', loginAt: { lt: cutoff }, forgotLogoutNotifiedAt: null },
-      include: {
-        worker: { select: { fullName: true, workerCode: true, category: true } },
-        site: { select: { name: true } },
-      },
-      take: 200,
-    });
+    // The relation includes become joins; the columns pulled are the same.
+    const stale = await this.d1.db
+      .select({
+        id: attendanceSessions.id,
+        organizationId: attendanceSessions.organizationId,
+        loginAt: attendanceSessions.loginAt,
+        workerName: workers.fullName,
+        workerCode: workers.workerCode,
+        category: workers.category,
+        siteName: sites.name,
+      })
+      .from(attendanceSessions)
+      .innerJoin(workers, eq(workers.id, attendanceSessions.workerId))
+      .innerJoin(sites, eq(sites.id, attendanceSessions.siteId))
+      .where(
+        and(
+          eq(attendanceSessions.state, 'OPEN'),
+          lt(attendanceSessions.loginAt, cutoff),
+          isNull(attendanceSessions.forgotLogoutNotifiedAt),
+        ),
+      )
+      .limit(200);
     if (stale.length === 0) return;
 
     interface MissedSession {
@@ -86,22 +110,31 @@ export class ForgotLogoutMonitor implements OnModuleInit, OnModuleDestroy {
     const byOrg = new Map<string, MissedSession[]>();
     for (const s of stale) {
       // Atomic claim — only the process that flips the flag acts on it.
-      const claimed = await this.prisma.attendanceSession.updateMany({
-        where: { id: s.id, forgotLogoutNotifiedAt: null },
-        data: { forgotLogoutNotifiedAt: new Date() },
-      });
-      if (claimed.count === 0) continue;
+      // Atomic claim, and it stays atomic here: the null check is in the
+      // WHERE, so two runs racing cannot both take the same session.
+      const claimed = await this.d1.db
+        .update(attendanceSessions)
+        .set({ forgotLogoutNotifiedAt: new Date() })
+        .where(
+          and(
+            eq(attendanceSessions.id, s.id),
+            isNull(attendanceSessions.forgotLogoutNotifiedAt),
+          ),
+        );
+      if (((claimed as unknown as { meta?: { changes?: number } }).meta?.changes ?? 0) === 0) {
+        continue;
+      }
 
       // The session deliberately stays OPEN — no auto-logout. Admins/safety
       // officers are notified below and close it via logout or a correction.
       const list = byOrg.get(s.organizationId) ?? [];
       list.push({
         sessionId: s.id,
-        workerName: s.worker.fullName,
-        workerCode: s.worker.workerCode,
-        category: s.worker.category,
-        siteName: s.site.name,
-        loginAt: s.loginAt.toISOString(),
+        workerName: s.workerName,
+        workerCode: s.workerCode,
+        category: s.category,
+        siteName: s.siteName,
+        loginAt: (s.loginAt as Date).toISOString(),
       });
       byOrg.set(s.organizationId, list);
     }
@@ -148,19 +181,29 @@ export class ForgotLogoutMonitor implements OnModuleInit, OnModuleDestroy {
       );
 
       // Push to the same roles so the alert reaches phones/web too.
-      const recipients = await this.prisma.user.findMany({
-        where: {
-          organizationId: orgId,
-          isActive: true,
-          deletedAt: null,
-          role: { in: MISSED_LOGOUT_ROLES },
-        },
-        select: { id: true },
-      });
-      const tokens = await this.prisma.pushToken.findMany({
-        where: { organizationId: orgId, userId: { in: recipients.map((u) => u.id) } },
-        select: { token: true },
-      });
+      const recipients = await this.d1.db
+        .select({ id: users.id })
+        .from(users)
+        .where(
+          and(
+            eq(users.organizationId, orgId),
+            eq(users.isActive, true),
+            isNull(users.deletedAt),
+            inArray(users.role, MISSED_LOGOUT_ROLES),
+          ),
+        );
+      const recipientIds = recipients.map((u) => u.id);
+      const tokens = recipientIds.length
+        ? await this.d1.db
+            .select({ token: pushTokens.token })
+            .from(pushTokens)
+            .where(
+              and(
+                eq(pushTokens.organizationId, orgId),
+                inArray(pushTokens.userId, recipientIds),
+              ),
+            )
+        : [];
       const stale2 = await this.push.sendAlert(
         tokens.map((t) => t.token),
         { title, body, data: { kind: 'FORGOT_LOGOUT' } },
@@ -173,21 +216,27 @@ export class ForgotLogoutMonitor implements OnModuleInit, OnModuleDestroy {
   /** Visitors are day passes: once the visit date has passed, mark EXITED. */
   private async expireVisitors() {
     const today = businessDate(new Date(), 'Asia/Kolkata');
-    const expired = await this.prisma.worker.findMany({
-      where: {
-        category: 'VISITOR',
-        status: 'ACTIVE',
-        deletedAt: null,
-        joinDate: { lt: today },
-      },
-      select: { id: true, joinDate: true, fullName: true },
-      take: 200,
-    });
+    // join_date is a calendar day held as text, so the comparison is a text
+    // one — 'YYYY-MM-DD' orders correctly, which is why the column is that
+    // shape rather than an instant.
+    const todayText = today.toISOString().slice(0, 10);
+    const expired = await this.d1.db
+      .select({ id: workers.id, joinDate: workers.joinDate, fullName: workers.fullName })
+      .from(workers)
+      .where(
+        and(
+          eq(workers.category, 'VISITOR'),
+          eq(workers.status, 'ACTIVE'),
+          isNull(workers.deletedAt),
+          lt(workers.joinDate, todayText),
+        ),
+      )
+      .limit(200);
     for (const v of expired) {
-      await this.prisma.worker.update({
-        where: { id: v.id },
-        data: { status: 'EXITED', exitDate: v.joinDate ?? today },
-      });
+      await this.d1.db
+        .update(workers)
+        .set({ status: 'EXITED', exitDate: v.joinDate ?? todayText, updatedAt: new Date() })
+        .where(eq(workers.id, v.id));
     }
     if (expired.length > 0) {
       this.logger.log(`Expired ${expired.length} visitor pass(es)`);
@@ -197,7 +246,7 @@ export class ForgotLogoutMonitor implements OnModuleInit, OnModuleDestroy {
   private async pruneOldRows() {
     const notifCutoff = new Date(Date.now() - NOTIFICATION_RETENTION_DAYS * 86_400_000);
     const sosCutoff = new Date(Date.now() - SOS_RETENTION_DAYS * 86_400_000);
-    await this.prisma.notification.deleteMany({ where: { createdAt: { lt: notifCutoff } } });
-    await this.prisma.sosEvent.deleteMany({ where: { createdAt: { lt: sosCutoff } } });
+    await this.d1.db.delete(notifications).where(lt(notifications.createdAt, notifCutoff));
+    await this.d1.db.delete(sosEvents).where(lt(sosEvents.createdAt, sosCutoff));
   }
 }
