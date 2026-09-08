@@ -1,36 +1,53 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, asc, count, eq, isNull } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { D1Service } from '../../infra/d1/d1.service';
+import { vendors, workers, workerSiteAssignments } from '../../infra/d1/schema.generated';
 import { AuditService } from '../../common/audit/audit.service';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 import { Errors } from '../../common/errors/app.exception';
 import { CreateVendorDto, UpdateVendorDto } from './dto/vendor.dto';
 
+type VendorInsert = typeof vendors.$inferInsert;
+
 @Injectable()
 export class VendorsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
     private readonly audit: AuditService,
   ) {}
 
   list(user: AuthUser) {
-    return this.prisma.vendor.findMany({
-      where: { organizationId: user.organizationId },
-      orderBy: { name: 'asc' },
-    });
+    return this.d1.db
+      .select()
+      .from(vendors)
+      .where(eq(vendors.organizationId, user.organizationId))
+      .orderBy(asc(vendors.name));
   }
 
   async get(user: AuthUser, id: string) {
-    const vendor = await this.prisma.vendor.findFirst({
-      where: { id, organizationId: user.organizationId },
-    });
+    const [vendor] = await this.d1.db
+      .select()
+      .from(vendors)
+      .where(and(eq(vendors.id, id), eq(vendors.organizationId, user.organizationId)))
+      .limit(1);
     if (!vendor) throw Errors.notFound('Vendor');
     return vendor;
   }
 
   async create(user: AuthUser, dto: CreateVendorDto) {
-    const vendor = await this.prisma.vendor.create({
-      data: { ...dto, organizationId: user.organizationId },
-    });
+    const now = new Date();
+    const [vendor] = await this.d1.db
+      .insert(vendors)
+      .values({
+        ...(dto as Partial<VendorInsert>),
+        id: randomUUID(),
+        organizationId: user.organizationId,
+        createdAt: now,
+        updatedAt: now,
+      } as VendorInsert)
+      .returning();
+
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -45,7 +62,12 @@ export class VendorsService {
 
   async update(user: AuthUser, id: string, dto: UpdateVendorDto) {
     const before = await this.get(user, id);
-    const vendor = await this.prisma.vendor.update({ where: { id }, data: dto });
+    const [vendor] = await this.d1.db
+      .update(vendors)
+      .set({ ...(dto as Partial<VendorInsert>), updatedAt: new Date() })
+      .where(eq(vendors.id, id))
+      .returning();
+
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,
@@ -63,13 +85,22 @@ export class VendorsService {
   async remove(user: AuthUser, id: string) {
     const vendor = await this.get(user, id);
 
-    const [workers, assignments] = await Promise.all([
-      this.prisma.worker.count({ where: { vendorId: id, deletedAt: null } }),
-      this.prisma.workerSiteAssignment.count({ where: { vendorId: id } }),
+    const [[{ n: workerCount }], [{ n: assignmentCount }]] = await Promise.all([
+      this.d1.db
+        .select({ n: count() })
+        .from(workers)
+        .where(and(eq(workers.vendorId, id), isNull(workers.deletedAt))),
+      this.d1.db
+        .select({ n: count() })
+        .from(workerSiteAssignments)
+        .where(eq(workerSiteAssignments.vendorId, id)),
     ]);
 
-    if (workers > 0 || assignments > 0) {
-      await this.prisma.vendor.update({ where: { id }, data: { isActive: false } });
+    if (workerCount > 0 || assignmentCount > 0) {
+      await this.d1.db
+        .update(vendors)
+        .set({ isActive: false, updatedAt: new Date() })
+        .where(eq(vendors.id, id));
       await this.audit.record({
         organizationId: user.organizationId,
         actorUserId: user.userId,
@@ -78,12 +109,14 @@ export class VendorsService {
         entityType: 'Vendor',
         entityId: id,
         oldValue: vendor,
-        reason: `${workers} worker(s) / ${assignments} assignment(s) still reference this vendor`,
+        reason:
+          `${workerCount} worker(s) / ${assignmentCount} assignment(s) still reference ` +
+          'this vendor',
       });
-      return { deleted: false, deactivated: true, workersAssigned: workers };
+      return { deleted: false, deactivated: true, workersAssigned: workerCount };
     }
 
-    await this.prisma.vendor.delete({ where: { id } });
+    await this.d1.db.delete(vendors).where(eq(vendors.id, id));
     await this.audit.record({
       organizationId: user.organizationId,
       actorUserId: user.userId,

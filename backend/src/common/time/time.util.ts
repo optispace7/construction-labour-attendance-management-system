@@ -24,3 +24,22 @@ export function businessDate(instant: Date, timezone: string): Date {
 export function isOvernight(startTime: Date, endTime: Date): boolean {
   return minutesOfDay(endTime) <= minutesOfDay(startTime);
 }
+
+/**
+ * A shift time as it is stored on SQLite: 'HH:MM:SS'.
+ *
+ * Postgres had a `time` type and Prisma handed it back as a Date pinned to
+ * 1970-01-01. SQLite has no such type, so the column is text and these two
+ * convert at the edge. The rest of the code goes on thinking in minutes.
+ */
+export function timeOfDayToText(time: Date): string {
+  const h = String(time.getUTCHours()).padStart(2, '0');
+  const m = String(time.getUTCMinutes()).padStart(2, '0');
+  return `${h}:${m}:00`;
+}
+
+/** Inverse of {@link timeOfDayToText}, tolerant of a missing seconds part. */
+export function textToTimeOfDay(text: string): Date {
+  const [h, m] = text.split(':').map((n) => parseInt(n, 10));
+  return new Date(Date.UTC(1970, 0, 1, h || 0, m || 0, 0));
+}
