@@ -1,5 +1,7 @@
 import type { Request } from 'express';
-import type { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, eq, isNull } from 'drizzle-orm';
+import type { D1Service } from '../../infra/d1/d1.service';
+import { userSiteScopes, users } from '../../infra/d1/schema.generated';
 import type { AuthUser } from './auth-user.interface';
 
 /**
@@ -16,7 +18,7 @@ import type { AuthUser } from './auth-user.interface';
  */
 export async function authUserFromBetterAuthSession(
   req: Request,
-  prisma: PrismaService,
+  d1: D1Service,
 ): Promise<AuthUser | null> {
   // Imported here rather than at the top of the file. Better Auth is ESM-only
   // and this guard is loaded on every request path, including in the test
@@ -33,19 +35,27 @@ export async function authUserFromBetterAuthSession(
   const result = await getAuth().api.getSession({ headers });
   if (!result?.user?.id) return null;
 
-  const user = await prisma.user.findFirst({
-    where: { id: result.user.id, deletedAt: null, isActive: true },
-    include: { siteScopes: true },
-  });
+  const [user] = await d1.db
+    .select()
+    .from(users)
+    .where(
+      and(eq(users.id, result.user.id), isNull(users.deletedAt), eq(users.isActive, true)),
+    )
+    .limit(1);
   // A session for somebody who has since been deactivated or removed is not a
   // session. Better Auth has no way to know that — deactivation is ours.
   if (!user) return null;
 
+  const scopes = await d1.db
+    .select({ siteId: userSiteScopes.siteId })
+    .from(userSiteScopes)
+    .where(eq(userSiteScopes.userId, user.id));
+
   return {
     userId: user.id,
     organizationId: user.organizationId,
-    role: user.role,
+    role: user.role as AuthUser['role'],
     email: user.email,
-    siteScopes: user.siteScopes.map((s) => s.siteId),
+    siteScopes: scopes.map((s) => s.siteId),
   };
 }

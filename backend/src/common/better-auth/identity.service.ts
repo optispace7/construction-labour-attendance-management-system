@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, eq } from 'drizzle-orm';
+import { D1Service } from '../../infra/d1/d1.service';
+import { authAccount, authSession, authUser } from '../../infra/d1/schema.generated';
 
 /**
  * Creates and updates the Better Auth rows that back an account.
@@ -16,7 +18,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
  */
 @Injectable()
 export class IdentityService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly d1: D1Service) {}
 
   /**
    * Better Auth requires an address on every user, unique and not null, even
@@ -46,8 +48,11 @@ export class IdentityService {
     password: string;
   }): Promise<void> {
     const now = new Date();
-    await this.prisma.auth_user.create({
-      data: {
+    const password = await this.hash(input.password);
+    // Both rows or neither: a user with no credential row cannot sign in, and
+    // there is nothing in the product that would tell anybody why.
+    await this.d1.db.batch([
+      this.d1.db.insert(authUser).values({
         id: input.id,
         name: input.fullName,
         email: this.addressFor(input.email, input.username, input.id),
@@ -56,19 +61,17 @@ export class IdentityService {
         displayUsername: input.username?.trim() || null,
         createdAt: now,
         updatedAt: now,
-      },
-    });
-    await this.prisma.auth_account.create({
-      data: {
+      }),
+      this.d1.db.insert(authAccount).values({
         id: randomUUID(),
         accountId: input.id,
         providerId: 'credential',
         userId: input.id,
-        password: await this.hash(input.password),
+        password,
         createdAt: now,
         updatedAt: now,
-      },
-    });
+      }),
+    ] as never);
   }
 
   /** Mirrors a profile change, and sets a new password when one is given. */
@@ -79,12 +82,16 @@ export class IdentityService {
     username?: string | null;
     password?: string;
   }): Promise<void> {
-    const existing = await this.prisma.auth_user.findUnique({ where: { id: input.id } });
+    const [existing] = await this.d1.db
+      .select()
+      .from(authUser)
+      .where(eq(authUser.id, input.id))
+      .limit(1);
     if (!existing) return;
 
-    await this.prisma.auth_user.update({
-      where: { id: input.id },
-      data: {
+    await this.d1.db
+      .update(authUser)
+      .set({
         ...(input.fullName !== undefined ? { name: input.fullName } : {}),
         ...(input.email !== undefined || input.username !== undefined
           ? {
@@ -102,23 +109,30 @@ export class IdentityService {
             }
           : {}),
         updatedAt: new Date(),
-      },
-    });
+      })
+      .where(eq(authUser.id, input.id));
 
     if (input.password) {
-      await this.prisma.auth_account.updateMany({
-        where: { userId: input.id, providerId: 'credential' },
-        data: { password: await this.hash(input.password), updatedAt: new Date() },
-      });
-      // A password set by somebody else ends the sessions opened with the old
-      // one. Better Auth has no reason to do this on its own — it never saw
-      // the change — so it is done here, where the change is known about.
-      await this.prisma.auth_session.deleteMany({ where: { userId: input.id } });
+      // The new password and the end of the old sessions go together: a
+      // password changed without the sessions closing leaves whoever was
+      // using the old one still signed in.
+      await this.d1.db.batch([
+        this.d1.db
+          .update(authAccount)
+          .set({ password: await this.hash(input.password), updatedAt: new Date() })
+          .where(
+            and(eq(authAccount.userId, input.id), eq(authAccount.providerId, 'credential')),
+          ),
+        // A password set by somebody else ends the sessions opened with the old
+        // one. Better Auth has no reason to do this on its own — it never saw
+        // the change — so it is done here, where the change is known about.
+        this.d1.db.delete(authSession).where(eq(authSession.userId, input.id)),
+      ] as never);
     }
   }
 
   /** Ends every session for a user — used when an account is deactivated. */
   async revokeSessions(userId: string): Promise<void> {
-    await this.prisma.auth_session.deleteMany({ where: { userId } });
+    await this.d1.db.delete(authSession).where(eq(authSession.userId, userId));
   }
 }

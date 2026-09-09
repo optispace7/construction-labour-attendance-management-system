@@ -1,44 +1,47 @@
 import { betterAuth } from 'better-auth';
-import { prismaAdapter } from 'better-auth/adapters/prisma';
+import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { bearer, username } from 'better-auth/plugins';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+import { drizzle } from 'drizzle-orm/d1';
+import { env } from 'cloudflare:workers';
 import { randomUUID } from 'node:crypto';
+import * as schema from '../../infra/d1/schema.generated';
 
 /**
- * Better Auth configuration — spike.
+ * Better Auth configuration.
  *
- * Stands beside the existing auth rather than replacing it, so nothing that
- * works today stops working while this is being evaluated. Nothing routes to
- * it until the flag in the module turns it on.
+ * It reads and writes D1, through the same Drizzle schema the rest of the app
+ * uses. This was the last thing still talking to Postgres: identity rows were
+ * being written to D1 by IdentityService while Better Auth itself read them
+ * from Supabase, so the two halves of an account lived in different databases
+ * and every sign-in reached outside Cloudflare.
  *
- * Built on first use, not at import. Constructing a PrismaClient at module
- * scope fails on the serverless runtime before a request is ever served —
- * "PrismaClient failed to initialize because it wasn't configured to run in
- * this environment" — because the client needs the driver adapter there and
- * the deploy validates the module by loading it.
+ * Built on first use, not at import. The binding does not exist at module
+ * scope on Workers, and the deploy validates the module by loading it.
  *
- * It builds its own client rather than taking PrismaService: the schema
+ * It reaches for the binding directly rather than taking D1Service: the schema
  * generator has to read this file from the command line, where the Nest
- * container does not exist. The adapter branch mirrors PrismaService's, for
- * the same reason it exists there — a native query engine cannot load on a
- * runtime that only runs JS and WebAssembly.
+ * container does not exist.
  */
-function createPrisma(): PrismaClient {
-  if (process.env.DATABASE_DRIVER_ADAPTER !== '1') return new PrismaClient();
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) throw new Error('DATABASE_URL is not configured');
-  // maxUses: 1 for the reason given in PrismaService: a socket does not
-  // survive between requests here, and a pooled one is a dead one.
-  return new PrismaClient({
-    adapter: new PrismaPg(new Pool({ connectionString, max: 5, maxUses: 1 })),
-  } as never);
+function database() {
+  const binding = (env as unknown as { DB?: D1Database }).DB;
+  if (!binding) throw new Error('No D1 binding named DB for Better Auth');
+  return drizzle(binding, { schema });
 }
 
 export function createAuth() {
   return betterAuth({
-  database: prismaAdapter(createPrisma(), { provider: 'postgresql' }),
+  database: drizzleAdapter(database(), {
+    provider: 'sqlite',
+    // The generated tables are exported under camelCase names; Better Auth
+    // looks each model up by the name given below, so the two are mapped here
+    // rather than renaming either side.
+    schema: {
+      auth_user: schema.authUser,
+      auth_session: schema.authSession,
+      auth_account: schema.authAccount,
+      auth_verification: schema.authVerification,
+    },
+  }),
 
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: process.env.BETTER_AUTH_URL,
@@ -80,13 +83,9 @@ export function createAuth() {
     },
   },
 
-  // These three have to be the same string, which is not obvious and is not
-  // documented: Better Auth indexes the Prisma client with the model name
-  // (db[model]), and its schema check compares that same name against real
-  // table names. So the Prisma model, the Prisma client property and the
-  // physical table must all read `auth_user`. Naming the model AuthUser and
-  // mapping it to auth_user fails twice over — the check reports the table
-  // missing, and the adapter cannot find db['AuthUser'].
+  // The model names, which the adapter's `schema` map above resolves to the
+  // generated Drizzle tables. They are also the physical table names, which
+  // keeps one word for one thing.
   user: { modelName: 'auth_user' },
   session: { modelName: 'auth_session' },
   account: { modelName: 'auth_account' },

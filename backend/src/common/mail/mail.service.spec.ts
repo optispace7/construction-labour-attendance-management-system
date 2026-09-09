@@ -1,4 +1,6 @@
 import { EMAIL_FAILING, MailService } from './mail.service';
+import { drizzleDouble } from '../../../test/drizzle-double';
+import { organizations } from '../../infra/d1/schema.generated';
 
 /**
  * A mailer that has stopped working is invisible by nature — the symptom is
@@ -19,13 +21,11 @@ function isDeferral(e: unknown): boolean {
 }
 
 function build(sendMail: jest.Mock, verify = jest.fn().mockResolvedValue(true)) {
-  const notifications: jest.Mock = jest.fn().mockResolvedValue({});
-  const cleared: jest.Mock = jest.fn().mockResolvedValue({ count: 1 });
-  const prisma: any = {
-    organization: { findMany: jest.fn().mockResolvedValue([{ id: 'org1' }, { id: 'org2' }]) },
-    notification: { create: notifications, updateMany: cleared },
-  };
-  const svc = new MailService(prisma);
+  const db = drizzleDouble([[organizations, [{ id: 'org1' }, { id: 'org2' }]]]);
+  // The alarm rows the service writes, and the standing ones it clears.
+  const notifications = db.db.values;
+  const cleared = db.db.set;
+  const svc = new MailService({ db: db.db } as never);
   // Swap the real transport for a double. MailService owns the policy — the
   // deferral retry and the admin-panel alarm — and that is what these tests
   // are about; how bytes leave the process is the transport's business and
@@ -44,7 +44,7 @@ function build(sendMail: jest.Mock, verify = jest.fn().mockResolvedValue(true)) 
   });
   // Nobody should sit through the real backoff to watch a retry.
   Object.defineProperty(svc, 'retryDelayMs', { value: 0, writable: true });
-  return { svc, notifications, cleared, prisma };
+  return { svc, notifications, cleared, db };
 }
 
 /** A refusal carries the SMTP reply code the way nodemailer reports it. */
@@ -76,12 +76,13 @@ describe('MailService', () => {
     await svc.send(['a@b.com'], 'subject', 'body');
 
     expect(notifications).toHaveBeenCalledTimes(2);
-    const first = notifications.mock.calls[0][0].data;
+    const first = notifications.mock.calls[0][0];
     expect(first.type).toBe(EMAIL_FAILING);
     expect(first.organizationId).toBe('org1');
     // The admin is told what to do about it, not just that it broke.
     expect(first.body).toMatch(/app password/i);
-    expect(first.data.credentialProblem).toBe(true);
+    // The payload is text on SQLite, so it is stored serialised.
+    expect(JSON.parse(first.data).credentialProblem).toBe(true);
   });
 
   it('does not repeat the alarm for every refused message', async () => {
@@ -109,7 +110,7 @@ describe('MailService', () => {
 
   it('takes the banner down when delivery recovers', async () => {
     const sendMail = jest.fn().mockRejectedValueOnce(new Error('boom')).mockResolvedValue({});
-    const { svc, cleared } = build(sendMail);
+    const { svc, cleared, db } = build(sendMail);
 
     await svc.send(['a@b.com'], 's', 'b');
     expect(cleared).not.toHaveBeenCalled();
@@ -117,10 +118,9 @@ describe('MailService', () => {
     await svc.send(['a@b.com'], 's', 'b');
     // The alarm is a stored notification: clearing the field in memory left a
     // red banner up until somebody clicked Dismiss.
-    expect(cleared).toHaveBeenCalledWith({
-      where: { type: EMAIL_FAILING, readAt: null },
-      data: { readAt: expect.any(Date) },
-    });
+    expect(cleared).toHaveBeenCalledWith({ readAt: expect.any(Date) });
+    // ...and only the standing ones, which is what the condition names.
+    expect(db.boundValues()).toContain(EMAIL_FAILING);
   });
 
   it('does not sweep the notifications table after every ordinary send', async () => {
@@ -205,12 +205,14 @@ describe('MailService', () => {
 
     // Nobody had to be waiting on an email for this to be noticed.
     expect(notifications).toHaveBeenCalledTimes(2);
-    expect(notifications.mock.calls[0][0].data.type).toBe(EMAIL_FAILING);
+    expect(notifications.mock.calls[0][0].type).toBe(EMAIL_FAILING);
   });
 
   it('never throws out of the alarm itself', async () => {
-    const { svc, prisma } = build(jest.fn().mockRejectedValue(new Error('boom')));
-    prisma.organization.findMany.mockRejectedValue(new Error('db down'));
+    const { svc, db } = build(jest.fn().mockRejectedValue(new Error('boom')));
+    db.db.from.mockImplementation(() => {
+      throw new Error('db down');
+    });
     // The caller is already handling a failure; the alarm must not add another.
     await expect(svc.send(['a@b.com'], 's', 'b')).resolves.toBe(false);
   });

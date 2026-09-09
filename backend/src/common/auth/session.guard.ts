@@ -3,7 +3,7 @@ import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { PUBLIC_KEY } from '../rbac/rbac.decorators';
 import { Errors } from '../errors/app.exception';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { D1Service } from '../../infra/d1/d1.service';
 import { authUserFromBetterAuthSession } from './better-auth-session';
 
 /**
@@ -22,7 +22,7 @@ import { authUserFromBetterAuthSession } from './better-auth-session';
 export class SessionGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
-    private readonly prisma: PrismaService,
+    private readonly d1: D1Service,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -33,7 +33,7 @@ export class SessionGuard implements CanActivate {
     if (isPublic) return true;
 
     const req = context.switchToHttp().getRequest<Request>();
-    const user = await authUserFromBetterAuthSession(req, this.prisma);
+    const user = await authUserFromBetterAuthSession(req, this.d1);
     if (!user) throw Errors.unauthenticated();
 
     // Everything downstream — @CurrentUser, the policy guard — reads it here,

@@ -1,12 +1,12 @@
 import { Controller, Get } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Public } from '../rbac/rbac.decorators';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { D1Service } from '../../infra/d1/d1.service';
 
 @ApiTags('health')
 @Controller('health')
 export class HealthController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly d1: D1Service) {}
 
   /** Server time — the app compares this with the phone clock before punches. */
   @Public()
@@ -20,7 +20,7 @@ export class HealthController {
   async check() {
     let db = 'down';
     try {
-      await this.prisma.$queryRaw`SELECT 1`;
+      await this.d1.d1.prepare('SELECT 1').first();
       db = 'up';
     } catch {
       db = 'down';

@@ -11,8 +11,8 @@ import {
  * Field-level encryption for sensitive data (e.g. Aadhaar) using AES-256-GCM.
  * Stored blob layout: [12-byte IV][16-byte auth tag][ciphertext].
  *
- * Passwords are not hashed here — see PasswordHashService, which has Postgres
- * do it, because no password KDF fits the CPU budget this now deploys under.
+ * Passwords are not hashed here — Better Auth hashes them, with the scrypt its
+ * own verify expects. See common/better-auth/identity.service.ts.
  */
 @Injectable()
 export class CryptoService {

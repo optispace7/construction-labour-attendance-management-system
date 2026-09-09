@@ -1,6 +1,9 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { mailTransport, mailTransportName, MailMessage } from './mail-transport';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { and, eq, isNull } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { D1Service } from '../../infra/d1/d1.service';
+import { notifications, organizations } from '../../infra/d1/schema.generated';
 
 /** Notification type the admin panel watches for a broken mailer. */
 export const EMAIL_FAILING = 'EMAIL_FAILING';
@@ -53,7 +56,7 @@ export class MailService implements OnModuleInit {
   /** Held on the instance so a test can retry without waiting five seconds. */
   private readonly retryDelayMs = RETRY_DELAY_MS;
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(private readonly d1: D1Service) {
     if (!this.transport.configured) {
       this.logger.warn(`Email is not configured (${mailTransportName}) — notifications disabled`);
     }
@@ -137,11 +140,14 @@ export class MailService implements OnModuleInit {
     if (wasFailing) this.logger.log('Email delivery recovered');
 
     try {
-      const { count } = await this.prisma.notification.updateMany({
-        where: { type: EMAIL_FAILING, readAt: null },
+      const result = (await this.d1.db
+        .update(notifications)
         // No readBy: nobody read it, the mailer simply came back.
-        data: { readAt: new Date() },
-      });
+        .set({ readAt: new Date() })
+        .where(
+          and(eq(notifications.type, EMAIL_FAILING), isNull(notifications.readAt)),
+        )) as unknown as { meta?: { changes?: number } };
+      const count = result?.meta?.changes ?? 0;
       if (count > 0) this.logger.log(`Cleared ${count} standing email-delivery alarm(s)`);
     } catch (e) {
       // Same rule as raising it — the alarm must never break the caller.
@@ -175,23 +181,24 @@ export class MailService implements OnModuleInit {
     );
 
     try {
-      const orgs = await this.prisma.organization.findMany({ select: { id: true } });
+      const orgs = await this.d1.db.select({ id: organizations.id }).from(organizations);
       for (const org of orgs) {
-        await this.prisma.notification.create({
-          data: {
-            organizationId: org.id,
-            type: EMAIL_FAILING,
-            title: 'Emails are not being sent',
-            body:
-              `${reason}\n\n` +
-              (credentialProblem
-                ? 'The Gmail app password has stopped working — it is revoked whenever ' +
-                  'that account’s password is changed or 2-step verification is turned ' +
-                  'off. Issue a new one and update GMAIL_APP_PASSWORD.'
-                : 'Email delivery is failing. Reminders and alerts are not reaching anyone ' +
-                  'until it is fixed.'),
-            data: { reason, credentialProblem },
-          },
+        await this.d1.db.insert(notifications).values({
+          id: randomUUID(),
+          organizationId: org.id,
+          type: EMAIL_FAILING,
+          title: 'Emails are not being sent',
+          body:
+            `${reason}\n\n` +
+            (credentialProblem
+              ? 'The Gmail app password has stopped working — it is revoked whenever ' +
+                'that account’s password is changed or 2-step verification is turned ' +
+                'off. Issue a new one and update GMAIL_APP_PASSWORD.'
+              : 'Email delivery is failing. Reminders and alerts are not reaching anyone ' +
+                'until it is fixed.'),
+          // Serialised: the column is text on SQLite.
+          data: JSON.stringify({ reason, credentialProblem }),
+          createdAt: new Date(),
         });
       }
       this.logger.warn(`Raised an email-delivery alarm on ${orgs.length} organization(s)`);
