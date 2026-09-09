@@ -27,7 +27,11 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const src = readFileSync('prisma/schema.prisma', 'utf8');
+// Newlines normalised on the way in. The model and column patterns below are
+// anchored per line, and on a Windows checkout this file arrives with CRLF —
+// which quietly matched 28 of the 35 models and produced a schema missing most
+// of its columns. A generator that half-works is worse than one that fails.
+const src = readFileSync('prisma/schema.prisma', 'utf8').replaceAll('\r\n', '\n');
 
 const enums = new Set([...src.matchAll(/^enum\s+(\w+)\s*\{/gm)].map((m) => m[1]));
 const models = [...src.matchAll(/^model\s+(\w+)\s*\{([\s\S]*?)^\}/gm)];

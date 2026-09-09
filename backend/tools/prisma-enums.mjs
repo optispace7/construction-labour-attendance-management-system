@@ -10,7 +10,9 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const schema = readFileSync('prisma/schema.prisma', 'utf8');
+// Normalised for the same reason the Drizzle generator does it: these patterns
+// are anchored per line, and a Windows checkout brings CRLF.
+const schema = readFileSync('prisma/schema.prisma', 'utf8').replaceAll('\r\n', '\n');
 const header = `/**
  * The enums the Prisma client used to export.
  *

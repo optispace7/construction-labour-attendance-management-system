@@ -1,12 +1,23 @@
-// CLAMS Prisma schema — implements docs/02-database-schema.md
+// CLAMS data model — implements docs/02-database-schema.md
+//
+// Prisma is no longer part of this project. The application runs on D1 through
+// Drizzle, and neither the client nor the CLI is installed. This file stays
+// because it is still the one description of the shape of this data, and two
+// generators read it as text:
+//
+//   node tools/prisma-to-drizzle.mjs  ->  src/infra/d1/schema.generated.ts
+//   node tools/prisma-enums.mjs       ->  src/common/enums.ts
+//
+// So it is edited here and then regenerated; nothing executes it and nothing
+// connects to the url below. The generator and datasource blocks are kept only
+// because the format demands them.
+//
+// migrations/ is the Postgres history, kept as a record. Part of it cannot be
+// expressed here — the partial unique indexes exist only as raw SQL in there —
+// so that directory is worth reading before assuming this file is the whole
+// story.
 generator client {
-  provider        = "prisma-client-js"
-  binaryTargets   = ["native", "linux-musl-openssl-3.0.x"]
-  // Lets the client talk to Postgres through a plain JS driver instead of the
-  // Rust query engine. The engine is a native binary, so it cannot run on a
-  // runtime that only loads JS and WebAssembly; the adapter is what makes the
-  // same code work both on a normal Node server and on that kind of runtime.
-  previewFeatures = ["driverAdapters"]
+  provider = "prisma-client-js"
 }
 
 datasource db {

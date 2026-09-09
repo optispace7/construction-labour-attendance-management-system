@@ -91,3 +91,13 @@ backend/.worker-secrets.local.json
 CLAMS.apk.local
 admin/.open-next/
 admin/worker-configuration.d.ts
+
+# tsc emits beside the source for anything outside src/, because the Node
+# tsconfig has no `include` and sweeps up the whole directory. Those artifacts
+# are not source and must not be committed.
+/backend/drizzle.config.js
+/backend/drizzle.config.d.ts
+/backend/drizzle.config.js.map
+/backend/spike-d1/*.js
+/backend/spike-d1/*.d.ts
+/backend/spike-d1/*.js.map
