@@ -34,7 +34,16 @@
     // ioredis holds a TCP connection open and heals itself on timers. Neither
     // survives an isolate that is frozen between requests, so this one issues
     // each command as an ordinary HTTPS call to Upstash's REST endpoint.
-    "./redis-client": "./dist-workers/infra/redis/redis-client.workers.js"
+    "./redis-client": "./dist-workers/infra/redis/redis-client.workers.js",
+    // pdfkit's default build reads the base-14 font metrics off disk —
+    // `fs.readFileSync(__dirname + '/data/Helvetica.afm')` — the moment a
+    // document picks a font. There is no __dirname and no disk here, so every
+    // PDF threw "ReferenceError: __dirname is not defined" and the panel showed
+    // "Internal server error". The standalone build is the same library with
+    // those metrics inlined at pack time, which is what a runtime without a
+    // filesystem needs. CSV and XLSX never touched this, which is why the
+    // breakage was confined to the PDF button.
+    "pdfkit": "./node_modules/pdfkit/js/pdfkit.standalone.js"
   },
 
   // The three background monitors cannot use setInterval here — a timer set

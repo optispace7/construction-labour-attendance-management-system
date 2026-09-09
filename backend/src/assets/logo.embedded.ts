@@ -539,12 +539,21 @@ export const LOGO_PNG_BASE64 =
   '+fMvy7o88NEAAACwJcEOfBbjybIsb3zYAFRYl6df+lsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
   'AAAAAAAAAAAAAAAAlhr/AL8ektlIs6/wAAAAAElFTkSuQmCC';
 
-/** Decoded once per isolate; the renderer asks for it on every report. */
-let decoded: Buffer | null = null;
+/**
+ * The wordmark as a data URI, which is one of the three shapes pdfkit accepts
+ * for an image.
+ *
+ * Not a Buffer, deliberately. On Workers pdfkit is the standalone build (see
+ * the alias in wrangler.jsonc), and that bundle carries its own copy of the
+ * `buffer` shim: `Buffer.isBuffer(ourBuffer)` is false inside it, because the
+ * two classes are different classes. pdfkit then treats the argument as a file
+ * path and reaches for `fs.readFileSync`, which is how a decorative logo took
+ * every PDF report down with "fs.readFileSync is not a function".
+ *
+ * A string crosses that boundary intact.
+ */
+const dataUri = `data:image/png;base64,${LOGO_PNG_BASE64}`;
 
-export function logoBytes(): Buffer {
-  if (decoded === null) {
-    decoded = Buffer.from(LOGO_PNG_BASE64, 'base64');
-  }
-  return decoded;
+export function logoBytes(): string {
+  return dataUri;
 }

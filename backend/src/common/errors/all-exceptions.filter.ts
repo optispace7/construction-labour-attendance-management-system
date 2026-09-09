@@ -57,7 +57,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
         meta: Array.isArray(message) ? { errors: message } : undefined,
       };
     } else {
-      this.logger.error(exception);
+      // The stack, not just the message. An unexpected error is the one case
+      // where the log is all there is to go on, and "ReferenceError: __dirname
+      // is not defined" without a frame under it says nothing about which of
+      // the bundled libraries reached for it.
+      this.logger.error(
+        exception instanceof Error ? (exception.stack ?? exception.message) : exception,
+      );
     }
 
     body.instance = req.originalUrl;

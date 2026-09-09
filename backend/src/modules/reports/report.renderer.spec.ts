@@ -8,6 +8,7 @@ import {
   renderManpowerPdf,
   renderPdf,
 } from './report.renderer';
+import { logoBytes } from '../../assets/logo.embedded';
 
 /**
  * The text of a PDF's content streams. PDFKit deflates them, so each candidate
@@ -233,5 +234,25 @@ describe('renderManpowerPdf', () => {
       'Sunrise Constructions Pvt Ltd',
     );
     expect(buf.subarray(0, 5).toString()).toBe('%PDF-');
+  });
+});
+
+/**
+ * The wordmark has to reach pdfkit as a string.
+ *
+ * On Workers pdfkit is the standalone bundle, which carries its own copy of the
+ * `buffer` shim: a Buffer built by the runtime is not a Buffer to it, so it
+ * treats the argument as a filename and calls fs.readFileSync, which does not
+ * exist there. Every PDF — reports, the safety board, the day summary — came
+ * back as "Internal server error" until the logo stopped being a Buffer.
+ *
+ * Node has a filesystem and one Buffer class, so no rendering test here can
+ * fail on that. This asserts the shape instead.
+ */
+describe('the embedded wordmark', () => {
+  it('is a data URI, not a Buffer', () => {
+    const logo = logoBytes();
+    expect(typeof logo).toBe('string');
+    expect(logo.startsWith('data:image/png;base64,')).toBe(true);
   });
 });

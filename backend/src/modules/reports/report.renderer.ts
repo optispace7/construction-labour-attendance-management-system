@@ -344,7 +344,7 @@ type Doc = PDFKit.PDFDocument;
 /** Optispace wordmark, ~2.58:1. Embedded — see logo.embedded.ts for why. */
 const LOGO_RATIO = 1129 / 437;
 
-function loadLogo(): Buffer | null {
+function loadLogo(): string | null {
   return logoBytes();
 }
 
