@@ -100,9 +100,6 @@ jobs:
 
       - run: npm ci
 
-      # The Prisma client has to exist before anything typechecks against it.
-      - run: npx prisma generate
-
       # Guard rails, not ceremony: this deploys straight to production, so a
       # broken build should fail here rather than at the first request.
       - run: npx tsc --noEmit
@@ -292,6 +289,12 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          # Pinned, because mobile/ has no package.json for the action to read
+          # a version out of — so it falls back to its own default, which is
+          # wrangler 3, where `--remote` does not exist and the publish fails
+          # with "Unknown argument: remote". The api and admin jobs happen to
+          # avoid this by running where wrangler is a devDependency.
+          wranglerVersion: "4.129.0"
           workingDirectory: mobile
           command: >-
             r2 object put clams-media/apk/CLAMS.apk
