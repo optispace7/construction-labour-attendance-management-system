@@ -16,7 +16,7 @@ name: Deploy Workers
 # goes, that job goes with it.
 #
 # Needs one repository secret:
-#   CLOUDFLARE_API_TOKEN  — "Edit Cloudflare Workers", plus Hyperdrive read and
+#   CLOUDFLARE_API_TOKEN  — "Edit Cloudflare Workers", plus D1 write and
 #                           R2 **write**, scoped to the CLAMS account. Write, not
 #                           read: the APK is published by uploading it to the
 #                           media bucket, which /download then streams.
@@ -40,7 +40,12 @@ on:
         type: choice
         options: [all, api, admin, apk]
   push:
-    branches: [main]
+    # The branch this is actually deployed from. Production has run off
+    # spike/better-auth since the move to Cloudflare — it is 43 commits ahead
+    # of main, which still describes the Azure deployment — so a workflow that
+    # only watched main would never fire on a real push. Drop the second entry
+    # once this merges.
+    branches: [main, spike/better-auth]
     paths:
       - "backend/**"
       - "admin/**"

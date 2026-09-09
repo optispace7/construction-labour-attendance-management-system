@@ -18,7 +18,6 @@ import { INestApplication, ValidationPipe, VersioningType } from '@nestjs/common
 import { ExpressAdapter } from '@nestjs/platform-express';
 import express from 'express';
 import { httpServerHandler } from 'cloudflare:node';
-import { env } from 'cloudflare:workers';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter';
 import { RequestIdMiddleware } from './common/errors/request-id.middleware';
@@ -33,28 +32,7 @@ import { DocumentExpiryMonitor } from './modules/company-documents/document-expi
  */
 const PORT = 8080;
 
-/**
- * Point DATABASE_URL at Hyperdrive.
- *
- * Hyperdrive hands out a connection string that is only valid inside this
- * Worker; it terminates at a pool kept warm next to the database, so the
- * driver skips a TLS and auth handshake it would otherwise pay on every cold
- * connection. Injecting it into the environment — rather than teaching
- * PrismaService about bindings — keeps that service identical on both runtimes.
- *
- * Without the binding the app falls back to DATABASE_URL as given, which is
- * what local development uses.
- */
-function useHyperdriveIfBound(): void {
-  const hyperdrive = (env as unknown as { HYPERDRIVE?: { connectionString?: string } }).HYPERDRIVE;
-  if (hyperdrive?.connectionString) {
-    process.env.DATABASE_URL = hyperdrive.connectionString;
-  }
-}
-
 async function bootstrap() {
-  useHyperdriveIfBound();
-
   // The adapter is passed in rather than discovered. NestFactory otherwise
   // resolves @nestjs/platform-express through a runtime require that a bundler
   // cannot follow, and the resulting undefined surfaces only at boot.

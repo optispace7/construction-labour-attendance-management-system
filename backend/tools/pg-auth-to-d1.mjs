@@ -16,16 +16,20 @@
  *   node tools/pg-auth-to-d1.mjs > /tmp/auth.sql
  *   npx wrangler d1 execute clams-d1 --remote --file /tmp/auth.sql
  */
-import { readFileSync } from 'node:fs';
 import pg from 'pg';
 
-const url = (() => {
-  const fromEnv = process.env.DATABASE_URL;
-  if (fromEnv) return fromEnv;
-  const line = readFileSync('.dev.vars', 'utf8').match(/^DATABASE_URL=(.*)$/m);
-  if (!line) throw new Error('No DATABASE_URL in the environment or .dev.vars');
-  return line[1].trim().replace(/^["']|["']$/g, '');
-})();
+// Given deliberately, never discovered. This migration has been run; D1 is the
+// only database now, and a tool that could still find a Postgres URL lying
+// around in local config is a tool that could be run by accident.
+//
+//   DATABASE_URL=postgres://... node tools/pg-auth-to-d1.mjs > auth.sql
+const url = process.env.DATABASE_URL;
+if (!url) {
+  throw new Error(
+    'Set DATABASE_URL explicitly to run this. It is a one-off migration that ' +
+      'has already been done — see the commit that moved Better Auth to D1.',
+  );
+}
 
 /**
  * SQL literal.

@@ -47,11 +47,6 @@
   "vars": {
     "NODE_ENV": "production",
     "DISABLE_INTERVAL_MONITORS": "1",
-    // Reaches Postgres through the pg driver rather than Prisma's Rust query
-    // engine, which cannot be loaded here.
-    "DATABASE_DRIVER_ADAPTER": "1",
-    // Evaluation only. With this unset the Better Auth routes do not exist
-    // and the existing /api/v1/auth/* is the only way in.
     "BETTER_AUTH_ENABLED": "1",
     "BETTER_AUTH_URL": "https://clams-api.opticspace09.workers.dev",
     // Hosts a password-reset link may point at. The panel is the only one.
@@ -59,20 +54,19 @@
   },
 
   // Secrets are NOT set here — they go in via `wrangler secret put`:
-  //   DATABASE_URL, JWT_ACCESS_SECRET, JWT_REFRESH_SECRET,
-  //   DATA_ENCRYPTION_KEY, GMAIL_USER, GMAIL_APP_PASSWORD,
-  //   FIREBASE_SERVICE_ACCOUNT
-
-  // Postgres connection pooling and edge-side connection setup, in front of
-  // Supabase (ap-south-1). The Worker never sees the real credentials — the
-  // binding hands out a connection string valid only inside it.
-  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "60c96c9a2e4249c8b105d8a499ac8d5c" }],
+  //   DATA_ENCRYPTION_KEY, BETTER_AUTH_SECRET, GMAIL_USER, GMAIL_APP_PASSWORD,
+  //   FIREBASE_SERVICE_ACCOUNT, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
+  //
+  // There is deliberately no DATABASE_URL among them. D1 is the only database,
+  // and it arrives as a binding rather than a connection string — so a Worker
+  // that somehow tried to open Postgres would have nowhere to connect to.
 
   // Worker and Aadhaar photos, and the APK the admin panel serves. The APK
   // cannot be a static asset: those are capped at 25 MiB and it is 72 MB.
   // The application database. Hyperdrive and its Postgres stay declared for
   // now so a rollback is a config change rather than a redeploy of code that
   // no longer exists.
+  // The database. The only one.
   "d1_databases": [
     { "binding": "DB", "database_name": "clams-d1", "database_id": "13ee2585-428a-4a94-a5d2-a6f83f2d061f" }
   ],
