@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Prisma, UserRole } from '@prisma/client';
+import { UserRole } from '../../common/enums';
 import { and, eq, inArray, isNull, lt } from 'drizzle-orm';
 import { D1Service } from '../../infra/d1/d1.service';
 import {
@@ -163,7 +163,8 @@ export class ForgotLogoutMonitor implements OnModuleInit, OnModuleDestroy {
         title,
         body,
         siteId: null,
-        data: { sessions, autoClosed: false } as unknown as Prisma.InputJsonValue,
+        // NotificationsService serialises this; the column is text on SQLite.
+        data: { sessions, autoClosed: false },
       });
 
       // Missed-logout alerts go to Admins + Safety Officers (not the Super Admin).
