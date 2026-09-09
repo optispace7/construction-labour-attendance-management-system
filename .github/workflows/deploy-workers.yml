@@ -100,6 +100,12 @@ jobs:
 
       - run: npm ci
 
+      # worker-configuration.d.ts is generated from wrangler.jsonc and is
+      # gitignored, so a fresh checkout has no D1Database and no
+      # `cloudflare:workers` module. Generated here rather than committed,
+      # which keeps it in step with the bindings automatically.
+      - run: npx wrangler types
+
       # Guard rails, not ceremony: this deploys straight to production, so a
       # broken build should fail here rather than at the first request.
       #
@@ -119,6 +125,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.129.0"
           workingDirectory: backend
 
       - name: Check the deployed API answers
@@ -173,6 +180,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.129.0"
           workingDirectory: admin
 
       - name: Check the panel serves its login page
@@ -294,11 +302,10 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
-          # Pinned, because mobile/ has no package.json for the action to read
-          # a version out of — so it falls back to its own default, which is
-          # wrangler 3, where `--remote` does not exist and the publish fails
-          # with "Unknown argument: remote". The api and admin jobs happen to
-          # avoid this by running where wrangler is a devDependency.
+          # Pinned on every wrangler-action in this file. Left to itself the
+          # action installs its own default — wrangler 3 — where `--remote`
+          # does not exist and the publish fails with "Unknown argument:
+          # remote". Having a local wrangler is not enough to prevent it.
           wranglerVersion: "4.129.0"
           workingDirectory: mobile
           command: >-
