@@ -34,7 +34,13 @@
     // at the deployed API Worker; from here that is an ordinary internet hop,
     // where on Azure the two containers shared a network.
     "NEXT_PUBLIC_API_BASE_URL": "https://clams-api.opticspace09.workers.dev/api/v1",
-    "API_INTERNAL_BASE_URL": "https://clams-api.opticspace09.workers.dev/api/v1"
+    "API_INTERNAL_BASE_URL": "https://clams-api.opticspace09.workers.dev/api/v1",
+    // Where /download sends people. A plain var, not a NEXT_PUBLIC_ one, and
+    // that is the point: Next inlines NEXT_PUBLIC_* at build time, so a stale
+    // .env.local on a developer's machine can bake the wrong host into a
+    // deployed build — which is exactly how this redirect once pointed at the
+    // retired Azure API. This is read at runtime, from the deployment.
+    "APK_DOWNLOAD_URL": "https://clams-api.opticspace09.workers.dev/download"
   }
 
   // Set at deploy time, not here:

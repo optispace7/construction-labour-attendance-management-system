@@ -1,62 +1,43 @@
-import { getCloudflareContext } from '@opennextjs/cloudflare';
-
 /**
- * Serves the Android APK.
+ * Sends the Android APK download to the API worker, which serves the bytes.
  *
- * The file used to sit in `public/` and be rewritten to. It cannot any more:
- * static assets are capped at 25 MiB and the APK is about 72 MB, which fails
- * the deploy outright rather than at request time.
+ * This route used to stream the file itself, out of the R2 binding, and it did
+ * not work: Next re-wrapped the response, so the reply went out chunked with
+ * the Content-Length stripped, and the body was cut short at a random size four
+ * times in six. Every one of those was an HTTP 200, so a phone saved a
+ * truncated file and Android rejected the install with nothing to explain it.
+ * The same route also answered 503 now and then, because the binding lookup
+ * came back empty.
  *
- * It is streamed from the media bucket rather than that bucket being made
- * public, because the same bucket holds worker photos and Aadhaar images — a
- * public bucket would expose those to anyone who could guess a key. Going
- * through the Worker keeps the bucket private and /download unchanged.
+ * The API worker has no framework between the R2 stream and the socket, states
+ * the length R2 reports, and supports range requests — so a short read is a
+ * failed download rather than a corrupt install. It holds the same MEDIA
+ * binding and the same private bucket; only the path to the bytes changed.
+ *
+ * The URL people already have keeps working, which is why this is a redirect
+ * rather than a note telling every site to use a different address.
  */
 export const dynamic = 'force-dynamic';
 
-const APK_KEY = 'apk/CLAMS.apk';
-
-interface MediaEnv {
-  MEDIA?: R2Bucket;
-}
-
 /**
- * The R2 binding.
+ * Where the bytes are, read from the deployment at request time.
  *
- * The context is resolved in async mode: the synchronous form is only valid
- * where the request context is already established, and returns an env without
- * bindings in a route handler — which shows up as "the file is missing" rather
- * than as a configuration error, so it is worth being explicit.
+ * Deliberately not derived from NEXT_PUBLIC_API_BASE_URL: Next inlines every
+ * NEXT_PUBLIC_ value at build time, so a stale .env.local on whichever machine
+ * ran the build decides it. That is not hypothetical — it is how this redirect
+ * first went out pointing at the retired Azure API, while the Worker's own
+ * variables said the right thing all along.
  */
-async function mediaBucket(): Promise<R2Bucket | undefined> {
-  const { env } = await getCloudflareContext({ async: true });
-  return (env as unknown as MediaEnv).MEDIA;
+function apkUrl(): string {
+  const configured = process.env.APK_DOWNLOAD_URL;
+  if (!configured) {
+    throw new Error('APK_DOWNLOAD_URL is not set on this deployment, so /download has no target.');
+  }
+  return configured;
 }
 
 export async function GET() {
-  const bucket = await mediaBucket();
-  if (!bucket) {
-    return new Response('Downloads are not configured on this deployment.', { status: 503 });
-  }
-
-  const object = await bucket.get(APK_KEY);
-  if (!object) {
-    // Upload it with `wrangler r2 object put ... --remote`. Without --remote the
-    // CLI writes to the local miniflare store, where it reads back perfectly and
-    // the deployed Worker sees nothing.
-    return new Response('The app build is not available right now.', { status: 404 });
-  }
-
-  // Passed through rather than buffered — 72 MB through a Worker's memory would
-  // be a poor way to serve a file that is only ever streamed.
-  return new Response(object.body, {
-    headers: {
-      'content-type': 'application/vnd.android.package-archive',
-      'content-disposition': 'attachment; filename="CLAMS.apk"',
-      'content-length': String(object.size),
-      // A new build replaces the object; a phone part-way through an install
-      // should not receive half of each.
-      'cache-control': 'public, max-age=86400',
-    },
-  });
+  // 302 rather than 301: the target is a deployment detail, and a permanent
+  // redirect would be cached by every phone that ever followed it.
+  return Response.redirect(apkUrl(), 302);
 }

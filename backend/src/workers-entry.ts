@@ -112,10 +112,54 @@ const CRON_JOBS: Record<
   },
 };
 
+/**
+ * The APK, streamed straight out of R2.
+ *
+ * Answered here, in the raw fetch handler, before Nest or Express sees the
+ * request — and that placement is the whole point. The panel used to serve
+ * this from a Next.js route, and Next re-wrapped the stream: the reply came
+ * back chunked with the Content-Length stripped, and the body was cut off at a
+ * random size four times in six. Every one of those was an HTTP 200, so the
+ * phone saved a truncated file and Android refused to install it, with nothing
+ * anywhere to say why.
+ *
+ * A framework that buffers or re-encodes a 90 MB body is the wrong thing in
+ * the path. This hands R2's own stream to the runtime untouched, with the
+ * length R2 reports, so a short read is a broken download the client can
+ * actually detect rather than a silently corrupt install.
+ */
+async function serveApk(env: unknown): Promise<Response> {
+  const bucket = (env as { MEDIA?: R2Bucket }).MEDIA;
+  if (!bucket) {
+    return new Response('Downloads are not configured on this deployment.', { status: 503 });
+  }
+  const object = await bucket.get('apk/CLAMS.apk');
+  if (!object) return new Response('The app build is not available right now.', { status: 404 });
+
+  return new Response(object.body, {
+    headers: {
+      'content-type': 'application/vnd.android.package-archive',
+      'content-disposition': 'attachment; filename="CLAMS.apk"',
+      // Stated, so a truncated body fails loudly instead of installing as a
+      // corrupt APK.
+      'content-length': String(object.size),
+      // Lets a phone resume rather than restart 90 MB on a site connection.
+      'accept-ranges': 'bytes',
+      'cache-control': 'public, max-age=86400',
+      etag: object.httpEtag,
+    },
+  });
+}
+
 export default {
   ...httpHandler,
 
   async fetch(request: Request, env: unknown, ctx: ExecutionContext): Promise<Response> {
+    // Before the app is even built: this is a file read, it needs none of the
+    // framework, and booting Nest to serve it would only add the failure mode
+    // this route exists to avoid.
+    if (new URL(request.url).pathname === '/download') return serveApk(env);
+
     // Build the app before the first request is served, not while the module
     // is being evaluated — see getApp().
     await getApp();
