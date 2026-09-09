@@ -102,7 +102,12 @@ jobs:
 
       # Guard rails, not ceremony: this deploys straight to production, so a
       # broken build should fail here rather than at the first request.
-      - run: npx tsc --noEmit
+      #
+      # Against the Workers config specifically. The bare tsconfig describes the
+      # Node server this used to be — it excludes the Worker entrypoint, cannot
+      # resolve `cloudflare:workers`, and sweeps in spike-d1/, so it fails on a
+      # configuration nothing deploys.
+      - run: npx tsc -p tsconfig.workers.json --noEmit
       - run: npm test -- --silent
 
       # tsc first, deliberately. Nest injects by type, which needs
