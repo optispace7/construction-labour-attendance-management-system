@@ -233,6 +233,10 @@ jobs:
       # own base is derived from it in Env, rather than being a second value
       # that could disagree with this one.
       API_URL: https://clams-api.opticspace09.workers.dev/api/v1
+      # Where a password-reset link lands. Not derivable from the API URL —
+      # different Worker, different host — and it must match the API's
+      # BETTER_AUTH_TRUSTED_ORIGINS or Better Auth refuses the redirect.
+      PANEL_URL: https://clams-admin.opticspace09.workers.dev
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -274,7 +278,10 @@ jobs:
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
       - name: Build release APK
-        run: flutter build apk --release --dart-define=API_BASE_URL=$API_URL
+        run: |
+          flutter build apk --release \
+            --dart-define=API_BASE_URL=$API_URL \
+            --dart-define=PANEL_BASE_URL=$PANEL_URL
 
       # Always keep the artifact: it is how a build is inspected or installed
       # by hand when something looks wrong with the published one.

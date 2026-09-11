@@ -123,10 +123,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 }
 
-/// Self-service password reset. Step 1 asks for the email/user ID and requests
-/// an OTP; if the backend could email a code, step 2 collects the 6-digit code
-/// plus the new password and completes the reset. Uses a plain Dio (like the
-/// SOS service) because the user is not signed in.
+/// Self-service password reset.
+///
+/// Better Auth emails a link rather than a code. The OTP endpoints this dialog
+/// used to call — /auth/forgot-password and its verify step — were part of the
+/// JWT scheme and no longer exist, so every attempt came back "Cannot POST
+/// /api/v1/auth/forgot-password" from the bare Express 404.
+///
+/// So the app now asks Better Auth to send the link and stops there. Setting
+/// the new password happens on the panel page the link opens, which is the
+/// same page the panel's own reset uses; there is no second step to do here.
+///
+/// Uses a plain Dio, like the SOS service, because the user is not signed in.
 class ForgotPasswordDialog extends StatefulWidget {
   const ForgotPasswordDialog({super.key, this.initialIdentifier = ''});
 
@@ -138,36 +146,43 @@ class ForgotPasswordDialog extends StatefulWidget {
 
 class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
   late final _identifier = TextEditingController(text: widget.initialIdentifier);
-  final _otp = TextEditingController();
-  final _newPassword = TextEditingController();
-  final _confirmPassword = TextEditingController();
 
-  final _dio = Dio(BaseOptions(baseUrl: Env.apiBaseUrl));
+  final _dio = Dio(BaseOptions(baseUrl: Env.betterAuthBaseUrl));
 
   bool _busy = false;
-  bool _otpStage = false;
+  bool _sent = false;
   String? _info;
   String? _error;
 
   @override
   void dispose() {
     _identifier.dispose();
-    _otp.dispose();
-    _newPassword.dispose();
-    _confirmPassword.dispose();
     super.dispose();
   }
 
   String _detail(DioException e, String fallback) {
     final data = e.response?.data;
-    final detail = data is Map ? (data['detail'] ?? data['title'] ?? data['message']) : null;
+    final detail = data is Map ? (data['message'] ?? data['detail'] ?? data['title']) : null;
     return detail is String && detail.isNotEmpty ? detail : (e.message ?? fallback);
   }
 
-  Future<void> _requestCode() async {
+  Future<void> _sendLink() async {
     final id = _identifier.text.trim();
     if (id.isEmpty) {
-      setState(() => _error = 'Enter your email or user ID');
+      setState(() => _error = 'Enter your email address');
+      return;
+    }
+    // Watchmen sign in with a user ID and have no mailbox — their address is a
+    // synthesised .invalid one — so there is nothing to send to. Answered here
+    // rather than by the server, which would otherwise claim a link was on its
+    // way to an address that cannot receive one.
+    if (!id.contains('@')) {
+      setState(() {
+        _sent = true;
+        _error = null;
+        _info = 'This account signs in with a user ID and has no email address. '
+            'Ask your administrator to set a new password for you.';
+      });
       return;
     }
     setState(() {
@@ -176,59 +191,27 @@ class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
       _info = null;
     });
     try {
-      final res = await _dio.post('/auth/forgot-password', data: {'identifier': id});
+      await _dio.post('/request-password-reset', data: {
+        'email': id,
+        // Where the emailed link lands. It has to be an address Better Auth
+        // trusts, and the panel's login page is the one on that list.
+        'redirectTo': '${Env.panelBaseUrl}/login',
+      });
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _info = res.data['message'] as String?;
-        _otpStage = res.data['emailSent'] == true;
+        _sent = true;
+        // Deliberately the same answer whether or not the address is known, so
+        // this cannot be used to find out who has an account.
+        _info = 'If that address has an account, a reset link is on its way. '
+            'Open it on this phone or any browser, set a new password, then '
+            'sign in here with it.';
       });
     } on DioException catch (e) {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _error = _detail(e, 'Could not request a reset code');
-      });
-    }
-  }
-
-  Future<void> _resetPassword() async {
-    final otp = _otp.text.trim();
-    final pass = _newPassword.text;
-    setState(() => _error = null);
-    if (otp.length != 6) {
-      setState(() => _error = 'Enter the 6-digit code from the email');
-      return;
-    }
-    if (pass.length < 8) {
-      setState(() => _error = 'New password must be at least 8 characters');
-      return;
-    }
-    if (pass != _confirmPassword.text) {
-      setState(() => _error = 'Passwords do not match');
-      return;
-    }
-    setState(() => _busy = true);
-    try {
-      final verify = await _dio.post('/auth/forgot-password/verify', data: {
-        'identifier': _identifier.text.trim(),
-        'otp': otp,
-      });
-      final resetToken = verify.data['resetToken'] as String;
-      await _dio.post('/auth/reset-password', data: {
-        'resetToken': resetToken,
-        'newPassword': pass,
-      });
-      if (!mounted) return;
-      Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Password changed — sign in with your new password.')),
-      );
-    } on DioException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _error = _detail(e, 'Password reset failed');
+        _error = _detail(e, 'Could not send the reset link');
       });
     }
   }
@@ -253,50 +236,25 @@ class _ForgotPasswordDialogState extends State<ForgotPasswordDialog> {
                 child: Text(_info!,
                     style: const TextStyle(color: ClamsColors.textSecondary)),
               ),
-            TextField(
-              controller: _identifier,
-              enabled: !_otpStage,
-              keyboardType: TextInputType.text,
-              decoration: const InputDecoration(labelText: 'Email or user ID'),
-            ),
-            if (_otpStage) ...[
-              ClamsSpacing.gapMd,
+            if (!_sent)
               TextField(
-                controller: _otp,
-                keyboardType: TextInputType.number,
-                maxLength: 6,
-                decoration:
-                    const InputDecoration(labelText: '6-digit code', counterText: ''),
+                controller: _identifier,
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(labelText: 'Email address'),
               ),
-              ClamsSpacing.gapMd,
-              TextField(
-                controller: _newPassword,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'New password'),
-              ),
-              ClamsSpacing.gapMd,
-              TextField(
-                controller: _confirmPassword,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'Confirm new password'),
-              ),
-            ],
           ],
         ),
       ),
       actions: [
         TextButton(
           onPressed: _busy ? null : () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
+          child: Text(_sent ? 'Close' : 'Cancel'),
         ),
-        FilledButton(
-          onPressed: _busy ? null : (_otpStage ? _resetPassword : _requestCode),
-          child: Text(_busy
-              ? 'Please wait…'
-              : _otpStage
-                  ? 'Reset password'
-                  : 'Send code'),
-        ),
+        if (!_sent)
+          FilledButton(
+            onPressed: _busy ? null : _sendLink,
+            child: Text(_busy ? 'Please wait…' : 'Send reset link'),
+          ),
       ],
     );
   }

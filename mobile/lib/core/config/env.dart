@@ -15,4 +15,16 @@ class Env {
   /// environment and half at another.
   static String get betterAuthBaseUrl =>
       apiBaseUrl.replaceFirst(RegExp(r'/api/v\d+/?$'), '/api/better-auth');
+
+  /// The admin panel, which is where a password-reset link has to land.
+  ///
+  /// This one cannot be derived from the API URL: the panel is a different
+  /// Worker on a different host, and guessing at its name by string surgery
+  /// would break the day either is renamed. It is also not free-form — Better
+  /// Auth refuses a redirect target that is not on its trusted-origins list,
+  /// so this must match BETTER_AUTH_TRUSTED_ORIGINS on the API.
+  static const panelBaseUrl = String.fromEnvironment(
+    'PANEL_BASE_URL',
+    defaultValue: 'https://clams-admin.opticspace09.workers.dev',
+  );
 }
