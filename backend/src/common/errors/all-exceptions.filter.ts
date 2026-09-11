@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AppException } from './app.exception';
+import { constraintFailure } from './d1-constraint';
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -26,6 +27,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
       status,
       code: 'INTERNAL',
     };
+
+    // A constraint failure is a real answer, not an internal error. Translated
+    // before the generic branches so a duplicate code reaches the panel as
+    // "already in use" rather than the 500 it used to be.
+    const constraint = exception instanceof AppException ? null : constraintFailure(exception);
+    if (constraint) exception = constraint;
 
     if (exception instanceof AppException) {
       status = exception.getStatus();

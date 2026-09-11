@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -30,7 +30,20 @@ export interface TestD1 {
   dispose(): Promise<void>;
 }
 
-const SCHEMA = join(__dirname, '..', 'drizzle', '0000_blue_magus.sql');
+/**
+ * Every migration, in order, not just the first one.
+ *
+ * This used to load 0000 alone, which left the compound unique indexes out —
+ * they arrive in 0001. So a test could insert two vendors with the same code,
+ * or two taps with the same idempotency key, and pass, while D1 refused the
+ * second one. The indexes are the constraint being relied on; a harness
+ * without them proves the opposite of what it looks like it proves.
+ *
+ * The later files are data cleanups whose DELETEs match nothing in an empty
+ * database, so replaying everything costs nothing and keeps this in step as
+ * migrations are added.
+ */
+const MIGRATIONS = join(__dirname, '..', 'drizzle');
 
 type Row = Record<string, unknown>;
 
@@ -45,8 +58,11 @@ export async function createTestD1(): Promise<TestD1> {
   // Off by default in SQLite, on in D1 — a test relying on a foreign key would
   // otherwise pass here and fail in production.
   sqlite.exec('PRAGMA foreign_keys = ON');
-  for (const stmt of readFileSync(SCHEMA, 'utf8')
-    .split('--> statement-breakpoint')
+  const files = readdirSync(MIGRATIONS)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+  for (const stmt of files
+    .flatMap((f) => readFileSync(join(MIGRATIONS, f), 'utf8').split('--> statement-breakpoint'))
     .map((s) => s.trim())
     .filter(Boolean)) {
     sqlite.exec(stmt);
