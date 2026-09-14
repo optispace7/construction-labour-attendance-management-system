@@ -7,7 +7,7 @@ import '../../../app/theme.dart';
 import '../attendance_providers.dart';
 import '../domain/models.dart';
 
-/// Manual backup search (lost card): search cached workers by name/code,
+/// Manual backup search (lost card): searches the server by name or code and
 /// returns the selected worker. A reason is collected by the caller.
 class ManualSearchSheet extends ConsumerStatefulWidget {
   const ManualSearchSheet({super.key});
@@ -21,6 +21,10 @@ class _ManualSearchSheetState extends ConsumerState<ManualSearchSheet> {
   Timer? _debounce;
   bool _searching = false;
 
+  /// The last search could not reach the server. Said instead of "nobody
+  /// found", which would send the watchman looking for a typo that is not there.
+  bool _offline = false;
+
   @override
   void dispose() {
     _debounce?.cancel();
@@ -30,7 +34,10 @@ class _ManualSearchSheetState extends ConsumerState<ManualSearchSheet> {
   void _onChanged(String q) {
     _debounce?.cancel();
     if (q.trim().length < 2) {
-      setState(() => _results = []);
+      setState(() {
+        _results = [];
+        _offline = false;
+      });
       return;
     }
     _debounce = Timer(const Duration(milliseconds: 300), () => _runSearch(q.trim()));
@@ -41,7 +48,8 @@ class _ManualSearchSheetState extends ConsumerState<ManualSearchSheet> {
     final results = await ref.read(attendanceRepositoryProvider).search(q);
     if (!mounted) return;
     setState(() {
-      _results = results;
+      _results = results ?? [];
+      _offline = results == null;
       _searching = false;
     });
   }
@@ -82,8 +90,15 @@ class _ManualSearchSheetState extends ConsumerState<ManualSearchSheet> {
             child: _results.isEmpty
                 ? Center(
                     child: Text(
-                      _searching ? 'Searching…' : 'Type a name or ID to search',
-                      style: const TextStyle(color: ClamsColors.textSecondary),
+                      _searching
+                          ? 'Searching…'
+                          : _offline
+                              ? 'No internet — search needs a connection'
+                              : 'Type a name or ID to search',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: _offline ? ClamsColors.error : ClamsColors.textSecondary,
+                      ),
                     ),
                   )
                 : ListView.builder(

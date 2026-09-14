@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import '../../../app/theme.dart';
 import '../../../core/widgets/api_image.dart';
 import '../domain/models.dart';
-import '../domain/tap_decision.dart';
 
 /// Shown when a scan is refused for being too close to the last one — either
 /// inside the duplicate cooldown (seconds) or inside the site's safety gap

@@ -37,7 +37,8 @@ class ClockGuard {
       _checkedAt = now;
       return _skewMs;
     } catch (_) {
-      // Offline — can't verify; offline punches are allowed by design.
+      // Offline — can't verify. Not a reason to refuse here: the scan itself
+      // needs the server and will say there is no connection.
       return null;
     }
   }

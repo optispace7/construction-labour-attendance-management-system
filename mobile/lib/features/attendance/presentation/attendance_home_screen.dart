@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -13,7 +11,6 @@ import '../data/attendance_repository.dart';
 import '../../auth/auth_controller.dart';
 import '../../device/device_service.dart';
 import '../domain/models.dart';
-import '../domain/tap_decision.dart';
 import '../../sos/notification_watcher.dart';
 import '../../sos/sos_button.dart';
 import 'worker_card_sheet.dart';
@@ -35,100 +32,61 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
   bool _busy = false;
   String _status = 'Scan a worker QR badge to begin';
 
-  /// The site's scanning rules from the admin panel — duplicate cooldown and
-  /// safety gap. Loaded from the local cache on entry and refreshed from the
-  /// server, so an admin changing them takes effect without a new build. The
-  /// initial value only stands until [_init] reads the cache.
-  ScanPolicy _policy = const ScanPolicy();
-
   DeviceState? _deviceState;
   String? _deviceId;
-  Timer? _syncTimer;
-  DateTime _lastCacheRefresh = DateTime.fromMillisecondsSinceEpoch(0);
 
-  static const _cacheRefreshEvery = Duration(hours: 4);
+  /// Scans an offline build of the app saved on this phone and has not sent
+  /// yet. Null until checked, which happens once the device is approved.
+  int? _unsent;
+
+  /// Scanning waits for two things. An approved device, so the first scan is
+  /// not refused on a device token still being set up — which is how the
+  /// confirm screen once offered LOGIN to a worker the server logged out. And
+  /// no saved scans left, so a new scan is never decided before an older one
+  /// for the same person has reached the server.
+  bool get _ready =>
+      _siteId != null &&
+      _deviceId != null &&
+      _deviceState == DeviceState.authorized &&
+      _unsent == 0;
 
   @override
   void initState() {
     super.initState();
     Future.microtask(_init);
-    // Drain the outbox in the background so punches reach the server even if
-    // the immediate push failed (network blip, server briefly down).
-    _syncTimer = Timer.periodic(const Duration(seconds: 60), (_) => _backgroundSync());
-  }
-
-  @override
-  void dispose() {
-    _syncTimer?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _backgroundSync() async {
-    await ref.read(syncEngineProvider).syncNow();
-    if (mounted) ref.invalidate(pendingCountProvider);
-    // Periodic worker-cache refresh so deleted/edited workers don't go stale.
-    if (DateTime.now().difference(_lastCacheRefresh) > _cacheRefreshEvery) {
-      await _refreshWorkerCache();
-    }
-  }
-
-  /// Re-pulls the site's worker list and replaces the offline cache, dropping
-  /// entries for deleted/exited people.
-  Future<void> _refreshWorkerCache() async {
-    if (_siteId == null) return;
-    try {
-      final dio = ref.read(apiClientProvider).dio;
-      final res = await dio.get('/workers/by-site', queryParameters: {'siteId': _siteId});
-      final data = (res.data['data'] as List).cast<Map<String, dynamic>>();
-      await ref.read(localDbProvider).replaceWorkers(data.map(WorkerCard.fromMap).toList());
-      // Who is already logged in, org-wide — including logins recorded on other
-      // devices. Without this a handset that goes offline would offer a fresh
-      // LOGIN to someone another gate already scanned in.
-      await ref.read(attendanceRepositoryProvider).refreshOpenSessions();
-      await _refreshPolicy();
-      _lastCacheRefresh = DateTime.now();
-    } catch (_) {
-      // Offline — keep the existing cache; retried on the next cycle.
-    }
-  }
-
-  /// Re-read the site's cooldown and safety gap, then hold them for the scans
-  /// this screen makes. Cached, so a device that loses the network keeps
-  /// enforcing the last rules the admin set rather than falling back to guesses.
-  Future<void> _refreshPolicy() async {
-    if (_siteId == null) return;
-    final repo = ref.read(attendanceRepositoryProvider);
-    await repo.refreshPolicy(_siteId!);
-    final policy = await repo.policy();
-    if (mounted) setState(() => _policy = policy);
   }
 
   Future<void> _init() async {
     final db = ref.read(localDbProvider);
     final siteId = await db.getMeta('active_site');
     final name = await db.getMeta('active_site_name') ?? '';
-    final policy = await ref.read(attendanceRepositoryProvider).policy();
+    if (!mounted) return;
     setState(() {
       _siteId = siteId;
       _siteName = name;
-      _policy = policy;
     });
-    await _ensureDevice();
-    // Kick a sync + fresh worker cache on entry (app start).
-    ref.read(syncEngineProvider).syncNow();
-    unawaited(_refreshWorkerCache());
+    await _prepare();
   }
 
-  Future<void> _ensureDevice() async {
+  Future<void> _prepare() async {
     final st = await ref.read(deviceServiceProvider).ensureRegisteredAndAuthorized();
     if (!mounted) return;
     setState(() {
       _deviceState = st.state;
       _deviceId = st.deviceId;
     });
+    if (st.state == DeviceState.authorized) await _sendSaved();
+  }
+
+  Future<void> _sendSaved() async {
+    final deviceId = _deviceId;
+    if (deviceId == null) return;
+    final left = await ref.read(legacyOutboxDrainProvider).drain(deviceId);
+    if (mounted) setState(() => _unsent = left);
   }
 
   Future<void> _onManual() async {
+    if (!_ready) return;
     final picked = await showModalBottomSheet<WorkerCard>(
       context: context,
       isScrollControlled: true,
@@ -138,7 +96,7 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     final reason = await _askReason();
     if (reason == null) return;
     await _handleTap(TapSource.manual, picked.workerCode,
-        manualBackup: true, manualReason: reason);
+        worker: picked, manualBackup: true, manualReason: reason);
   }
 
   Future<String?> _askReason() {
@@ -172,7 +130,7 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
   /// at the gate was read again and again until the cooldown lapsed, and the
   /// read that got through scanned him back out a minute after he arrived.
   Future<void> _onQr() async {
-    if (_siteId == null) return;
+    if (!_ready) return;
     if (await _clockIsWrong()) return;
     if (!mounted) return;
     await Navigator.of(context).push<void>(
@@ -180,19 +138,18 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     );
   }
 
-  /// Handles one scanned badge: preview (writes nothing) → confirm → record.
-  /// Returns what the camera screen should show the watchman.
+  /// Handles one scanned badge: the server's preview (writes nothing) → confirm
+  /// → record. Returns what the camera screen should show the watchman.
   Future<ScanFeedback?> _reviewScan(String code) async {
     // QR badges are "CLAMS:<EMP-ID>"; accept a bare code too.
     final identifier = (code.startsWith('CLAMS:') ? code.substring(6) : code).trim();
-    if (identifier.isEmpty) return null;
+    if (identifier.isEmpty || !_ready) return null;
 
     setState(() => _busy = true);
     final outcome = await ref.read(attendanceRepositoryProvider).preview(
           siteId: _siteId!,
           source: TapSource.qr,
           identifier: identifier,
-          policy: _policy,
         );
     if (!mounted) return null;
     setState(() => _busy = false);
@@ -215,6 +172,11 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
           detail: 'Login not recorded. Renew the card.',
         );
 
+      case TapAction.notFound:
+      case TapAction.offline:
+      case TapAction.failed:
+        return _notRecorded(outcome, asDialog: false);
+
       // Neither can arise from a badge scan — both belong to hand-typed entry,
       // which never comes through here. Listed so the switch stays exhaustive.
       case TapAction.pendingApproval:
@@ -223,22 +185,19 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
 
       case TapAction.login:
       case TapAction.logout:
+        final worker = outcome.worker;
+        if (worker == null) return _notRecorded(outcome, asDialog: false);
         // One screen: the worker's details AND the OK/Cancel decision.
         final ok = await showDialog<bool>(
           context: context,
           barrierDismissible: false,
-          builder: (_) => ConfirmTapDialog(
-            action: outcome.action,
-            identifier: identifier,
-            worker: outcome.worker,
-            stateIsStale: outcome.stateIsStale,
-          ),
+          builder: (_) => ConfirmTapDialog(action: outcome.action, worker: worker),
         );
         if (ok != true) {
           if (mounted) setState(() => _status = 'Cancelled — nothing recorded');
           return const ScanFeedback.info('Cancelled', detail: 'Nothing was recorded.');
         }
-        return _handleTap(TapSource.qr, identifier);
+        return _handleTap(TapSource.qr, identifier, worker: worker);
     }
   }
 
@@ -298,6 +257,7 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     return _handleTap(
       source,
       identifier,
+      worker: outcome.worker,
       overridden: true,
       manualBackup: manualBackup,
       manualReason: manualReason,
@@ -305,7 +265,7 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
   }
 
   /// A wrong phone clock would record punches at the wrong time — refuse the
-  /// scan while online with >10 min skew. (Offline punches are allowed.)
+  /// scan while the phone and server disagree by more than 10 minutes.
   Future<bool> _clockIsWrong() async {
     if (!await ref.read(clockGuardProvider).clockIsWrong()) return false;
     if (!mounted) return true;
@@ -326,6 +286,39 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
       ),
     );
     return true;
+  }
+
+  /// Nothing was recorded — no connection, a badge nobody owns, or a refusal
+  /// the gate has no dialog for. Said in the camera banner for a scan, and in a
+  /// dialog for a typed entry, which has no banner to say it in.
+  Future<ScanFeedback> _notRecorded(TapOutcome outcome, {required bool asDialog}) async {
+    final (title, detail) = switch (outcome.action) {
+      TapAction.offline => (
+          'No internet — nothing recorded',
+          outcome.message ??
+              'Write it in the paper register. It can be entered later as a correction.',
+        ),
+      TapAction.notFound => (
+          'Unknown badge — nothing recorded',
+          'This badge does not belong to anyone active on the register.',
+        ),
+      _ => ('Not recorded', outcome.message ?? 'The server refused this scan.'),
+    };
+    setState(() => _status = title);
+    if (asDialog) {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          icon: const Icon(Icons.cloud_off, color: ClamsColors.error, size: 40),
+          title: Text(title),
+          content: Text(detail),
+          actions: [
+            FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+          ],
+        ),
+      );
+    }
+    return ScanFeedback.error(title, detail: detail);
   }
 
   /// Say plainly that nothing has been recorded yet. The watchman has just typed
@@ -386,26 +379,25 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
   Future<ScanFeedback?> _handleTap(
     TapSource source,
     String identifier, {
+    WorkerCard? worker,
     bool manualBackup = false,
     String? manualReason,
     bool overridden = false,
   }) async {
-    if (_siteId == null) return null;
+    if (!_ready) return null;
     if (source != TapSource.qr && await _clockIsWrong()) return null;
 
     setState(() => _busy = true);
-    final repo = ref.read(attendanceRepositoryProvider);
-    final outcome = await repo.tap(
-      siteId: _siteId!,
-      deviceId: (await ref.read(localDbProvider).getMeta('device_id')) ?? 'unregistered',
-      source: source,
-      identifier: identifier,
-      policy: _policy,
-      manualBackup: manualBackup,
-      manualReason: manualReason,
-      overridden: overridden,
-    );
-    ref.invalidate(pendingCountProvider);
+    final outcome = await ref.read(attendanceRepositoryProvider).tap(
+          siteId: _siteId!,
+          deviceId: _deviceId!,
+          source: source,
+          identifier: identifier,
+          worker: worker,
+          manualBackup: manualBackup,
+          manualReason: manualReason,
+          overridden: overridden,
+        );
     if (!mounted) return null;
     setState(() => _busy = false);
 
@@ -457,7 +449,6 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
         );
 
       case TapAction.expired:
-        // Nothing was queued: the login is refused outright, not "pending".
         setState(() => _status = 'ID card expired — login not recorded');
         await _showExpired(outcome.message);
         return ScanFeedback.error(
@@ -483,12 +474,16 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
           detail: 'Nothing was recorded.',
         );
 
+      case TapAction.notFound:
+      case TapAction.offline:
+      case TapAction.failed:
+        return _notRecorded(outcome, asDialog: source != TapSource.qr);
+
       case TapAction.login:
       case TapAction.logout:
         final verb = outcome.action == TapAction.login ? 'LOGIN' : 'LOGOUT';
         final name = outcome.worker?.fullName;
-        setState(() => _status =
-            name == null ? (outcome.message ?? 'Recorded') : '$verb recorded: $name');
+        setState(() => _status = name == null ? '$verb recorded' : '$verb recorded: $name');
         // A QR scan already showed the worker's details on the confirm screen —
         // don't make the watchman dismiss the same person twice; the camera
         // banner tells him what was recorded. Manual entry has no such screen,
@@ -508,42 +503,12 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final pending = ref.watch(pendingCountProvider);
+    final unsent = _unsent ?? 0;
     return Scaffold(
       appBar: AppBar(
         title: Text(_siteName.isEmpty ? 'Attendance' : _siteName),
         actions: [
           const SosButton(compact: true),
-          Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: Center(
-              child: pending.when(
-                data: (n) => ActionChip(
-                  avatar: Icon(
-                    n == 0 ? Icons.cloud_done : Icons.cloud_upload,
-                    size: 18,
-                    color: n == 0 ? ClamsColors.success : ClamsColors.warning,
-                  ),
-                  label: Text(
-                    n == 0 ? 'Synced' : '$n to sync',
-                    style: TextStyle(
-                      color: n == 0 ? ClamsColors.success : ClamsColors.warning,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  backgroundColor:
-                      n == 0 ? ClamsColors.successTint : ClamsColors.warningTint,
-                  side: BorderSide.none,
-                  tooltip: n == 0
-                      ? 'All punches uploaded — tap to sync now'
-                      : '$n punch(es) waiting to upload — tap to sync now',
-                  onPressed: _backgroundSync,
-                ),
-                loading: () => const SizedBox.shrink(),
-                error: (_, __) => const SizedBox.shrink(),
-              ),
-            ),
-          ),
           IconButton(
             tooltip: 'Change site',
             icon: const Icon(Icons.location_city),
@@ -589,7 +554,7 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
                     Align(
                       alignment: Alignment.centerRight,
                       child: TextButton(
-                        onPressed: _ensureDevice,
+                        onPressed: _prepare,
                         style: TextButton.styleFrom(
                             foregroundColor: ClamsColors.accent),
                         child: const Text('Retry'),
@@ -598,61 +563,55 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
                   ],
                 ),
               ),
-            // Unsent punches mean this device stops asking the server who is on
-            // site — its answer would be older than what we already hold. Say so
-            // plainly: while this shows, LOGIN/LOGOUT is decided from this
-            // handset alone, and another gate's scans are invisible to it.
-            pending.maybeWhen(
-              data: (n) => n == 0
-                  ? const SizedBox.shrink()
-                  : StatusBanner(
-                      color: ClamsColors.warning,
-                      icon: Icons.cloud_off,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Working from this phone only',
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleMedium
-                                ?.copyWith(fontWeight: FontWeight.w500),
-                          ),
-                          ClamsSpacing.gapSm,
-                          Text(
-                            '$n punch(es) still to upload. Until they do, this phone '
-                            'cannot see scans made at other gates, so in/out may be '
-                            'wrong for someone scanned there.',
-                            style: const TextStyle(color: ClamsColors.textSecondary),
-                          ),
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: TextButton(
-                              onPressed: _backgroundSync,
-                              style: TextButton.styleFrom(
-                                  foregroundColor: ClamsColors.accent),
-                              child: const Text('Sync now'),
-                            ),
-                          ),
-                        ],
+            // Scans the offline build saved and never sent. Scanning stays off
+            // until they have gone, and the watchman is told why and what to do.
+            if (unsent > 0)
+              StatusBanner(
+                color: ClamsColors.warning,
+                icon: Icons.cloud_upload,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Saved scans still to send',
+                      style: Theme.of(context)
+                          .textTheme
+                          .titleMedium
+                          ?.copyWith(fontWeight: FontWeight.w500),
+                    ),
+                    ClamsSpacing.gapSm,
+                    Text(
+                      '$unsent scan(s) saved on this phone by the older app have not '
+                      'reached the server. Scanning starts once they are sent — '
+                      'connect to the internet and tap Send.',
+                      style: const TextStyle(color: ClamsColors.textSecondary),
+                    ),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: _sendSaved,
+                        style: TextButton.styleFrom(
+                            foregroundColor: ClamsColors.accent),
+                        child: const Text('Send'),
                       ),
                     ),
-              orElse: () => const SizedBox.shrink(),
-            ),
+                  ],
+                ),
+              ),
             ClamsSpacing.gapMd,
             const Icon(Icons.qr_code_scanner, size: 96, color: ClamsColors.primary),
             ClamsSpacing.gapXl,
-            Text(_status, textAlign: TextAlign.center,
+            Text(_ready ? _status : 'Getting ready…', textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium),
             ClamsSpacing.gapXxl,
             FilledButton.icon(
-              onPressed: _busy ? null : _onQr,
+              onPressed: _busy || !_ready ? null : _onQr,
               icon: const Icon(Icons.qr_code_scanner),
               label: const Text('Scan QR code'),
             ),
             ClamsSpacing.gapMd,
             OutlinedButton.icon(
-              onPressed: _busy ? null : _onManual,
+              onPressed: _busy || !_ready ? null : _onManual,
               icon: const Icon(Icons.search),
               label: const Text('Manual / lost card'),
             ),

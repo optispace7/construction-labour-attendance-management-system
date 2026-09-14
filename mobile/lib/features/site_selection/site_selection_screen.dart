@@ -6,12 +6,11 @@ import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../core/providers.dart';
 import '../attendance/attendance_providers.dart';
-import '../attendance/domain/models.dart';
 import '../auth/auth_controller.dart';
 import '../device/device_service.dart';
 
-/// Watchman selects the active site. Worker cards for that site are cached
-/// locally so the attendance flow works fully offline afterwards.
+/// Watchman selects the active site. Only the choice is kept on the phone;
+/// everything a scan needs is asked of the server at the moment of the scan.
 class SiteSelectionScreen extends ConsumerStatefulWidget {
   const SiteSelectionScreen({super.key});
 
@@ -103,24 +102,11 @@ class _SiteSelectionScreenState extends ConsumerState<SiteSelectionScreen> {
 
   Future<void> _select(Map<String, dynamic> site) async {
     final db = ref.read(localDbProvider);
-    final dio = ref.read(apiClientProvider).dio;
     final siteId = site['id'] as String;
 
     await db.setMeta('active_site', siteId);
     await db.setMeta('active_site_name', site['name'] as String);
     ref.read(activeSiteProvider.notifier).state = siteId;
-
-    // Warm the offline worker cache for this site (watchman-accessible endpoint).
-    try {
-      final res = await dio.get('/workers/by-site', queryParameters: {'siteId': siteId});
-      final data = (res.data['data'] as List).cast<Map<String, dynamic>>();
-      await db.replaceWorkers(data.map(WorkerCard.fromMap).toList());
-      // …and who is already logged in, so this device can scan out people
-      // another device scanned in, even after it drops offline.
-      await ref.read(attendanceRepositoryProvider).refreshOpenSessions();
-    } catch (_) {
-      // Offline or empty — proceed; sync will refresh later.
-    }
 
     if (!mounted) return;
     final role = ref.read(authControllerProvider).role;

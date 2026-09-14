@@ -93,7 +93,9 @@ class DeviceService {
       }
     } on DioException catch (e) {
       // Server unreachable — if this phone already holds device credentials,
-      // keep operating: punches queue offline and sync later anyway.
+      // open the gate screen anyway. Nothing can be recorded until the
+      // connection is back, and each scan says so, but the watchman sees the
+      // screen he knows rather than a failure to start.
       if (storedId != null && storedToken != null) {
         return DeviceStatus(DeviceState.authorized, deviceId: storedId);
       }
