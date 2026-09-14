@@ -138,4 +138,15 @@ export const Errors = {
     }),
   rateLimited: () =>
     new AppException({ status: 429, code: 'RATE_LIMITED', title: 'Too many requests' }),
+  /** A download bigger than one request is allowed to build; the panel splits it. */
+  exportTooLarge: (limitMb: number) =>
+    new AppException({
+      status: 413,
+      code: 'EXPORT_TOO_LARGE',
+      title: 'Too much to download at once',
+      detail:
+        `These documents come to more than ${limitMb} MB. ` +
+        'Select fewer people and download them in smaller groups.',
+      meta: { limitMb },
+    }),
 };

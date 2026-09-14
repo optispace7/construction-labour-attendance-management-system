@@ -1,18 +1,8 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  Logger,
-  Param,
-  Patch,
-  Post,
-  Query,
-  Res,
-} from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
-import archiver from 'archiver';
+import { buildStoredZip, ZipEntry } from '../../common/zip/stored-zip';
+import { Errors } from '../../common/errors/app.exception';
 import { WorkersService } from './workers.service';
 import {
   AssignSiteDto,
@@ -28,12 +18,18 @@ import { Permission, roleHasPermission } from '../../common/rbac/permissions';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import { AuthUser } from '../../common/auth/auth-user.interface';
 
+/**
+ * The most a documents zip may hold. It is built whole in memory, beside the
+ * images it is built from, and a Worker has 128 MB for everything; stored
+ * documents average about 0.6 MB a person, so this is roughly 50 people. The
+ * panel asks in groups of 25 and splits any group this still refuses.
+ */
+const MAX_ZIP_BYTES = 30 * 1024 * 1024;
+
 @ApiTags('workers')
 @ApiBearerAuth()
 @Controller('workers')
 export class WorkersController {
-  private readonly logger = new Logger(WorkersController.name);
-
   constructor(private readonly workers: WorkersService) {}
 
   // Specific routes first so they are not shadowed by ':id'.
@@ -112,9 +108,16 @@ export class WorkersController {
   }
 
   /**
-   * Streams a zip of the selected people's photos and ID cards, one folder per
-   * person. POST (not GET) because the id list can be long, and it keeps the
-   * ids out of access logs — these downloads are audited on the way through.
+   * A zip of the selected people's photos and ID cards, one folder per person.
+   * POST (not GET) because the id list can be long, and it keeps the ids out of
+   * access logs — these downloads are audited on the way through.
+   *
+   * Built whole and sent with its length, like the PDF exports. It used to be
+   * streamed through archiver, and on the Workers runtime that stream never
+   * finished: every download hung until the platform cancelled it. Building it
+   * in memory needs a ceiling, so a request past MAX_ZIP_BYTES is refused
+   * before a byte is sent — nothing has gone out yet, so the refusal is a
+   * proper error — and the panel asks again in smaller groups.
    */
   @Post('documents')
   @RequirePermissions(Permission.WORKER_MANAGE)
@@ -123,36 +126,20 @@ export class WorkersController {
     @Body() dto: ExportDocumentsDto,
     @Res() res: Response,
   ) {
-    const archive = archiver('zip', {
-      // The payload is JPEG: already compressed, so deflate would burn CPU to
-      // save almost nothing. Store and let it stream.
-      store: true,
-    });
-    archive.on('warning', (e) => this.logger.warn(`Zip warning: ${String(e)}`));
-    archive.on('error', (e) => {
-      this.logger.error(`Zip failed: ${String(e)}`);
-      res.destroy(e);
-    });
+    const entries: ZipEntry[] = [];
+    let bytes = 0;
+    for await (const file of this.workers.documentFiles(user, dto.ids)) {
+      bytes += file.data.length;
+      if (bytes > MAX_ZIP_BYTES) throw Errors.exportTooLarge(MAX_ZIP_BYTES / (1024 * 1024));
+      entries.push({ name: file.path, data: file.data });
+    }
 
+    const zip = buildStoredZip(entries);
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="documents.zip"');
+    res.setHeader('Content-Length', zip.length);
     res.setHeader('Cache-Control', 'no-store');
-    archive.pipe(res);
-
-    try {
-      for await (const file of this.workers.documentFiles(user, dto.ids)) {
-        archive.append(file.data, { name: file.path });
-      }
-    } catch (e) {
-      // Headers are already sent, so the usual exception filter cannot turn
-      // this into a JSON error. Abort the stream: the client sees a truncated
-      // download rather than a zip that silently omits people.
-      this.logger.error(`Document export failed: ${String(e)}`);
-      archive.abort();
-      res.destroy(e as Error);
-      return;
-    }
-    await archive.finalize();
+    res.end(zip);
   }
 
   @Post()

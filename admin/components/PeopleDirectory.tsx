@@ -58,6 +58,7 @@ import {
   fillsFor,
 } from '@/components/AadhaarAutofillDialog';
 import { AadhaarData } from '@/lib/aadhaar/decoder';
+import { DownloadError, downloadInGroups } from '@/lib/documentBatches';
 import { decodeAadhaarFromImage, decodeAadhaarFromPhotoId } from '@/lib/aadhaar/scan-image';
 import { Designation, Paginated, PersonCategory, Site, Vendor, Worker } from '@/lib/types';
 
@@ -433,34 +434,57 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
   };
 
   /**
-   * Downloads a zip of the given people's photos and ID cards. `filename` is
-   * what the browser saves it as; the zip holds one folder per person.
+   * Downloads the given people's photos and ID cards, one folder per person.
+   * `baseName` is the file name without ".zip".
+   *
+   * A large selection comes down as several zips (see downloadInGroups): the
+   * server builds each zip whole, and everyone's documents at once are more
+   * than it can build.
    */
-  const downloadDocuments = async (ids: string[], filename: string) => {
+  const downloadDocuments = async (ids: string[], baseName: string) => {
     if (ids.length === 0) return;
     setDownloading(true);
     try {
-      const res = await fetch('/api/worker-documents', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ids }),
-      });
-      if (!res.ok) {
-        throw new Error(
-          res.status === 403
-            ? 'You do not have permission to download documents.'
-            : res.status === 404
-              ? 'Nothing to download — no images are on file.'
-              : 'Download failed. Please try again.',
-        );
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
+      const saved = await downloadInGroups(
+        ids,
+        async (group) => {
+          const res = await fetch('/api/worker-documents', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ ids: group }),
+          });
+          if (!res.ok) {
+            const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+            throw new DownloadError(
+              res.status,
+              res.status === 403
+                ? 'You do not have permission to download documents.'
+                : res.status === 404
+                  ? 'Nothing to download — no images are on file.'
+                  : (body?.detail ?? 'Download failed. Please try again.'),
+            );
+          }
+          const blob = await res.blob();
+          // A download cut short still arrives as a 200. Check it against the
+          // size the server sent, so a zip that will not open is never saved.
+          const expected = Number(res.headers.get('x-zip-bytes'));
+          if (expected > 0 && blob.size !== expected) {
+            throw new DownloadError(502, 'The download was cut off. Please try again.');
+          }
+          return blob;
+        },
+        (blob, part, multiple) => {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = multiple ? `${baseName}-part-${part}.zip` : `${baseName}.zip`;
+          a.click();
+          // Not revoked at once: some browsers cancel a save whose URL is
+          // revoked before the file has been written.
+          setTimeout(() => URL.revokeObjectURL(url), 30_000);
+        },
+      );
+      if (saved > 1) toast.success(`Downloaded in ${saved} zip files.`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Download failed');
     } finally {
@@ -469,11 +493,11 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
   };
 
   const downloadOne = (w: Worker) =>
-    downloadDocuments([w.id], `${w.fullName.replace(/[/\\:*?"<>|]/g, ' ').trim()}.zip`);
+    downloadDocuments([w.id], w.fullName.replace(/[/\\:*?"<>|]/g, ' ').trim());
 
   const downloadMany = (ids: string[]) => {
     const stamp = new Date().toISOString().slice(0, 10);
-    downloadDocuments(ids, `${labels.plural.toLowerCase()}-documents-${stamp}.zip`);
+    downloadDocuments(ids, `${labels.plural.toLowerCase()}-documents-${stamp}`);
   };
 
   const toggleSelected = (id: string) =>
