@@ -51,7 +51,7 @@ class LegacyOutboxDrain {
           if (sent.contains(id)) await _db.removeLegacy(id);
         }
         // An answer that names none of what was sent would loop forever.
-        if (sent.isEmpty) return _db.legacyUnsentCount();
+        if (sent.isEmpty) return await _db.legacyUnsentCount();
       } on DioException catch (e) {
         final status = e.response?.statusCode;
         // The batch itself was malformed — a scan saved with a field the server
