@@ -16,6 +16,7 @@ import {
   cardMetrics,
 } from '@/components/IdCard';
 import { StaffIdCard } from '@/components/StaffIdCard';
+import { useToast } from '@/components/ui/Toast';
 
 const CATEGORY_TITLES: Record<PersonCategory, string> = {
   WORKER: 'Worker ID cards',
@@ -33,6 +34,7 @@ const modeKey = (c: PersonCategory) => `clams.badge.mode.${c}`;
 const defaultMode = (c: PersonCategory): PrintMode => (c === 'STAFF' ? 'PVC' : 'A4');
 
 export default function BadgesPage() {
+  const toast = useToast();
   const params = useSearchParams();
   const initial = (params.get('category') ?? 'WORKER').toUpperCase() as PersonCategory;
   const [category, setCategory] = React.useState<PersonCategory>(
@@ -89,23 +91,36 @@ export default function BadgesPage() {
     queryFn: () => api.get<Organization>('/organizations/current'),
   });
   const sites = useQuery({ queryKey: ['sites'], queryFn: () => api.get<Site[]>('/sites') });
+  const listUrl = `/workers?limit=200&category=${category}${siteId ? `&siteId=${siteId}` : ''}${
+    q ? `&q=${encodeURIComponent(q)}` : ''
+  }`;
   const workers = useQuery({
     queryKey: ['workers', 'all-badges', category, siteId, q],
-    queryFn: () =>
-      api.get<Paginated<Worker>>(
-        `/workers?limit=200&category=${category}${siteId ? `&siteId=${siteId}` : ''}${
-          q ? `&q=${encodeURIComponent(q)}` : ''
-        }`,
-      ),
+    queryFn: () => api.get<Paginated<Worker>>(listUrl),
   });
 
-  const list = React.useMemo(() => workers.data?.data ?? [], [workers.data]);
+  // The list arrives 200 at a time. This page used to stop at the first 200 —
+  // the newest — and the older cards could not be reached at all. Later pages
+  // are kept here and dropped whenever the first page changes: a new search,
+  // site or person type starts over.
+  const [extraRows, setExtraRows] = React.useState<Worker[]>([]);
+  const [nextCursor, setNextCursor] = React.useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = React.useState(false);
+  React.useEffect(() => {
+    setExtraRows([]);
+    setNextCursor(workers.data?.nextCursor ?? null);
+  }, [workers.data]);
+
+  const list = React.useMemo(
+    () => [...(workers.data?.data ?? []), ...extraRows],
+    [workers.data, extraRows],
+  );
 
   // Everyone in the current filter starts selected; untick to leave them out.
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   React.useEffect(() => {
-    setSelected(new Set(list.map((w) => w.id)));
-  }, [list]);
+    setSelected(new Set((workers.data?.data ?? []).map((w) => w.id)));
+  }, [workers.data]);
   const toggle = (id: string) =>
     setSelected((prev) => {
       const next = new Set(prev);
@@ -114,6 +129,27 @@ export default function BadgesPage() {
       return next;
     });
   const selectedCount = list.filter((w) => selected.has(w.id)).length;
+
+  const loadMore = async () => {
+    if (!nextCursor) return;
+    setLoadingMore(true);
+    try {
+      const page = await api.get<Paginated<Worker>>(`${listUrl}&cursor=${nextCursor}`);
+      setExtraRows((prev) => [...prev, ...page.data]);
+      setNextCursor(page.nextCursor);
+      // Cards that arrive later start selected too — without re-ticking anyone
+      // the admin has already left out.
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const w of page.data) next.add(w.id);
+        return next;
+      });
+    } catch {
+      toast.error('Could not load more cards. Please try again.');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   // PVC only: the last selected card's final face must NOT force a page break,
   // otherwise the printer ejects a blank trailing card.
@@ -335,6 +371,16 @@ export default function BadgesPage() {
           <Typography color="text.secondary">Nothing to print for this selection.</Typography>
         )}
       </Box>
+
+      {nextCursor && (
+        <Box
+          sx={{ display: 'flex', justifyContent: 'center', mt: 3, '@media print': { display: 'none' } }}
+        >
+          <Button variant="outlined" onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : `Load more (showing ${list.length})`}
+          </Button>
+        </Box>
+      )}
     </Box>
   );
 }
