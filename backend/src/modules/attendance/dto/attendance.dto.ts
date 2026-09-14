@@ -114,3 +114,19 @@ export class ConfirmDto {
   @IsUUID('4')
   eventId!: string;
 }
+
+/** A scan the gate has read but not recorded, asked about before OK is pressed. */
+export class PreviewTapDto {
+  @ApiProperty()
+  @IsUUID()
+  siteId!: string;
+
+  @ApiProperty({ enum: TapSource })
+  @IsEnum(TapSource)
+  source!: TapSource;
+
+  @ApiProperty({ description: 'UID / NDEF workerCode / QR / workerCode' })
+  @IsString()
+  @IsNotEmpty()
+  identifier!: string;
+}

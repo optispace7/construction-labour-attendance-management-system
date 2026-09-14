@@ -42,7 +42,7 @@ import { isCardExpired } from './engine/card-validity';
 import { computeWorkHours, ShiftConfig } from './engine/work-hours.engine';
 import { decideTap, distanceMeters, shouldVerifyPhoto } from './engine/tap-decision';
 import { describeMovement } from './engine/movement-words';
-import { TapDto } from './dto/attendance.dto';
+import { PreviewTapDto, TapDto } from './dto/attendance.dto';
 import { renderDaySummaryPdf } from '../reports/report.renderer';
 
 export interface TapContext {
@@ -438,20 +438,6 @@ export class AttendanceService {
     if (!lockToken) throw Errors.conflict('Another tap is being processed for this worker');
 
     try {
-      const [openSession] = await this.d1.db
-        .select()
-        .from(attendanceSessions)
-        .where(
-          and(eq(attendanceSessions.workerId, worker.id), eq(attendanceSessions.state, 'OPEN')),
-        )
-        .limit(1);
-      const [lastTap] = await this.d1.db
-        .select()
-        .from(attendanceTaps)
-        .where(eq(attendanceTaps.workerId, worker.id))
-        .orderBy(desc(attendanceTaps.clientEventTime))
-        .limit(1);
-
       // A hand-typed punch already waiting on the Safety Officer blocks another
       // one for the same person. Checked before anything is written so the
       // watchman is told at the gate, not after a tap is on record.
@@ -478,23 +464,7 @@ export class AttendanceService {
         }
       }
 
-      const decision = decideTap(
-        tapTime,
-        settings.duplicateTapCooldownSeconds,
-        openSession
-          ? { id: openSession.id, loginAt: openSession.loginAt, siteId: openSession.siteId }
-          : null,
-        lastTap
-          ? {
-              clientEventTime: lastTap.clientEventTime,
-              // Text on SQLite where Prisma had an enum; the values written are
-              // the enum's own, so the narrowing is a restatement, not a change.
-              tapType: lastTap.tapType as 'LOGIN' | 'LOGOUT' | null,
-            }
-          : null,
-        this.safetyGapSeconds(settings, worker, dto),
-        !!dto.override,
-      );
+      const decision = await this.decide(settings, worker, tapTime, !!dto.override);
 
       if (decision.action === 'DUPLICATE') {
         throw Errors.duplicateTap(decision.cooldownRemainingSeconds);
@@ -563,10 +533,128 @@ export class AttendanceService {
    * watchman who has confirmed the refusal has already been told what the gap
    * thinks; the override is his to make, with or without a note attached.
    */
-  private safetyGapSeconds(settings: SiteSettings, worker: ResolvedWorker, dto: TapDto): number {
+  private safetyGapSeconds(
+    settings: SiteSettings,
+    worker: ResolvedWorker,
+    overridden: boolean,
+  ): number {
     if (worker.category === 'VISITOR') return 0;
-    if (dto.override) return 0;
+    if (overridden) return 0;
     return Math.max(0, settings.safetyGapMinutes) * 60;
+  }
+
+  /**
+   * LOGIN, LOGOUT, DUPLICATE or TOO_SOON for this worker at this moment, from
+   * their open session and last tap as the database holds them now.
+   *
+   * The one place the decision is made. The scan uses it to record, and the
+   * preview uses it to tell the gate's confirm screen what the scan will do —
+   * two copies of this logic is how the phone once told a watchman LOGIN while
+   * the server recorded LOGOUT.
+   */
+  private async decide(
+    settings: SiteSettings,
+    worker: ResolvedWorker,
+    at: Date,
+    overridden: boolean,
+  ) {
+    const [openSession] = await this.d1.db
+      .select()
+      .from(attendanceSessions)
+      .where(
+        and(eq(attendanceSessions.workerId, worker.id), eq(attendanceSessions.state, 'OPEN')),
+      )
+      .limit(1);
+    const [lastTap] = await this.d1.db
+      .select()
+      .from(attendanceTaps)
+      .where(eq(attendanceTaps.workerId, worker.id))
+      .orderBy(desc(attendanceTaps.clientEventTime))
+      .limit(1);
+
+    return decideTap(
+      at,
+      settings.duplicateTapCooldownSeconds,
+      openSession
+        ? { id: openSession.id, loginAt: openSession.loginAt, siteId: openSession.siteId }
+        : null,
+      lastTap
+        ? {
+            clientEventTime: lastTap.clientEventTime,
+            // Text on SQLite where Prisma had an enum; the values written are
+            // the enum's own, so the narrowing is a restatement, not a change.
+            tapType: lastTap.tapType as 'LOGIN' | 'LOGOUT' | null,
+          }
+        : null,
+      this.safetyGapSeconds(settings, worker, overridden),
+      overridden,
+    );
+  }
+
+  /**
+   * What scanning this badge now would record — asked by the gate before its
+   * confirm screen opens, so that screen shows the server's answer.
+   *
+   * The phone used to work this out from its own copy of who was on site, and
+   * that copy could not see a login made at another gate. The watchman was
+   * offered LOGIN, pressed OK, and the server recorded LOGOUT.
+   *
+   * Writes nothing and takes no lock: the watchman can still press Cancel, and
+   * an unknown badge is filed for reconciliation only when it is really
+   * scanned. Timed on the server clock. If someone else scans the same worker
+   * between this and the scan, the scan decides again and its answer is the one
+   * the watchman is shown.
+   */
+  async previewTap(organizationId: string, dto: PreviewTapDto) {
+    const [siteRow] = await this.d1.db
+      .select({ site: sites, settings: siteSettingsTable })
+      .from(sites)
+      .leftJoin(siteSettingsTable, eq(siteSettingsTable.siteId, sites.id))
+      .where(and(eq(sites.id, dto.siteId), eq(sites.organizationId, organizationId)))
+      .limit(1);
+    if (!siteRow) throw Errors.notFound('Site');
+    const site = siteRow.site;
+    const settings = siteRow.settings ?? this.defaultSettings(dto.siteId);
+
+    const worker = await this.resolveWorker(organizationId, dto.source, dto.identifier);
+    if (!worker) return { action: 'UNKNOWN_WORKER' as const, worker: null };
+
+    const now = new Date();
+    const card = this.workerCard(worker);
+    const decision = await this.decide(settings, worker, now, false);
+
+    switch (decision.action) {
+      case 'DUPLICATE':
+        return {
+          action: 'DUPLICATE' as const,
+          worker: card,
+          cooldownRemainingSeconds: decision.cooldownRemainingSeconds,
+        };
+      case 'TOO_SOON':
+        return {
+          action: 'TOO_SOON' as const,
+          worker: card,
+          blocked: decision.blocked,
+          remainingSeconds: decision.remainingSeconds,
+          elapsedMinutes: decision.elapsedMinutes,
+        };
+      case 'LOGOUT':
+        return { action: 'LOGOUT' as const, worker: card };
+      case 'LOGIN':
+        // Same rule as the scan: a lapsed card may not start a shift, but
+        // someone already on site can always leave.
+        if (isCardExpired(toDate(worker.validityTill), now, site.timezone)) {
+          return {
+            action: 'CARD_EXPIRED' as const,
+            worker: card,
+            validityTill: worker.validityTill,
+            detail:
+              `${worker.fullName}'s ID card expired on ${worker.validityTill}. ` +
+              'Renew the card before logging in.',
+          };
+        }
+        return { action: 'LOGIN' as const, worker: card };
+    }
   }
 
   /** Records who waved a scan past the safety gap, and the reason they gave. */

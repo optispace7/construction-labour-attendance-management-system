@@ -4,7 +4,7 @@ import { Request, Response } from 'express';
 import { AttendanceService } from './attendance.service';
 import { SessionAdminService } from './session-admin.service';
 import { SyncService } from './sync.service';
-import { ConfirmDto, TapDto } from './dto/attendance.dto';
+import { ConfirmDto, PreviewTapDto, TapDto } from './dto/attendance.dto';
 import {
   BulkLogoutDto,
   BulkReopenDto,
@@ -46,6 +46,16 @@ export class AttendanceController {
       deviceId: dto.deviceId,
       ip: req.ip,
     });
+  }
+
+  // What a scan would record, asked by the gate before its confirm screen, so
+  // the screen shows the server's answer rather than the phone's guess. Writes
+  // nothing. On ATTENDANCE_MARK, like the scan it comes before.
+  @Post('tap/preview')
+  @RequiresDevice()
+  @RequirePermissions(Permission.ATTENDANCE_MARK)
+  previewTap(@CurrentUser() user: AuthUser, @Body() dto: PreviewTapDto) {
+    return this.attendance.previewTap(user.organizationId, dto);
   }
 
   @Post('confirm')
