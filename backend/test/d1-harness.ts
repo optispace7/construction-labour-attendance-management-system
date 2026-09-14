@@ -76,7 +76,26 @@ export async function createTestD1(): Promise<TestD1> {
         // D1 takes null/number/string/ArrayBuffer; booleans reach it from code
         // treating an integer column as one, so they are narrowed as the
         // driver narrows them.
-        bound = args.map((a) => (typeof a === 'boolean' ? (a ? 1 : 0) : a));
+        //
+        // Anything else is refused, as D1 refuses it. Node's SQLite binds a Date
+        // without complaint, so a raw sql template carrying one passed here and
+        // failed in production — every "Load more" on the Workers page did.
+        bound = args.map((a) => {
+          if (typeof a === 'boolean') return a ? 1 : 0;
+          const ok =
+            a === null ||
+            typeof a === 'number' ||
+            typeof a === 'string' ||
+            typeof a === 'bigint' ||
+            a instanceof ArrayBuffer ||
+            ArrayBuffer.isView(a);
+          if (!ok) {
+            throw new TypeError(
+              `D1_TYPE_ERROR: Type '${typeof a}' not supported for value '${String(a)}'`,
+            );
+          }
+          return a;
+        });
         return api;
       },
       first: async (col?: string) => {

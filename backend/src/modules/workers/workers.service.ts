@@ -265,8 +265,11 @@ export class WorkersService {
           sql`(${workers.fullName}, ${workers.id}) > (${after.fullName}, ${after.id})`,
         );
       } else if (sortBy !== 'designation' && sortBy !== 'vendor') {
+        // Milliseconds, as the column stores them. A raw sql template does not
+        // run Drizzle's column mapping, so the Date went to D1 as an object, D1
+        // refused to bind it, and every "Load more" on the Workers page failed.
         filters.push(
-          sql`(${workers.createdAt}, ${workers.id}) < (${after.createdAt}, ${after.id})`,
+          sql`(${workers.createdAt}, ${workers.id}) < (${after.createdAt.getTime()}, ${after.id})`,
         );
       }
       // designation/vendor sorts page in memory below — their keys live on

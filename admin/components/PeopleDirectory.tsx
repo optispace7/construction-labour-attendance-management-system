@@ -333,6 +333,10 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
       const page = await api.get<Paginated<Worker>>(`${listUrl}&cursor=${nextCursor}`);
       setExtraRows((prev) => [...prev, ...page.data]);
       setNextCursor(page.nextCursor);
+    } catch {
+      // This used to fail with no message at all: the button went back to
+      // "Load more" and nothing else happened, so it looked broken.
+      toast.error('Could not load more. Please try again.');
     } finally {
       setLoadingMore(false);
     }
