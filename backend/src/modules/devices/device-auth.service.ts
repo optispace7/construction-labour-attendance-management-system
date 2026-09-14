@@ -164,8 +164,18 @@ export class DeviceAuthService {
     return { deviceId: device.id, status: device.status };
   }
 
-  /** Issue a device token once the device is AUTHORIZED. Only the hash is stored. */
-  async issueToken(organizationId: string, deviceId: string) {
+  /**
+   * Issue a device token once the device is AUTHORIZED. Only the hash is stored.
+   *
+   * A token the device already holds and that still verifies is handed back
+   * as it is. The app asks for a token every time the attendance screen opens,
+   * and replacing the hash each time broke the phone for a moment: requests
+   * already carrying the old token — the scan a watchman made as the screen
+   * came up — were refused with 403 until the new one was saved. The scan's
+   * state check was one of them, so the confirm screen fell back to the
+   * phone's own guess and offered LOGIN to a worker the server then logged out.
+   */
+  async issueToken(organizationId: string, deviceId: string, currentToken?: string) {
     const [device] = await this.d1.db
       .select()
       .from(devices)
@@ -173,6 +183,14 @@ export class DeviceAuthService {
       .limit(1);
     if (!device) throw Errors.notFound('Device');
     if (device.status !== 'AUTHORIZED') throw Errors.deviceNotAuthorized();
+
+    if (
+      currentToken &&
+      device.tokenHash &&
+      (await this.crypto.verifyToken(device.tokenHash, currentToken))
+    ) {
+      return { deviceToken: currentToken };
+    }
 
     const token = `${deviceId}.${randomUUID()}`;
     const tokenHash = this.crypto.hashOpaqueToken(token);

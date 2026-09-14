@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { DeviceAuthService } from '../devices/device-auth.service';
@@ -54,7 +54,13 @@ export class AuthController {
 
   @ApiBearerAuth()
   @Post('device/token')
-  deviceToken(@CurrentUser() user: AuthUser, @Body() dto: DeviceTokenDto) {
-    return this.deviceAuth.issueToken(user.organizationId, dto.deviceId);
+  deviceToken(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: DeviceTokenDto,
+    // The phone sends the token it already holds on every request, this one
+    // included. Passed on so a token that still works is kept, not replaced.
+    @Headers('x-device-token') currentToken?: string,
+  ) {
+    return this.deviceAuth.issueToken(user.organizationId, dto.deviceId, currentToken);
   }
 }
