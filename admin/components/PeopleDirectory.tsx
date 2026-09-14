@@ -357,13 +357,16 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
   const [designationFilter, setDesignationFilter] = React.useState('');
   const [statusFilter, setStatusFilter] = React.useState('');
   const filtersActive = !!(siteFilter || vendorFilter || designationFilter || statusFilter);
-  const visibleRows = allRows.filter((w) => {
+  // One rule for both the table and "Download all", which reaches past the
+  // loaded rows and must still leave out what the filters leave out.
+  const matchesFilters = (w: Worker) => {
     if (statusFilter && w.status !== statusFilter) return false;
     if (vendorFilter && (w.vendorId ?? '') !== vendorFilter) return false;
     if (designationFilter && (w.designationId ?? '') !== designationFilter) return false;
     if (siteFilter && (w.assignments?.[0]?.site?.name ?? '') !== siteFilter) return false;
     return true;
-  });
+  };
+  const visibleRows = allRows.filter(matchesFilters);
 
   // Selection is scoped to what the filters currently show: a row that has been
   // filtered away must not ride along in a download the user cannot see.
@@ -498,6 +501,41 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
   const downloadMany = (ids: string[]) => {
     const stamp = new Date().toISOString().slice(0, 10);
     downloadDocuments(ids, `${labels.plural.toLowerCase()}-documents-${stamp}`);
+  };
+
+  /**
+   * Everyone the current search and filters match — not just the rows loaded
+   * so far. The list arrives 200 at a time, and "Download all" used to mean
+   * those 200: the note saying so was easy to miss, and the client got 200 of
+   * 379 workers. The remaining pages are fetched first, and kept, so the table
+   * then shows everyone who was downloaded.
+   */
+  const downloadAll = async () => {
+    setDownloading(true);
+    let rows = allRows;
+    try {
+      const fetched: Worker[] = [];
+      for (let cursor = nextCursor; cursor; ) {
+        const page = await api.get<Paginated<Worker>>(`${listUrl}&cursor=${cursor}`);
+        fetched.push(...page.data);
+        cursor = page.nextCursor;
+      }
+      if (fetched.length > 0) {
+        setExtraRows((prev) => [...prev, ...fetched]);
+        setNextCursor(null);
+        rows = [...rows, ...fetched];
+      }
+    } catch {
+      toast.error('Could not load the full list. Please try again.');
+      setDownloading(false);
+      return;
+    }
+    const ids = rows.filter(matchesFilters).map((w) => w.id);
+    if (ids.length === 0) {
+      setDownloading(false);
+      return;
+    }
+    downloadMany(ids);
   };
 
   const toggleSelected = (id: string) =>
@@ -944,21 +982,16 @@ export function PeopleDirectory({ category }: { category: PersonCategory }) {
           variant="outlined"
           startIcon={<DownloadIcon />}
           disabled={downloading || visibleRows.length === 0}
-          onClick={() => downloadMany(visibleRows.map((w) => w.id))}
+          onClick={downloadAll}
         >
-          Download all ({visibleRows.length})
+          {/* "+" while more pages are still to load: the button covers them too,
+              but their number is not known until they arrive. */}
+          Download all ({nextCursor ? `${visibleRows.length}+` : visibleRows.length})
         </Button>
         {someSelected && (
           <Button size="small" color="inherit" onClick={() => setSelected(new Set())}>
             Clear selection
           </Button>
-        )}
-        {/* "All" can only mean the rows we have actually loaded, so say so
-            rather than quietly exporting a subset. */}
-        {nextCursor && (
-          <Typography variant="caption" color="text.secondary">
-            Download all covers the {visibleRows.length} loaded — use Load more for the rest.
-          </Typography>
         )}
       </Stack>
       <Card>
