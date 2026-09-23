@@ -198,7 +198,8 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
           if (mounted) setState(() => _status = 'Cancelled — nothing recorded');
           return const ScanFeedback.info('Cancelled', detail: 'Nothing was recorded.');
         }
-        return _handleTap(TapSource.qr, identifier, worker: worker);
+        return _handleTap(TapSource.qr, identifier,
+            worker: worker, expected: outcome.action);
     }
   }
 
@@ -262,6 +263,8 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
       overridden: true,
       manualBackup: manualBackup,
       manualReason: manualReason,
+      // The direction the refusal was about — what "record it anyway" means.
+      expected: outcome.blocked,
     );
   }
 
@@ -384,6 +387,7 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
     bool manualBackup = false,
     String? manualReason,
     bool overridden = false,
+    TapAction? expected,
   }) async {
     if (!_ready) return null;
     if (source != TapSource.qr && await _clockIsWrong()) return null;
@@ -398,6 +402,7 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
           manualBackup: manualBackup,
           manualReason: manualReason,
           overridden: overridden,
+          expected: expected,
         );
     if (!mounted) return null;
     setState(() => _busy = false);

@@ -13,6 +13,18 @@ void main() {
   };
 
   group('outcomeFromPreview', () {
+    test('a duplicate says which way it would have gone', () {
+      // "Record it anyway" sends this as the confirmed direction.
+      final d = outcomeFromPreview({
+        'action': 'DUPLICATE',
+        'worker': worker,
+        'cooldownRemainingSeconds': 20,
+        'blocked': 'LOGOUT',
+      });
+      expect(d.action, TapAction.duplicate);
+      expect(d.blocked, TapAction.logout);
+    });
+
     test('LOGIN and LOGOUT carry the worker for the confirm screen', () {
       final login = outcomeFromPreview({'action': 'LOGIN', 'worker': worker});
       expect(login.action, TapAction.login);
@@ -127,6 +139,18 @@ void main() {
           TapAction.awaitingReview);
       expect(outcomeFromError(422, {'code': 'CARD_EXPIRED'}).action, TapAction.expired);
       expect(outcomeFromError(404, {'code': 'WORKER_NOT_FOUND'}).action, TapAction.notFound);
+    });
+
+    test('a scan that arrived after the worker already went that way says so', () {
+      final r = outcomeFromError(409, {
+        'code': 'TAP_STATE_CHANGED',
+        'title': 'Already logged out',
+        'detail': 'Ramesh is already logged out, so this logout was not recorded again. '
+            'Nothing changed.',
+        'meta': {'expected': 'LOGOUT', 'current': 'LOGIN'},
+      });
+      expect(r.action, TapAction.failed);
+      expect(r.message, contains('already logged out'));
     });
 
     test('any other refusal is a failure with the server\'s words', () {

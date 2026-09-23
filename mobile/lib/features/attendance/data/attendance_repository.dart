@@ -82,6 +82,7 @@ class AttendanceRepository {
     bool manualBackup = false,
     String? manualReason,
     bool overridden = false,
+    TapAction? expected,
   }) async {
     GeoFix? geo;
     try {
@@ -101,6 +102,11 @@ class AttendanceRepository {
       if (geo != null) 'geo': {'lat': geo.lat, 'lng': geo.lng, 'accuracyM': geo.accuracyM},
       'manual': {'isBackup': manualBackup, 'reason': manualReason},
       if (overridden) 'override': <String, dynamic>{},
+      // What the watchman confirmed. The server records the scan only if it is
+      // still that, so a late copy of a double read cannot flip the worker
+      // back the other way.
+      if (expected == TapAction.login) 'expected': 'LOGIN',
+      if (expected == TapAction.logout) 'expected': 'LOGOUT',
     };
 
     for (var attempt = 1;; attempt++) {
@@ -174,6 +180,7 @@ TapOutcome outcomeFromPreview(Object? data) {
     'DUPLICATE' => TapOutcome(
         action: TapAction.duplicate,
         worker: worker,
+        blocked: _direction(data['blocked']),
         cooldownRemainingSeconds: _int(data['cooldownRemainingSeconds']),
       ),
     'TOO_SOON' => TapOutcome(
@@ -251,6 +258,10 @@ TapOutcome outcomeFromError(
       return TapOutcome(action: TapAction.expired, worker: worker, message: detail);
     case 'WORKER_NOT_FOUND':
       return TapOutcome(action: TapAction.notFound, worker: worker);
+    // Already logged in/out by the time the scan arrived. Nothing was changed,
+    // and the server's sentence says so in the watchman's terms.
+    case 'TAP_STATE_CHANGED':
+      return TapOutcome(action: TapAction.failed, worker: worker, message: detail);
   }
   return TapOutcome(
     action: TapAction.failed,
