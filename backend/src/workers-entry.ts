@@ -145,7 +145,11 @@ async function serveApk(env: unknown): Promise<Response> {
       'content-length': String(object.size),
       // Lets a phone resume rather than restart 90 MB on a site connection.
       'accept-ranges': 'bytes',
-      'cache-control': 'public, max-age=86400',
+      // Never reused from a cache. The file behind this URL is replaced by every
+      // release, and with a day's max-age a phone that had downloaded once got
+      // its old copy back all day — a watchman "installed 1.1.0+22" and was
+      // still on +20.
+      'cache-control': 'no-store',
       etag: object.httpEtag,
     },
   });
