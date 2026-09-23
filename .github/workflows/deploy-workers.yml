@@ -72,6 +72,12 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # Compare with this branch's previous push. Left unset, a push to any
+          # branch but the default one is compared with main — which
+          # spike/better-auth is far ahead of — so every push rebuilt and
+          # republished all three, and the APK's build number climbed on
+          # server-only changes.
+          base: ${{ github.ref_name }}
           filters: |
             api:
               - 'backend/**'

@@ -37,7 +37,20 @@ function apkUrl(): string {
 }
 
 export async function GET() {
+  // A fresh address on every tap. The API used to send the APK with a day's
+  // max-age, so a phone that downloaded once was handed its saved copy for the
+  // next 24 hours without the browser ever asking the server — a watchman
+  // installed "the new app" three times on 23 Sep and stayed on 1.1.0+20. A
+  // header change cannot reach a copy already saved; a URL that has never been
+  // seen before can. The API matches on the path and ignores the query.
+  const target = new URL(apkUrl());
+  target.searchParams.set('v', Date.now().toString(36));
+
   // 302 rather than 301: the target is a deployment detail, and a permanent
-  // redirect would be cached by every phone that ever followed it.
-  return Response.redirect(apkUrl(), 302);
+  // redirect would be cached by every phone that ever followed it. no-store so
+  // the redirect itself is never replayed with an old address.
+  return new Response(null, {
+    status: 302,
+    headers: { location: target.toString(), 'cache-control': 'no-store' },
+  });
 }
