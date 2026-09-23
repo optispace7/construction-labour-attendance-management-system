@@ -5,6 +5,7 @@ import { AttendanceService } from './attendance.service';
 import { SessionAdminService } from './session-admin.service';
 import { SyncService } from './sync.service';
 import { ConfirmDto, PreviewTapDto, TapDto } from './dto/attendance.dto';
+import { APP_VERSION_HEADER, appVersionFrom } from './engine/app-version';
 import {
   BulkLogoutDto,
   BulkReopenDto,
@@ -45,6 +46,7 @@ export class AttendanceController {
     return this.attendance.handleTap(user.organizationId, dto, {
       deviceId: dto.deviceId,
       ip: req.ip,
+      appVersion: appVersionFrom(req.headers[APP_VERSION_HEADER]),
     });
   }
 
@@ -65,6 +67,7 @@ export class AttendanceController {
     return this.attendance.confirm(user.organizationId, dto.eventId, {
       deviceId: (req.headers['x-device-id'] as string) ?? '',
       ip: req.ip,
+      appVersion: appVersionFrom(req.headers[APP_VERSION_HEADER]),
     });
   }
 
@@ -233,6 +236,7 @@ export class AttendanceController {
     return this.sync.ingest(user.organizationId, dto.deviceId, dto.events, {
       deviceId: dto.deviceId,
       ip: req.ip,
+      appVersion: appVersionFrom(req.headers[APP_VERSION_HEADER]),
     });
   }
 }

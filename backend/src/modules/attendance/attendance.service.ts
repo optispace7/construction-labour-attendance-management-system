@@ -41,6 +41,7 @@ import { businessDate, minutesOfDay, textToTimeOfDay } from '../../common/time/t
 import { isCardExpired } from './engine/card-validity';
 import { computeWorkHours, ShiftConfig } from './engine/work-hours.engine';
 import { decideTap, distanceMeters, shouldVerifyPhoto } from './engine/tap-decision';
+import { LEGACY_APP_VERSION } from './engine/app-version';
 import { describeMovement } from './engine/movement-words';
 import { PreviewTapDto, TapDto } from './dto/attendance.dto';
 import { renderDaySummaryPdf } from '../reports/report.renderer';
@@ -48,6 +49,11 @@ import { renderDaySummaryPdf } from '../reports/report.renderer';
 export interface TapContext {
   deviceId: string;
   ip?: string;
+  /**
+   * The gate app build that sent the scan (`x-app-version`), or `legacy` for
+   * builds from before the header existed. Copied into every scan's audit row.
+   */
+  appVersion?: string;
   /** 0-100 randomness for photo policy; injectable for tests. */
   photoRoll?: number;
 }
@@ -277,6 +283,7 @@ export class AttendanceService {
           source: args.source,
           at: args.at.toISOString(),
           ...args.extra,
+          appVersion: args.ctx.appVersion ?? LEGACY_APP_VERSION,
         },
       });
     } catch (e) {
@@ -674,7 +681,13 @@ export class AttendanceService {
         deviceId: ctx.deviceId,
         ipAddress: ctx.ip,
         reason: dto.override?.reason ?? 'Confirmed at the gate (no note given)',
-        newValue: { recorded, source: dto.source, siteId: dto.siteId, eventId: dto.eventId },
+        newValue: {
+          recorded,
+          source: dto.source,
+          siteId: dto.siteId,
+          eventId: dto.eventId,
+          appVersion: ctx.appVersion ?? LEGACY_APP_VERSION,
+        },
       });
     } catch (e) {
       // Same rule as every other audit write here: a tap must not fail at the
@@ -1178,6 +1191,7 @@ export class AttendanceService {
             sessionId: scan.sessionId,
             source: scan.source,
           },
+          appVersion: ctx.appVersion ?? LEGACY_APP_VERSION,
         },
         reason: note,
       });
@@ -1344,7 +1358,11 @@ export class AttendanceService {
         deviceId: ctx.deviceId,
         ipAddress: ctx.ip,
         reason: dto.manual.reason,
-        newValue: { source: dto.source, siteId: dto.siteId },
+        newValue: {
+          source: dto.source,
+          siteId: dto.siteId,
+          appVersion: ctx.appVersion ?? LEGACY_APP_VERSION,
+        },
       });
     }
   }

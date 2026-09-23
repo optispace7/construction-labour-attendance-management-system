@@ -155,6 +155,28 @@ describe('scan auditing', () => {
     expect(call[0].newValue).toMatchObject({ sessionId: 'sess-1', workedMinutes: 480 });
   });
 
+  it('records the app build that sent the scan', async () => {
+    const { svc, audit } = build();
+    await svc.handleTap('org-1', dto(), {
+      deviceId: 'dev-1',
+      photoRoll: 99,
+      appVersion: '1.1.0+62',
+    });
+
+    const call = audit.record.mock.calls.find((c: any[]) => c[0].action === 'ATTENDANCE_LOGIN');
+    expect(call[0].newValue.appVersion).toBe('1.1.0+62');
+  });
+
+  it('records a build too old to say its version as legacy', async () => {
+    // Old APKs in the field send no version header; they are still served.
+    const { svc, audit } = build();
+    const res = await svc.handleTap('org-1', dto(), { deviceId: 'dev-1', photoRoll: 99 });
+
+    expect(res.result).toBe('LOGIN_RECORDED');
+    const call = audit.record.mock.calls.find((c: any[]) => c[0].action === 'ATTENDANCE_LOGIN');
+    expect(call[0].newValue.appVersion).toBe('legacy');
+  });
+
   it('still records the tap when the audit write throws', async () => {
     const failing = jest.fn().mockRejectedValue(new Error('audit table unavailable'));
     const { svc, db } = build({ auditImpl: failing });
