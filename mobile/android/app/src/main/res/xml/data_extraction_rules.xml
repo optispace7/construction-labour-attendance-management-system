@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Keep the secure-storage files out of Android's backups (Android 12 and newer).
+
+  Their contents are encrypted with a key held in the phone's keystore, and the
+  keystore is never backed up, so a restored copy after a reinstall is data the
+  app can no longer read. Better left behind than brought back.
+
+  Everything else (the local database with the phone's device id) is still
+  backed up, so a reinstalled phone keeps its place on the Devices page.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+        <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+        <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
+    </device-transfer>
+</data-extraction-rules>

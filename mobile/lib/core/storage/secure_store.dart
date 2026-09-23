@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// Token + device-credential storage backed by the platform keystore/keychain.
@@ -35,8 +36,37 @@ class SecureStore {
 
   /// Writes are bounded too, but a failure is NOT swallowed: callers decide
   /// (login shows the operator an error rather than pretending it signed in).
-  Future<void> _write(String key, String value) =>
-      _storage.write(key: key, value: value).timeout(_writeTimeout);
+  ///
+  /// One failure is repaired first. On some phones the keystore entry that
+  /// encrypts this storage becomes unusable (seen 2026-09-23 after installing
+  /// 1.1.0+21: "StorageCipher.encrypt on a null object reference"). The plugin
+  /// cannot recover from that by itself — every write fails and sign-in is
+  /// impossible — so the storage is wiped down to its keys (MainActivity.kt)
+  /// and the write is tried once more, which makes the plugin start afresh.
+  ///
+  /// Nothing stored could be read in that state anyway. The phone keeps its
+  /// device id in the local database, so it re-registers as the same device
+  /// rather than a new one waiting for approval.
+  Future<void> _write(String key, String value) async {
+    try {
+      await _storage.write(key: key, value: value).timeout(_writeTimeout);
+    } on PlatformException catch (e) {
+      if (kDebugMode) debugPrint('[secure_store] write "$key" failed, resetting: $e');
+      await _reset();
+      await _storage.write(key: key, value: value).timeout(_writeTimeout);
+    }
+  }
+
+  static const _resetChannel = MethodChannel('clams/secure_storage');
+
+  Future<void> _reset() async {
+    try {
+      await _resetChannel.invokeMethod<bool>('reset').timeout(_writeTimeout);
+    } on MissingPluginException {
+      // Not Android (or a test): the plugin's own wipe is the best available.
+      await _storage.deleteAll().timeout(_writeTimeout);
+    }
+  }
 
   Future<void> _delete(String key) async {
     try {
