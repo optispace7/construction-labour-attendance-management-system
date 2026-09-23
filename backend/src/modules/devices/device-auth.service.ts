@@ -8,6 +8,7 @@ import { CryptoService } from '../../common/crypto/crypto.service';
 import { MailService } from '../../common/mail/mail.service';
 import { PushService } from '../../common/push/push.service';
 import { Errors } from '../../common/errors/app.exception';
+import { appVersionFrom } from '../../common/app-version';
 
 type UserRole = 'SUPER_ADMIN' | 'SITE_ADMIN' | 'SUPERVISOR' | 'WATCHMAN';
 
@@ -214,7 +215,11 @@ export class DeviceAuthService {
    * format the first time they do, so the old cost is paid once per device
    * rather than once per request.
    */
-  async validateToken(deviceId: string, token: string): Promise<boolean> {
+  async validateToken(
+    deviceId: string,
+    token: string,
+    appVersionHeader?: string | string[],
+  ): Promise<boolean> {
     const [device] = await this.d1.db
       .select()
       .from(devices)
@@ -225,7 +230,7 @@ export class DeviceAuthService {
     const ok = await this.crypto.verifyToken(device.tokenHash, token);
     if (!ok) return false;
 
-    const data: { tokenHash?: string; lastSeenAt?: Date } = {};
+    const data: { tokenHash?: string; lastSeenAt?: Date; appVersion?: string } = {};
     if (this.crypto.isLegacyTokenHash(device.tokenHash)) {
       data.tokenHash = this.crypto.hashOpaqueToken(token);
     }
@@ -234,6 +239,14 @@ export class DeviceAuthService {
     const now = new Date();
     if (!device.lastSeenAt || now.getTime() - device.lastSeenAt.getTime() > LAST_SEEN_EVERY_MS) {
       data.lastSeenAt = now;
+    }
+    // Which app build this phone runs, for the Devices page. Written only when
+    // it changes — an update or a first sighting — so it costs nothing per
+    // request. Browsers send no version and are not the app, so they are left
+    // blank rather than being shown as an old build.
+    if (device.platform !== 'web') {
+      const appVersion = appVersionFrom(appVersionHeader);
+      if (appVersion !== device.appVersion) data.appVersion = appVersion;
     }
     if (Object.keys(data).length > 0) {
       await this.d1.db.update(devices).set(data).where(eq(devices.id, deviceId));

@@ -1,5 +1,6 @@
 /**
- * Which build of the gate app sent a scan, as the audit trail records it.
+ * Which build of the gate app sent a request — recorded on every scan's audit
+ * row and as each phone's version on the Devices page.
  *
  * Builds from 2026-09-23 on send an `x-app-version` header on every request.
  * Anything older sends nothing and is still served in full — phones in the

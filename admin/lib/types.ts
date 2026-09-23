@@ -164,6 +164,11 @@ export interface Device {
   status: 'PENDING' | 'AUTHORIZED' | 'REVOKED';
   siteId?: string | null;
   lastSeenAt?: string | null;
+  /**
+   * Gate app build this phone last reported, e.g. "1.1.0+19". "legacy" for an
+   * APK too old to send one; null for browsers and phones not seen since.
+   */
+  appVersion?: string | null;
   createdAt: string;
   /** Owning user (web browsers and personal devices); null for shared/legacy devices. */
   user?: { id: string; fullName: string; role: UserRole } | null;

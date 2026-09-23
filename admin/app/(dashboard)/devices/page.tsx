@@ -213,6 +213,36 @@ export default function DevicesPage() {
       render: (d) => siteName(d.siteId),
     },
     {
+      key: 'appVersion',
+      label: 'App version',
+      render: (d) => {
+        if (d.platform === 'web') return '—';
+        if (!d.appVersion) {
+          return (
+            <Tooltip title="Shows once this phone next talks to the server">
+              <Typography variant="caption" color="text.secondary">
+                Not reported yet
+              </Typography>
+            </Tooltip>
+          );
+        }
+        if (d.appVersion === 'legacy') {
+          return (
+            <Tooltip title="An APK from before 23 Sep 2026, which does not report its version. Install the latest app from /download.">
+              <span>
+                <StatusBadge label="Old app — update" tone="warning" />
+              </span>
+            </Tooltip>
+          );
+        }
+        return (
+          <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+            {d.appVersion}
+          </Typography>
+        );
+      },
+    },
+    {
       key: 'lastSeen',
       label: 'Last seen',
       render: (d) => (

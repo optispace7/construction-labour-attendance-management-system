@@ -135,6 +135,7 @@ export const devices = sqliteTable('devices', {
   authorizedBy: text('authorized_by'),
   authorizedAt: integer('authorized_at', { mode: 'timestamp_ms' }),
   lastSeenAt: integer('last_seen_at', { mode: 'timestamp_ms' }),
+  appVersion: text('app_version'),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 }, (t) => ({

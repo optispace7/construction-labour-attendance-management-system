@@ -41,7 +41,7 @@ import { businessDate, minutesOfDay, textToTimeOfDay } from '../../common/time/t
 import { isCardExpired } from './engine/card-validity';
 import { computeWorkHours, ShiftConfig } from './engine/work-hours.engine';
 import { decideTap, distanceMeters, shouldVerifyPhoto } from './engine/tap-decision';
-import { LEGACY_APP_VERSION } from './engine/app-version';
+import { LEGACY_APP_VERSION } from '../../common/app-version';
 import { describeMovement } from './engine/movement-words';
 import { PreviewTapDto, TapDto } from './dto/attendance.dto';
 import { renderDaySummaryPdf } from '../reports/report.renderer';

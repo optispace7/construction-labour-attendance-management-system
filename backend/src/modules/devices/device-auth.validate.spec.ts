@@ -39,6 +39,8 @@ const authorized = (over: Record<string, unknown> = {}) => ({
   status: 'AUTHORIZED',
   tokenHash: crypto.hashOpaqueToken(TOKEN),
   lastSeenAt: new Date(),
+  platform: 'android',
+  appVersion: '1.1.0+19',
   ...over,
 });
 
@@ -63,7 +65,7 @@ describe('DeviceAuthService.validateToken', () => {
     // lastSeenAt was updated on each call — a write per API request, for a
     // figure nobody reads to the second.
     const { svc, update } = build(authorized({ lastSeenAt: new Date() }));
-    await svc.validateToken(DEVICE_ID, TOKEN);
+    await svc.validateToken(DEVICE_ID, TOKEN, '1.1.0+19');
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -72,6 +74,30 @@ describe('DeviceAuthService.validateToken', () => {
     await svc.validateToken(DEVICE_ID, TOKEN);
     // The columns are passed to set() directly now, not wrapped in a `data` key.
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ lastSeenAt: expect.any(Date) }));
+  });
+
+  it('records the app version when a phone reports a new one', async () => {
+    const { svc, update } = build(authorized());
+    await svc.validateToken(DEVICE_ID, TOKEN, '1.1.0+20');
+    expect(update).toHaveBeenCalledWith({ appVersion: '1.1.0+20' });
+  });
+
+  it('does not write when the version is unchanged', async () => {
+    const { svc, update } = build(authorized());
+    await svc.validateToken(DEVICE_ID, TOKEN, '1.1.0+19');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('marks a phone on an app too old to send a version as legacy', async () => {
+    const { svc, update } = build(authorized({ appVersion: null }));
+    await expect(svc.validateToken(DEVICE_ID, TOKEN)).resolves.toBe(true);
+    expect(update).toHaveBeenCalledWith({ appVersion: 'legacy' });
+  });
+
+  it('leaves a web browser without a version', async () => {
+    const { svc, update } = build(authorized({ platform: 'web', appVersion: null }));
+    await svc.validateToken(DEVICE_ID, TOKEN);
+    expect(update).not.toHaveBeenCalled();
   });
 
   it('refuses a legacy hash instead of trying to verify it', async () => {

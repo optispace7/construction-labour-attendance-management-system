@@ -5,7 +5,7 @@ import { AttendanceService } from './attendance.service';
 import { SessionAdminService } from './session-admin.service';
 import { SyncService } from './sync.service';
 import { ConfirmDto, PreviewTapDto, TapDto } from './dto/attendance.dto';
-import { APP_VERSION_HEADER, appVersionFrom } from './engine/app-version';
+import { APP_VERSION_HEADER, appVersionFrom } from '../../common/app-version';
 import {
   BulkLogoutDto,
   BulkReopenDto,
