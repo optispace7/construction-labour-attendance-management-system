@@ -277,9 +277,24 @@ jobs:
           EOF
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
+      # The version is pubspec's x.y.z plus this workflow's run number, so
+      # every published APK has a higher build than the last — Android refuses
+      # an update that does not — and the audit log can name the exact build
+      # that recorded a scan (the app sends it as x-app-version).
+      - name: Work out the app version
+        id: version
+        run: |
+          name=$(grep '^version:' pubspec.yaml | sed -E 's/version: *//; s/\+.*//')
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "build=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "App version: $name+${{ github.run_number }}"
+
       - name: Build release APK
         run: |
           flutter build apk --release \
+            --build-name=${{ steps.version.outputs.name }} \
+            --build-number=${{ steps.version.outputs.build }} \
+            --dart-define=APP_VERSION=${{ steps.version.outputs.name }}+${{ steps.version.outputs.build }} \
             --dart-define=API_BASE_URL=$API_URL \
             --dart-define=PANEL_BASE_URL=$PANEL_URL
 

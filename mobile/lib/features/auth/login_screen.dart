@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
 import '../../core/config/env.dart';
+import '../../core/widgets/app_version_label.dart';
 import '../sos/sos_button.dart';
 import 'auth_controller.dart';
 
@@ -113,6 +114,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   const SizedBox(height: 8),
                   // Works without signing in — site resolved via GPS.
                   const SosButton(),
+                  const SizedBox(height: 16),
+                  const AppVersionLabel(),
                 ],
               ),
             ),

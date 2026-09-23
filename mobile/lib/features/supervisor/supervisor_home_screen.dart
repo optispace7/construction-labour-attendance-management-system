@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../core/providers.dart';
 import '../../core/widgets/api_image.dart';
+import '../../core/widgets/app_version_label.dart';
 import '../aadhaar/aadhaar_verify_screen.dart';
 import '../attendance/attendance_providers.dart';
 import '../attendance/domain/models.dart';
@@ -360,6 +361,7 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
                 value: 'logout',
                 child: ListTile(leading: Icon(Icons.logout), title: Text('Logout')),
               ),
+              PopupMenuItem(enabled: false, child: AppVersionLabel()),
             ],
           ),
         ],

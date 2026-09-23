@@ -1,7 +1,9 @@
 name: clams_mobile
 description: Construction Labour Attendance Management System — mobile app.
 publish_to: "none"
-version: 0.1.0+1
+# The build number after + is replaced in CI by the workflow run number, and
+# the whole value is sent to the server as x-app-version (see Env.appVersion).
+version: 1.1.0+1
 
 environment:
   sdk: ">=3.4.0 <4.0.0"

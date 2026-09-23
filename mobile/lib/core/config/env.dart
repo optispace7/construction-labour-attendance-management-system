@@ -16,6 +16,12 @@ class Env {
   static String get betterAuthBaseUrl =>
       apiBaseUrl.replaceFirst(RegExp(r'/api/v\d+/?$'), '/api/better-auth');
 
+  /// This build's version, as `x.y.z+build`. Set by CI from pubspec's
+  /// version and the workflow run number, the same pair Android shows under
+  /// App info. Sent on every request so the audit trail says which build
+  /// recorded a scan. A local build that sets nothing reports `dev`.
+  static const appVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
+
   /// The admin panel, which is where a password-reset link has to land.
   ///
   /// This one cannot be derived from the API URL: the panel is a different

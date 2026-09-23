@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../../app/theme.dart';
 import '../../../core/providers.dart';
 import '../../../core/time/clock_guard.dart';
+import '../../../core/widgets/app_version_label.dart';
 import '../../../core/widgets/section_header.dart';
 import '../attendance_providers.dart';
 import '../data/attendance_repository.dart';
@@ -615,6 +616,8 @@ class _AttendanceHomeScreenState extends ConsumerState<AttendanceHomeScreen> {
               icon: const Icon(Icons.search),
               label: const Text('Manual / lost card'),
             ),
+            ClamsSpacing.gapXl,
+            const AppVersionLabel(),
           ],
         ),
         ),

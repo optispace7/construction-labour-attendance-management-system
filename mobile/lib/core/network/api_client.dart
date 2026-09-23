@@ -31,6 +31,9 @@ class ApiClient {
           final deviceToken = await _read(() => _store.deviceToken, 'deviceToken');
           if (deviceId != null) options.headers['x-device-id'] = deviceId;
           if (deviceToken != null) options.headers['x-device-token'] = deviceToken;
+          // Which build is talking. The server copies it into the audit row of
+          // every scan, so a bad record can be traced to the app that made it.
+          options.headers['x-app-version'] = Env.appVersion;
           handler.next(options);
         },
         // No retry on 401. A Better Auth session is extended by the server as
