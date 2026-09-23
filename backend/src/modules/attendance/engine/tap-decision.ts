@@ -32,6 +32,8 @@ export type TapDecision =
  *
  * Rules (docs/06-edge-cases.md #1, #4):
  *  - If the tap falls within the cooldown window of the last tap → DUPLICATE.
+ *  - Else if the worker is logged out and the tap predates that logout → DUPLICATE
+ *    (a late copy of the logout's own double read, never a new login).
  *  - Else if the worker's state changed less than the safety gap ago → TOO_SOON.
  *  - Else if an open session exists → LOGOUT (closes it).
  *  - Else → LOGIN.
@@ -68,6 +70,23 @@ export function decideTap(
         cooldownRemainingSeconds: Math.ceil((cooldownMs - elapsedMs) / 1000),
       };
     }
+  }
+
+  // A late copy of a logout. The gate records a double read as two scans a
+  // second apart; when the earlier one is held up (a lost reply, a phone that
+  // queued it) the later one lands first and logs the worker out, and the
+  // earlier one then arrives to find him logged out. Taken at face value it
+  // opens a new session he never asked for, and the checks above both miss it
+  // because they only look forward in time. Nobody can have come back in
+  // before they went out, so a scan older than the logout it follows is that
+  // copy. Checked even when overridden: the watchman confirmed it before the
+  // logout existed, so he was answering a different question.
+  if (
+    !openSession &&
+    lastTap?.tapType === 'LOGOUT' &&
+    tapTime.getTime() < lastTap.clientEventTime.getTime()
+  ) {
+    return { action: 'DUPLICATE', cooldownRemainingSeconds: 0 };
   }
 
   // The instant the worker entered their current state: the login that opened

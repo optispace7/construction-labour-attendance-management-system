@@ -162,6 +162,88 @@ describe('decideTap safety gap', () => {
   });
 });
 
+describe('decideTap late copy of a logout', () => {
+  const t = (iso: string) => new Date(iso);
+  const last = (at: string, tapType: 'LOGIN' | 'LOGOUT') => ({
+    clientEventTime: t(at),
+    tapType,
+  });
+
+  /// W-0080, 21 Sep 2026: two reads a second apart at 20:30:57 and 20:30:58 IST.
+  /// The later one logged him out; the earlier one reached the server seven
+  /// minutes after and opened a session that ran until the 23rd.
+  it('refuses the earlier read that arrives after the logout', () => {
+    const d = decideTap(
+      t('2026-09-21T15:00:57.412Z'),
+      30,
+      null,
+      last('2026-09-21T15:00:58.481Z', 'LOGOUT'),
+      600,
+    );
+    expect(d).toEqual({ action: 'DUPLICATE', cooldownRemainingSeconds: 0 });
+  });
+
+  it('refuses it well outside the cooldown too', () => {
+    // W-0409 the same evening: stamped 35 s before the logout it followed.
+    const d = decideTap(
+      t('2026-09-21T15:08:54Z'),
+      30,
+      null,
+      last('2026-09-21T15:09:29Z', 'LOGOUT'),
+      600,
+    );
+    expect(d.action).toBe('DUPLICATE');
+  });
+
+  it('refuses it even when the watchman overrode', () => {
+    const d = decideTap(
+      t('2026-09-21T15:00:57Z'),
+      30,
+      null,
+      last('2026-09-21T15:00:58Z', 'LOGOUT'),
+      0,
+      true,
+    );
+    expect(d.action).toBe('DUPLICATE');
+  });
+
+  it('still logs in the next morning after a logout', () => {
+    const d = decideTap(
+      t('2026-09-22T05:00:00Z'),
+      30,
+      null,
+      last('2026-09-21T15:00:58Z', 'LOGOUT'),
+      600,
+    );
+    expect(d.action).toBe('LOGIN');
+  });
+
+  it('still lets an overridden re-login straight after a logout through', () => {
+    const d = decideTap(
+      t('2026-09-21T15:01:10Z'),
+      30,
+      null,
+      last('2026-09-21T15:00:58Z', 'LOGOUT'),
+      0,
+      true,
+    );
+    expect(d.action).toBe('LOGIN');
+  });
+
+  it('leaves a tap that predates an open session as a LOGOUT', () => {
+    // Logout-before-login stays out of scope at the gate: only a worker who is
+    // already logged out is protected here.
+    const d = decideTap(
+      t('2026-09-21T07:59:00Z'),
+      30,
+      { id: 's1', loginAt: t('2026-09-21T08:00:00Z'), siteId: 'site1' },
+      last('2026-09-21T08:00:00Z', 'LOGIN'),
+      600,
+    );
+    expect(d).toEqual({ action: 'LOGOUT', sessionId: 's1' });
+  });
+});
+
 describe('distanceMeters', () => {
   it('is ~0 for identical points', () => {
     expect(distanceMeters(12.97, 77.59, 12.97, 77.59)).toBeLessThan(1);
