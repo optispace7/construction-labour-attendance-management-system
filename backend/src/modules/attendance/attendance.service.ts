@@ -473,6 +473,27 @@ export class AttendanceService {
 
       const decision = await this.decide(settings, worker, tapTime, !!dto.override);
 
+      // The gate said what the watchman confirmed. If the scan would now do the
+      // opposite — the worker already went that way, by a copy of this same
+      // double read or at another gate — it is refused rather than flipped.
+      // Checked before the cooldown and gap so the watchman is told the real
+      // reason, and so no "record it anyway" is offered for it. Older apps
+      // send nothing and are left to the rules in decideTap.
+      if (dto.expected) {
+        const current =
+          decision.action === 'LOGIN' || decision.action === 'LOGOUT'
+            ? decision.action
+            : decision.blocked;
+        if (current !== dto.expected) {
+          await this.auditStateChanged(organizationId, worker.id, dto, ctx, current);
+          throw Errors.tapStateChanged({
+            fullName: worker.fullName,
+            expected: dto.expected,
+            current,
+          });
+        }
+      }
+
       if (decision.action === 'DUPLICATE') {
         throw Errors.duplicateTap(decision.cooldownRemainingSeconds);
       }
@@ -636,6 +657,7 @@ export class AttendanceService {
           action: 'DUPLICATE' as const,
           worker: card,
           cooldownRemainingSeconds: decision.cooldownRemainingSeconds,
+          blocked: decision.blocked,
         };
       case 'TOO_SOON':
         return {
@@ -661,6 +683,42 @@ export class AttendanceService {
           };
         }
         return { action: 'LOGIN' as const, worker: card };
+    }
+  }
+
+  /**
+   * A scan refused because the worker had already gone the way it was confirmed
+   * for. Kept in the log — nothing was recorded, but how often it happens, and
+   * from which phone and app build, is what tells us whether gates double-read.
+   */
+  private async auditStateChanged(
+    organizationId: string,
+    workerId: string,
+    dto: TapDto,
+    ctx: TapContext,
+    current: 'LOGIN' | 'LOGOUT',
+  ) {
+    try {
+      await this.audit.record({
+        organizationId,
+        action: 'ATTENDANCE_SCAN_ALREADY_DONE',
+        entityType: 'Worker',
+        entityId: workerId,
+        deviceId: ctx.deviceId,
+        ipAddress: ctx.ip,
+        reason: 'Not recorded: the worker had already gone the way this scan was confirmed for',
+        newValue: {
+          confirmedAs: dto.expected,
+          wouldHaveBeen: current,
+          source: dto.source,
+          siteId: dto.siteId,
+          eventId: dto.eventId,
+          at: dto.clientEventTime,
+          appVersion: ctx.appVersion ?? LEGACY_APP_VERSION,
+        },
+      });
+    } catch (e) {
+      this.logger.error(`Audit write failed for refused scan worker=${workerId}: ${String(e)}`);
     }
   }
 

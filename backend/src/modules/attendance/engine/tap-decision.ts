@@ -14,7 +14,12 @@ export interface LastTapInfo {
 export type TapDecision =
   | { action: 'LOGIN' }
   | { action: 'LOGOUT'; sessionId: string }
-  | { action: 'DUPLICATE'; cooldownRemainingSeconds: number }
+  | {
+      action: 'DUPLICATE';
+      cooldownRemainingSeconds: number;
+      /** What the tap would have been had it not been a duplicate. */
+      blocked: 'LOGIN' | 'LOGOUT';
+    }
   | {
       action: 'TOO_SOON';
       /** What the tap would have been had the gap already passed. */
@@ -68,6 +73,7 @@ export function decideTap(
       return {
         action: 'DUPLICATE',
         cooldownRemainingSeconds: Math.ceil((cooldownMs - elapsedMs) / 1000),
+        blocked: openSession ? 'LOGOUT' : 'LOGIN',
       };
     }
   }
@@ -86,7 +92,7 @@ export function decideTap(
     lastTap?.tapType === 'LOGOUT' &&
     tapTime.getTime() < lastTap.clientEventTime.getTime()
   ) {
-    return { action: 'DUPLICATE', cooldownRemainingSeconds: 0 };
+    return { action: 'DUPLICATE', cooldownRemainingSeconds: 0, blocked: 'LOGIN' };
   }
 
   // The instant the worker entered their current state: the login that opened

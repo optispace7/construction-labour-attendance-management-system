@@ -187,3 +187,73 @@ describe('scan auditing', () => {
     expect(db.writes.some((w) => w.kind === 'insert' && w.table === attendanceSessions)).toBe(true);
   });
 });
+
+/**
+ * The gate sends what the watchman confirmed. A scan that would now do the
+ * opposite — the late copy of a double read, or a second gate that got there
+ * first — is refused instead of flipping the worker back.
+ */
+describe('confirmed direction', () => {
+  const openSession = {
+    session: {
+      id: 'sess-1',
+      workerId: 'w1',
+      siteId: 'site-1',
+      state: 'OPEN',
+      loginAt: new Date('2026-09-21T06:14:10Z'),
+      workDate: '2026-09-21',
+    },
+    shift: null,
+    id: 'sess-1',
+    workerId: 'w1',
+    siteId: 'site-1',
+    state: 'OPEN',
+    loginAt: new Date('2026-09-21T06:14:10Z'),
+    workDate: '2026-09-21',
+  };
+  const evening = { clientEventTime: '2026-09-21T15:00:57Z' };
+
+  it('refuses a LOGOUT that arrives after the worker is already out', async () => {
+    // Pankaj, 21 Sep: the late copy found him logged out and used to log him in.
+    const { svc, db, audit } = build();
+    await expect(
+      svc.handleTap('org-1', dto({ ...evening, expected: 'LOGOUT' }), {
+        deviceId: 'dev-1',
+        appVersion: '1.1.0+21',
+      }),
+    ).rejects.toMatchObject({ code: 'TAP_STATE_CHANGED' });
+
+    expect(db.writes.some((w) => w.table === attendanceSessions)).toBe(false);
+    const call = audit.record.mock.calls.find(
+      (c: any[]) => c[0].action === 'ATTENDANCE_SCAN_ALREADY_DONE',
+    );
+    expect(call[0].newValue).toMatchObject({
+      confirmedAs: 'LOGOUT',
+      wouldHaveBeen: 'LOGIN',
+      appVersion: '1.1.0+21',
+    });
+  });
+
+  it('refuses a LOGIN that arrives after the worker is already in', async () => {
+    // The mirror: a late copy at arrival used to log the worker straight out.
+    const { svc, db } = build({ openSession });
+    await expect(
+      svc.handleTap('org-1', dto({ ...evening, expected: 'LOGIN' }), { deviceId: 'dev-1' }),
+    ).rejects.toMatchObject({ code: 'TAP_STATE_CHANGED' });
+    expect(db.writes.some((w) => w.table === attendanceSessions)).toBe(false);
+  });
+
+  it('records the scan when it is still what was confirmed', async () => {
+    const { svc } = build({ openSession });
+    const res = await svc.handleTap('org-1', dto({ ...evening, expected: 'LOGOUT' }), {
+      deviceId: 'dev-1',
+    });
+    expect(res.result).toBe('LOGOUT_RECORDED');
+  });
+
+  it('leaves an older app that sends no direction to the server to decide', async () => {
+    const { svc } = build();
+    const res = await svc.handleTap('org-1', dto(evening), { deviceId: 'dev-1', photoRoll: 99 });
+    expect(res.result).toBe('LOGIN_RECORDED');
+  });
+});

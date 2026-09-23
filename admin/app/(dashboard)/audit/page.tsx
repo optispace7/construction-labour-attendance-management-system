@@ -62,6 +62,9 @@ const ACTIONS: Record<string, { label: string; tone: BadgeTone }> = {
   ATTENDANCE_LOGIN: { label: 'Scanned in', tone: 'success' },
   ATTENDANCE_LOGOUT: { label: 'Scanned out', tone: 'neutral' },
   ATTENDANCE_MANUAL_BACKUP: { label: 'Manual attendance entry', tone: 'warning' },
+  // A scan the gate confirmed as LOGIN/LOGOUT that arrived after the worker had
+  // already gone that way (a double read, or another gate first). Not recorded.
+  ATTENDANCE_SCAN_ALREADY_DONE: { label: 'Scan ignored — already done', tone: 'neutral' },
   // Super-admin repairs from the "Fix attendance" page.
   ATTENDANCE_SESSION_EDIT: { label: 'Attendance record corrected', tone: 'warning' },
   ATTENDANCE_SESSION_DELETE: { label: 'Attendance record deleted', tone: 'error' },

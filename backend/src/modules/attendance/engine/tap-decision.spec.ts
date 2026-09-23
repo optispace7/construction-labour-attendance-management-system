@@ -180,7 +180,7 @@ describe('decideTap late copy of a logout', () => {
       last('2026-09-21T15:00:58.481Z', 'LOGOUT'),
       600,
     );
-    expect(d).toEqual({ action: 'DUPLICATE', cooldownRemainingSeconds: 0 });
+    expect(d).toEqual({ action: 'DUPLICATE', cooldownRemainingSeconds: 0, blocked: 'LOGIN' });
   });
 
   it('refuses it well outside the cooldown too', () => {

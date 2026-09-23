@@ -68,6 +68,27 @@ export const Errors = {
    * names the person and when the scan will be accepted, because that sentence
    * is what the watchman reads at the gate.
    */
+  /**
+   * The gate confirmed a LOGIN (or LOGOUT) but by the time the scan arrived the
+   * worker had already gone that way — a late copy of a double read, or a
+   * second gate that got there first. Recording it would do the opposite of
+   * what the watchman agreed to, so nothing is recorded.
+   */
+  tapStateChanged: (args: {
+    fullName: string;
+    expected: 'LOGIN' | 'LOGOUT';
+    current: 'LOGIN' | 'LOGOUT';
+  }) =>
+    new AppException({
+      status: 409,
+      code: 'TAP_STATE_CHANGED',
+      title: args.expected === 'LOGOUT' ? 'Already logged out' : 'Already logged in',
+      detail:
+        `${args.fullName} is already ${args.expected === 'LOGOUT' ? 'logged out' : 'logged in'}, ` +
+        `so this ${args.expected === 'LOGOUT' ? 'logout' : 'login'} was not recorded again. ` +
+        'Nothing changed.',
+      meta: { expected: args.expected, current: args.current },
+    }),
   tapTooSoon: (args: {
     fullName: string;
     blocked: 'LOGIN' | 'LOGOUT';

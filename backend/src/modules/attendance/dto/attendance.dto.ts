@@ -4,6 +4,7 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
+  IsIn,
   IsISO8601,
   IsNotEmpty,
   IsNumber,
@@ -107,6 +108,18 @@ export class TapDto {
   @IsOptional()
   @IsString()
   photoUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    enum: ['LOGIN', 'LOGOUT'],
+    description:
+      'What the watchman confirmed on the gate screen. When sent, the scan is ' +
+      'recorded only if it is still that — a copy arriving after the worker has ' +
+      'already gone in or out is refused, not flipped. Older apps omit it.',
+  })
+  @IsOptional()
+  @IsIn(['LOGIN', 'LOGOUT'])
+  expected?: 'LOGIN' | 'LOGOUT';
 }
 
 export class ConfirmDto {
